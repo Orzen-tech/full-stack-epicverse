@@ -29,16 +29,39 @@ async def fetch_user(firebase_id: str):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
+import firebase_admin.auth as auth
+
 @router.websocket("/ws-audio")
 async def websocket_audio(websocket: WebSocket):
-    """Live streaming endpoint to receive audio chunks and process instantly."""
+    """Live streaming endpoint with strict Firebase UID verification."""
     gameMode = websocket.query_params.get("gameMode", "Mode 1")
     sessionId = websocket.query_params.get("sessionId", "default")
-    # New: Check if we should start listening for wake word immediately
+    idToken = websocket.query_params.get("token")
     initial_listening = websocket.query_params.get("listening", "false").lower() == "true"
     
     await websocket.accept()
-    print(f"\n[WS] New Connection - Mode: {gameMode}, Session: {sessionId}, Init Detection: {initial_listening}", flush=True)
+    
+    # 1. Verify Identity (No-Trust Policy)
+    user_uid = None
+    try:
+        if not idToken:
+             raise Exception("No authentication token provided.")
+        
+        decoded_token = auth.verify_id_token(idToken)
+        user_uid = decoded_token.get("uid")
+        print(f"[WS] AUTH SUCCESS: User {user_uid} connected.")
+        
+    except Exception as e:
+        print(f"[WS] AUTH FAILED: {str(e)}")
+        await websocket.send_text(json.dumps({
+            "status": "Error", 
+            "type": "auth_failed",
+            "message": "Authentication failed. Please log in again."
+        }))
+        await websocket.close(code=4001)
+        return
+
+    print(f"\n[WS] New Connection - Mode: {gameMode}, Session: {sessionId}, Profile UID: {user_uid}", flush=True)
     
     # Send an initial message to let the client know we are ready
     await websocket.send_text(json.dumps({"status": "Connected", "message": "Established connection to EpicVerse AI."}))
@@ -107,20 +130,25 @@ async def websocket_audio(websocket: WebSocket):
                     
                     print(f"[WS] Recognized: \"{recognized_text}\" (Lang: {user_lang})", flush=True)
                         
-                    # Run the newly optimized 1-shot AI pipeline with Session ID
-                    ai_result = await run_ai_pipeline(recognized_text, game_mode=gameMode, session_id=sessionId)
+                    # Run the newly optimized 1-shot AI pipeline with Session ID and Verified UID and Language Sync
+                    ai_result = await run_ai_pipeline(recognized_text, game_mode=gameMode, session_id=sessionId, uid=user_uid, user_lang=user_lang)
                     final_text = ai_result.get("final_response")
                     
                     await websocket.send_text(json.dumps({"aiResponse": final_text}))
                     
-                    # Generate TTS
-                    output_audio_bytes = await synthesize_speech(final_text, language_code=user_lang)
+                    # Generate TTS using the AI-verified language (Accurate detection)
+                    real_lang = ai_result.get("detected_lang", user_lang)
+                    output_audio_bytes = await synthesize_speech(final_text, language_code=real_lang)
                     
                     # Feed binary audio bytes cleanly right back down the websocket!
                     await websocket.send_bytes(output_audio_bytes)
                     
-                    # Feed binary audio bytes cleanly right back down the websocket!
-                    await websocket.send_bytes(output_audio_bytes)
+                    if ai_result.get("action") == "change_mode":
+                        # Tell frontend to switch modes
+                        await websocket.send_text(json.dumps({
+                            "type": "mode_change", 
+                            "newMode": ai_result.get("newMode")
+                        }))
                     
                     # AUTO-RESUME Wake Word detection for the next turn!
                     listening_for_wakeword = True
@@ -128,21 +156,28 @@ async def websocket_audio(websocket: WebSocket):
                     chunks_received = 0
                     print(f"[WS] Turn complete. Automatically resumed Wake Word detection.", flush=True)
 
+
                 elif data.get("type") == "text_query":
                     query_text = data.get("text")
                     print(f"[WS] Querying AI: {query_text}", flush=True)
                     await websocket.send_text(json.dumps({"status": "Processing", "message": "Thinking..."}))
                     
-                    # Use the same AI pipeline
-                    ai_result = await run_ai_pipeline(query_text, game_mode=gameMode, session_id=sessionId)
+                    # Use the same AI pipeline with UID verification
+                    ai_result = await run_ai_pipeline(query_text, game_mode=gameMode, session_id=sessionId, uid=user_uid)
                     final_text = ai_result.get("final_response")
                     
                     await websocket.send_text(json.dumps({"aiResponse": final_text}))
                     
-                    # Generate TTS for text queries
-                    detected_lang = "en" # Fallback for text
-                    output_audio_bytes = await synthesize_speech(final_text, language_code=detected_lang)
+                    # Generate TTS for text queries with auto-detection
+                    real_lang = ai_result.get("detected_lang", "en")
+                    output_audio_bytes = await synthesize_speech(final_text, language_code=real_lang)
                     await websocket.send_bytes(output_audio_bytes)
+                    
+                    if ai_result.get("action") == "change_mode":
+                        await websocket.send_text(json.dumps({
+                            "type": "mode_change",
+                            "newMode": ai_result.get("newMode")
+                        }))
     except WebSocketDisconnect:
         pass
         pass
@@ -185,12 +220,11 @@ async def process_voice_audio(
         if not recognized_text:
             raise HTTPException(status_code=400, detail="Could not recognize speech.")
             
-        # Steps 3, 4, 5: AI Processing Pipeline
-        ai_result = await run_ai_pipeline(recognized_text, game_mode=game_mode)
-        final_text = ai_result.get("final_response")
+        # Use the AI-detected language for TTS and logging
+        real_lang = ai_result.get("detected_lang", user_lang)
         
-        # Step 6: Text-To-Speech Synthesis (OpenAI TTS)
-        output_audio_bytes = await synthesize_speech(final_text, language_code=user_lang)
+        # Step 6: Text-To-Speech Synthesis
+        output_audio_bytes = await synthesize_speech(final_text, language_code=real_lang)
         
         # Step 8 & 9: Data Logging and monitoring
         await log_interaction(
@@ -198,7 +232,7 @@ async def process_voice_audio(
             user_id=current_user.get("uid"),
             query=recognized_text,
             response=final_text,
-            user_language=user_lang
+            user_language=real_lang
         )
         
         import urllib.parse
@@ -207,7 +241,7 @@ async def process_voice_audio(
             io.BytesIO(output_audio_bytes), 
             media_type="audio/wav", 
             headers={
-                "X-Detected-Language": urllib.parse.quote(str(user_lang)),
+                "X-Detected-Language": urllib.parse.quote(str(real_lang)),
                 "X-Transcript": urllib.parse.quote(str(recognized_text)),
                 "X-Response-Text": urllib.parse.quote(str(final_text))
             }

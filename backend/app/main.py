@@ -16,18 +16,28 @@ try:
         firebase_admin.initialize_app(cred)
 except Exception as e:
     print(f"Firebase Init Warning: {e}")
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Runs on server startup: preloads all Excel game mode files into RAM."""
     print("Server starting up - loading game mode data from Excel files...")
+    import asyncio
     from app.services.retriever import init_db_pool
-    await init_db_pool()
     
-    await init_db()
+    # DB initialization with timeout to prevent server from hanging forever on startup
+    try:
+        print("Connecting to Database...")
+        await asyncio.wait_for(init_db_pool(), timeout=15)
+        print("Database Pool initialized.")
+        
+        print("Initializing Database Tables...")
+        await asyncio.wait_for(init_db(), timeout=15)
+        print("Database Tables initialized.")
+    except asyncio.TimeoutError:
+        print("CRITICAL: Database connection timed out. Server running without live DB.")
+    except Exception as e:
+        print(f"CRITICAL Error during Database initialization: {e}")
+    
     await load_excel_data()
-    
-    print("Pre-loading Wake Word models...")
     from app.services.wake_word import WakeWordDetector
     WakeWordDetector() # Initialize singleton
     

@@ -5,17 +5,33 @@ from app.services.retriever import query_postgres_database, semantic_search_data
 
 client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-USER_SESSIONS = {}
+from app.services.user_db import get_chat_history, save_chat_history
 
-async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: str = "default") -> dict:
-    """Uses OpenAI Function Calling with conversation memory."""
-    global USER_SESSIONS
-    
-    if session_id not in USER_SESSIONS:
-         USER_SESSIONS[session_id] = []
-         
-    # Keep only the last 10 messages for context so we don't blow up token limits
-    context_msgs = USER_SESSIONS[session_id][-10:]
+async def detect_language(text: str) -> str:
+    """Accurately detects the language of the text using OpenAI (superior to Whisper's detection)."""
+    try:
+        response = await client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a language detection expert. Output ONLY the 2-letter ISO language code (e.g., 'en', 'ta', 'ml', 'fr', 'es'). If it's a mix, pick the primary one spoken."},
+                {"role": "user", "content": f"Detect the language of this text: \"{text}\""}
+            ],
+            max_tokens=5,
+            temperature=0
+        )
+        detected = response.choices[0].message.content.strip().lower()
+        return detected if len(detected) <= 5 else "en"
+    except:
+        return "en"
+
+async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: str = "default", uid: str = "test_user", user_lang: str = "English") -> dict:
+    """Uses OpenAI with Database-backed memory (Strict UID Isolation)."""
+    # 1. NEW: Accurate Language Detection Overlay
+    detected_lang = await detect_language(text)
+    print(f"[AI] Detected Language: {detected_lang} (Previous hint: {user_lang})")
+
+    # 1. Fetch history for this SPECIFIC UID from verified token
+    context_msgs = await get_chat_history(uid)
     
     # 1. Provide the exact SYSTEM ROLE instructions
     system_prompt = f"""SYSTEM ROLE
@@ -41,9 +57,10 @@ gameplay_mode (e.g., 'Mode 1', 'Mode 2'), character, virtue_karma, combo_status,
 
 MODE PROGRESSION RULES
 
-1. The game always starts with Mode 1 unlocked.
-2. Mode 2 unlocks after Mode 1. Mode 3 after Mode 2.
-3. Assume the user unlocked the current mode unless the DB query fails.
+1. The game always starts with Mode 1.
+2. If the user explicitly states they have completed the current mode or want to move to the next mode, use the `change_game_mode` tool.
+3. Calculate the new mode by incrementing the number (e.g., if current is 'Mode 1', switch to 'Mode 2').
+4. Always respond naturally congratulating and confirming the mode change if applicable.
 
 ---
 
@@ -55,7 +72,7 @@ Examples: "Is 1 and 29 a combo?", "Why is 1 and 29 valid?"
 ---
 
 PROCESSING RULES
-s
+
 1. Extract two numbers from the user's question. 
    CRITICAL: You MUST convert all number words into digits. (e.g., "one" -> "1").
 2. Determine which mode the player has selected (Current Mode: {game_mode or 'Mode 1'}).
@@ -75,9 +92,11 @@ s
      CRITICAL: You MUST translate the reasoning into the user's CURRENT language.
      Example: "This combo is valid because [Reason]. Reference: [Kanda], [Reference]."
 
-6. LANG DETECTION:
-   Always respond in the EXACT same language the user just used for their last message.
-   (e.g., if user asks 'Why?', respond in English. If user asks 'ஏன்?', respond in Tamil).
+6. LANG DETECTION & SYNC:
+   - The user's input has been detected as: {detected_lang}.
+   - You MUST respond in the EXACT same language as the user's current query. 
+   - (e.g., if user asks in Tamil, respond in Tamil. If English, respond in English).
+   - NEVER switch to English unless the user switches to English.
 
 RAG (SEMANTIC SEARCH) RULES:
 1. If the user asks a question that is NOT about a specific card combo (e.g., "Tell me a story about Rama"), use the 'semantic_search_database' tool.
@@ -114,6 +133,20 @@ NEVER switch languages unless the user switches first."""
                         "query": {"type": "string", "description": "The natural language query or topic to search for."}
                     },
                     "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "change_game_mode",
+                "description": "Changes the game mode if the user requests it or indicates they completed the current mode.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "new_mode": {"type": "string", "description": "The new mode to switch to, e.g. 'Mode 2'."}
+                    },
+                    "required": ["new_mode"]
                 }
             }
         }
@@ -171,6 +204,19 @@ NEVER switch languages unless the user switches first."""
                         "content": str(db_result)
                     }
                     messages.append(tool_msg)
+                elif tool_call.function.name == "change_game_mode":
+                    args = json.loads(tool_call.function.arguments)
+                    new_mode = args.get('new_mode')
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "content": f"Successfully initiated mode switch to {new_mode}."
+                    }
+                    messages.append(tool_msg)
+                    
+                    # Storing action to return to caller
+                    response_dict = {"action": "change_mode", "newMode": new_mode}
             
             # 4. Generate the final response grounded in the DB results and translated
             final_response = await client.chat.completions.create(
@@ -185,11 +231,16 @@ NEVER switch languages unless the user switches first."""
         # Minimal console log for status
         print(f"[AI] Response sent: {final_text[:50]}...", flush=True)
         
-        # 5. Cleanly store only text-based history to avoid future tool conflicts
-        USER_SESSIONS[session_id].append({"role": "user", "content": text})
-        USER_SESSIONS[session_id].append({"role": "assistant", "content": final_text})
+        # 5. Cleanly store only text-based history to the database
+        await save_chat_history(uid, session_id, "user", text)
+        await save_chat_history(uid, session_id, "assistant", final_text)
         
-        return {"final_response": final_text}
+        # Prepare final output
+        final_output = {"final_response": final_text, "detected_lang": detected_lang}
+        if 'response_dict' in locals():
+            final_output.update(response_dict)
+            
+        return final_output
 
     except Exception as e:
         print(f"--- AI PIPELINE ERROR ---")

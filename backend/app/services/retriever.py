@@ -29,6 +29,8 @@ async def load_excel_data():
 async def get_available_modes():
     """Fetches unique game modes from the PostgreSQL database."""
     await init_db_pool()
+    if not db_pool:
+        return ["Mode 1", "Mode 2"]
     async with db_pool.acquire() as conn:
         try:
             rows = await conn.fetch("SELECT DISTINCT gameplay_mode FROM card_combos WHERE gameplay_mode IS NOT NULL")
@@ -58,6 +60,8 @@ async def semantic_search_database(query: str, limit: int = 3) -> str:
     vec_str = "[" + ",".join(map(str, embedding)) + "]"
     
     await init_db_pool()
+    if not db_pool:
+        return "The knowledge base is currently offline."
     async with db_pool.acquire() as conn:
         try:
             # Semantic search using cosine distance (<=> operator in pgvector)
@@ -106,6 +110,8 @@ async def query_postgres_database(mode: str, character: str, karma: str) -> str:
             formatted_mode = formatted_mode.title()
     
     await init_db_pool()
+    if not db_pool:
+        return f"Database lookup failed for {formatted_mode}. Using offline mode."
     async with db_pool.acquire() as conn:
         try:
             # Search by name OR by card number (Order Independent)

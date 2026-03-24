@@ -100,7 +100,7 @@ async def import_mode(file_path):
         await conn.close()
 
 async def main():
-    base_path = 'e:/kriyora/model_try/backend/data/'
+    base_path = 'e:/kriyora/EpicVerse/backend/data/'
     for i in range(3, 6):
         file_path = os.path.join(base_path, f'EpicVerse_Mode_{i}.xlsx')
         if os.path.exists(file_path):
