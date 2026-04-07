@@ -7,14 +7,11 @@
 **/*$py.class
 **/*.so
 **/.Python
-**/build/
 **/develop-eggs/
 **/dist/
 **/downloads/
 **/eggs/
 **/.eggs/
-**/lib/
-**/lib64/
 **/parts/
 **/sdist/
 **/var/
@@ -23,7 +20,7 @@
 **/.installed.cfg
 **/*.egg
 
-# Flutter/Dart
+# Flutter/Dart build artifacts
 **/.dart_tool/
 **/.flutter-plugins
 **/.flutter-plugins-dependencies
@@ -31,16 +28,20 @@
 **/.pub-cache/
 **/.pub/
 **/build/
+
+# Flutter platform directories (auto-generated, not source)
 **/ios/
-**/android/
 **/linux/
 **/macos/
 **/windows/
-**/*.txt
+
+# Backend tmp files
+backend/tmp/
+backend/tmp_*.py
+build_latest.log
 
 # IDEs
 **/.vscode/
 **/.idea/
 **/*.swp
 **/*.swo
-

@@ -1,0 +1,33 @@
+=== TABLES ===
+ - card_combos (2988 rows)
+ - users (5 rows)
+ - chat_history (28 rows)
+
+=== USERS (ALL) ===
+ID: vOw5ilThgfSQBhdRelnT2v0nwto1 | Email: gayathiri@kriyora.com | Mode: Mode 1
+ID: kbKoc8glr7Wdubjnc1FlgjpMblg1 | Email: vimalct03@gmail.com | Mode: Mode 1
+ID: KJvgwwJDpTZ0KR473E9calrV9A93 | Email: nm77684092@gmail.com | Mode: Mode 1
+ID: TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | Email: niranjan3325@gmail.com | Mode: Mode 1
+ID: SPYgTcWO6lPEWZWacgP590xGliB2 | Email: mari4185@gmail.com | Mode: Mode 1
+
+=== CHAT HISTORY (LAST 20) ===
+User SPYgTcWO6lPEWZWacgP590xGliB2 | ASSISTANT: I'm sorry, but I don't have that information. Is there something else you'd like to know about card combinations?
+User SPYgTcWO6lPEWZWacgP590xGliB2 | USER: what is my name
+User SPYgTcWO6lPEWZWacgP590xGliB2 | ASSISTANT: Lo siento, pero no puedo ayudar con eso. ¿Tienes alguna pregunta sobre combinaciones de cartas?
+User SPYgTcWO6lPEWZWacgP590xGliB2 | USER: Subtítulos realizados por la comunidad de Amara.org
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: Congratulations! You've successfully moved to Mode 2! 🎉 If you have any questions or need assistance in this mode, just let me know!
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: Yes, go to next mode.
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: Currently, you are in Mode 1. If you want to progress to the next mode, just let me know!
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: how many modes did I completed
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: You're welcome! If you have any questions later, feel free to reach out. Have a great day! 😊
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: Thank you for watching!
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: 감사합니다! 질문이 더 있으면 언제든지 말씀해 주세요. 좋은 하루 되세요! 😊
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: 오늘 영상은 여기까지입니다. 감사합니다.
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: You're welcome! If you need anything else or have more questions, feel free to ask. Have a wonderful day! 😊
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: Thank you for watching.
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: You're welcome! If you have any more questions or need assistance, just let me know. Enjoy your day! 😊
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: Thank you for watching!
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: Goodbye! If you have more questions in the future, feel free to ask. Have a great day! 😊
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: Okay, bye.
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | ASSISTANT: This combo is valid because in Valmiki’s Ayodhyā Kāṇḍa, Rama is framed through coronation preparations; accepts exile; forest departure, aligning directly with the virtue “Courage”. Therefore, Rama + Courage is valid in Crownshift (Mode 2). Reference: Ayodhyā Kāṇḍa, coronation preparations; accepts exile; forest departure.
+User TJJGSeHmWgYjFd2BPg7im4Hl5gA2 | USER: why it's a valid combo?

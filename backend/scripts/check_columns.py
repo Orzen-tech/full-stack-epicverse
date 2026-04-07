@@ -1,20 +1,18 @@
-import asyncpg
-import asyncio
+import pandas as pd
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+data_dir = "e:/kriyora/EpicVerse/backend/data"
+files = [
+    "Mode 2 - CrownShift (Ayodhya Kanda).xlsx",
+    "Mode 4 - GlowLine (Kishkindha Kanda).xlsx", 
+    "Mode 6 - WarRoom (Yuddha Kanda).xlsx",
+    "Mode 7 - Afterlight (Uttara Kanda).xlsx"
+]
 
-async def run():
-    conn = await asyncpg.connect(os.getenv('DATABASE_URL'))
-    rows = await conn.fetch('SELECT * FROM card_combos LIMIT 1')
-    if rows:
-        cols = list(rows[0].keys())
-        for col in cols:
-            print(col)
+for file in files:
+    path = os.path.join(data_dir, file)
+    if os.path.exists(path):
+        df = pd.read_excel(path)
+        print(f"{file} -> {df.columns.tolist()}")
     else:
-        print("No rows found in card_combos")
-    await conn.close()
-
-if __name__ == "__main__":
-    asyncio.run(run())
+        print(f"File NOT FOUND: {file}")

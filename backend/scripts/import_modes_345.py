@@ -13,79 +13,71 @@ async def import_mode(file_path):
     df = pd.read_excel(file_path)
     df = df.replace({np.nan: None})
     
-    # Generic mapping variations found across Excel files
+    # Precise mapping for Mode 3/4/5 Excel structure
     mapping = {
+        'Game Play Mode': 'gameplay_mode',
         'Gameplay Mode': 'gameplay_mode',
-        'Level Name': 'level_name',
-        'Kāṇḍa': 'kanda',
-        'Ka': 'kanda', # Fallback
         'Character': 'character',
-        'Character Subtitle': 'character_subtitle',
-        'Combo Type': 'combo_type',
-        'Virtue Category': 'virtue_category',
-        'Virtue / Karma': 'virtue_karma',
-        'Virtue/Karma': 'virtue_karma', # Fallback
-        'Card Subtitle': 'card_subtitle',
-        'Karma Polarity': 'karma_polarity',
-        'Karma Direction (at play)': 'karma_direction',
-        'Karma Direction': 'karma_direction', # Fallback
-        'Combo Status (Base)': 'combo_status',
-        'Combo Status': 'combo_status', # Fallback
-        'Validation Reason (Valmiki-based)': 'validation_reason',
-        'Validation Reason': 'validation_reason', # Fallback
-        'Validation': 'validation_reason', # Fallback
-        'Valmiki Reference Anchor': 'valmiki_reference_anchor',
-        'Intensity Score': 'intensity_score',
-        'Rank (1=Highest)': 'rank',
-        'Rank': 'rank', # Fallback
-        'Character Card Number': 'character_card_number',
-        'Virtu/Karma Card Number': 'virtue_karma_card_number',
-        'Virtue/Karma Card Number': 'virtue_karma_card_number', # Fallback
-        'Avatar ExplainRanking (Short)': 'avatar_explain',
-        'Avatar Explain': 'avatar_explain', # Fallback
-        'Avatar Follow-up (Firm)': 'avatar_followup',
-        'Avatar Followup': 'avatar_followup', # Fallback
-        'App Explanation (if Excluded)': 'app_explanation',
-        'App Explanation': 'app_explanation', # Fallback
-        'Final Status (Mode 3)': 'final_status',
-        'Final Status (Mode 4)': 'final_status',
-        'Final Status (Mode 5)': 'final_status',
-        'Final Status': 'final_status', # Fallback
-        'Combo Display': 'combo_display',
-        'Avatar Dispute Response (Default)': 'avatar_dispute_response',
-        'Avatar Dispute Response (Witty Options)': 'avatar_dispute_witty'
+        'Character Card No.': 'character_card_number',
+        'Attribute': 'attribute',
+        'Attribute Card No': 'attribute_card_no',
+        'Final Segment': 'final_segment',
+        'App Message (Crisp)': 'revised_scholar_reason',
+        'Status': 'final_status',
+        'Final Status': 'final_status',
+        'Kāṇḍa': 'kanda',
+        'Kanda': 'kanda'
     }
     
     conn = await asyncpg.connect(DATABASE_URL)
     try:
-        table_cols_res = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name = 'card_combos'")
-        table_cols = [c['column_name'] for c in table_cols_res]
-        
-        final_mapping = {}
-        for excel_col, db_col in mapping.items():
-            if excel_col in df.columns and db_col in table_cols and db_col not in final_mapping.values():
-                final_mapping[excel_col] = db_col
-        
-        db_columns = list(final_mapping.values())
-        excel_columns = list(final_mapping.keys())
-        
-        # Determine actual mode name from data if possible
-        if 'Gameplay Mode' in df.columns:
+        # Determine actual mode name
+        actual_mode = "Unknown"
+        if 'Game Play Mode' in df.columns:
+            actual_mode = str(df['Game Play Mode'].iloc[0])
+        elif 'Gameplay Mode' in df.columns:
             actual_mode = str(df['Gameplay Mode'].iloc[0])
-        else:
-            actual_mode = "Unknown"
             
         print(f"Detected Mode name in Excel: {actual_mode}")
+        
+        # Clean existing data for this mode
         print(f"Cleaning existing data for {actual_mode}...")
         await conn.execute("DELETE FROM card_combos WHERE gameplay_mode = $1", actual_mode)
         
-        cols_str = ", ".join(db_columns)
-        vals_str = ", ".join([f"${i+1}" for i in range(len(db_columns))])
+        # Build insertion query
+        db_cols = []
+        excel_cols = []
+        for excel_col, db_col in mapping.items():
+            if excel_col in df.columns:
+                db_cols.append(db_col)
+                excel_cols.append(excel_col)
+        
+        # Remove duplicates from db_cols if multiple excel cols map to same db col
+        unique_db_cols = []
+        unique_excel_cols = []
+        seen_db_cols = set()
+        for ec, dc in zip(excel_cols, db_cols):
+            if dc not in seen_db_cols:
+                unique_db_cols.append(dc)
+                unique_excel_cols.append(ec)
+                seen_db_cols.add(dc)
+
+        cols_str = ", ".join(unique_db_cols)
+        vals_str = ", ".join([f"${i+1}" for i in range(len(unique_db_cols))])
         query = f"INSERT INTO card_combos ({cols_str}) VALUES ({vals_str})"
         
         records_to_insert = []
         for _, row in df.iterrows():
-            record = [row[col] for col in excel_columns]
+            record = []
+            for col in unique_excel_cols:
+                val = row[col]
+                # Force integers for card numbers
+                if 'card_number' in mapping.get(col, '') or 'card_no' in mapping.get(col, ''):
+                    try:
+                        val = int(float(val)) if val is not None else 0
+                    except:
+                        val = 0
+                record.append(val)
             records_to_insert.append(record)
             
         print(f"Inserting {len(records_to_insert)} records...")
@@ -96,15 +88,20 @@ async def import_mode(file_path):
         
     except Exception as e:
         print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         await conn.close()
 
 async def main():
     base_path = 'e:/kriyora/EpicVerse/backend/data/'
-    for i in range(3, 6):
-        file_path = os.path.join(base_path, f'EpicVerse_Mode_{i}.xlsx')
+    # Mode 3: AranyaKanda, Mode 5: SundaraKanda
+    for i in [3, 5]:
+        file_path = os.path.join(base_path, f'mode{i}.xlsx')
         if os.path.exists(file_path):
             await import_mode(file_path)
+        else:
+            print(f"Skipping {file_path} (not found)")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,151 +1,447 @@
-import os
+import hashlib
+import json
+import asyncio
+from typing import Any
+
 import asyncpg
 import openai
-from app.core.config import settings
-from dotenv import load_dotenv
+from redis.asyncio import Redis
 
-load_dotenv()
+from app.core.config import settings
 
 client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Global Database Pool
-db_pool = None
+EXACT_LOOKUP_SQL = """
+SELECT
+    cc.id,
+    cc.gameplay_mode,
+    cc.character_card_number,
+    cc.attribute_card_no,
+    cc.final_segment,
+    cc.final_status,
+    cc.revised_scholar_reason
+FROM card_combos AS cc
+WHERE cc.character_card_number = $1
+  AND cc.attribute_card_no = $2
+  AND cc.gameplay_mode = $3
+LIMIT 1
+"""
 
-async def init_db_pool():
-    """Initializes the global database pool if it doesn't exist."""
+SEMANTIC_SEARCH_SQL = """
+SELECT
+    cc.id,
+    cc.gameplay_mode,
+    cc.character_card_number,
+    cc.attribute_card_no,
+    cc.final_segment,
+    cc.final_status,
+    cc.revised_scholar_reason,
+    1 - (ce.embedding <=> $1::vector) AS similarity
+FROM card_embeddings AS ce
+JOIN card_combos AS cc
+  ON cc.id = ce.combo_id
+WHERE 1 - (ce.embedding <=> $1::vector) >= $2
+ORDER BY ce.embedding <=> $1::vector
+LIMIT $3
+"""
+
+SCHEMA_SQL = [
+    "CREATE EXTENSION IF NOT EXISTS vector",
+    """
+    CREATE TABLE IF NOT EXISTS card_combos (
+        id BIGSERIAL PRIMARY KEY,
+        gameplay_mode TEXT,
+        character TEXT,
+        character_card_number INTEGER NOT NULL,
+        attribute TEXT,
+        attribute_card_no INTEGER NOT NULL,
+        final_segment TEXT NOT NULL,
+        final_status TEXT,
+        revised_scholar_reason TEXT,
+        valmiki_reference_anchor TEXT,
+        kanda TEXT,
+        shloka TEXT,
+        explanation_summarized TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS card_embeddings (
+        combo_id BIGINT PRIMARY KEY REFERENCES card_combos(id) ON DELETE CASCADE,
+        embedding vector(1536) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_card_combos_lookup
+    ON card_combos (character_card_number, attribute_card_no, gameplay_mode)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_card_combos_covering_lookup
+    ON card_combos (character_card_number, attribute_card_no)
+    INCLUDE (final_segment, final_status, revised_scholar_reason)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_card_embeddings_hnsw_cosine
+    ON card_embeddings
+    USING hnsw (embedding vector_cosine_ops)
+    """,
+]
+
+db_pool: asyncpg.Pool | None = None
+redis_client: Redis | None = None
+_REDIS_ENABLED: bool = True
+
+KNOWLEDGE_BASE_CACHE: list[dict[str, Any]] = []
+
+
+async def init_db_pool() -> asyncpg.Pool:
     global db_pool
-    if not db_pool:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(
+            settings.ASYNC_DATABASE_URL,
+            min_size=settings.DB_POOL_MIN_SIZE,
+            max_size=settings.DB_POOL_MAX_SIZE,
+            max_inactive_connection_lifetime=300,
+            command_timeout=settings.DB_COMMAND_TIMEOUT_SECONDS,
+        )
     return db_pool
 
-# Backwards compatibility for main.py list_modes
-KNOWLEDGE_BASE_CACHE = []
 
-async def load_excel_data():
-    """No longer used, using PostgreSQL directly."""
-    pass
+async def close_db_pool() -> None:
+    global db_pool
+    if db_pool is not None:
+        await db_pool.close()
+        db_pool = None
 
-async def get_available_modes():
-    """Fetches unique game modes from the PostgreSQL database."""
-    await init_db_pool()
-    if not db_pool:
-        return ["Mode 1", "Mode 2"]
-    async with db_pool.acquire() as conn:
+
+async def init_redis() -> Redis | None:
+    global redis_client, _REDIS_ENABLED
+    if not _REDIS_ENABLED:
+        return None
+    if redis_client is None and settings.REDIS_URL:
         try:
-            rows = await conn.fetch("SELECT DISTINCT gameplay_mode FROM card_combos WHERE gameplay_mode IS NOT NULL")
-            return [row['gameplay_mode'] for row in rows]
+            redis_client = Redis.from_url(
+                settings.REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_timeout=2.0,
+                socket_connect_timeout=2.0,
+                health_check_interval=30,
+            )
+            # Fast-Fail Check
+            await asyncio.wait_for(redis_client.ping(), timeout=2.0)
         except Exception as e:
-            print(f"Error fetching modes: {e}")
-            return ["Mode 1", "Mode 2"] # Fallback
+            if _REDIS_ENABLED:
+                print(f"[INFRA] Redis Offline: Disabling Semantic Cache.")
+            redis_client = None
+            _REDIS_ENABLED = False
+    return redis_client
 
-async def get_embedding(text: str):
-    """Generates embedding for the given text using OpenAI."""
-    try:
-        response = await client.embeddings.create(
-            input=[text.replace("\n", " ")],
-            model="text-embedding-3-small"
+
+async def close_redis() -> None:
+    global redis_client
+    if redis_client is not None:
+        await redis_client.aclose()
+        redis_client = None
+
+
+async def load_excel_data() -> None:
+    return None
+
+
+async def ensure_card_search_schema() -> None:
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Sanitize Duplicates (Keep most recent entry for each combo)
+            await conn.execute('''
+                DELETE FROM card_combos a USING (
+                    SELECT MIN(id) as id, character_card_number, attribute_card_no, gameplay_mode
+                    FROM card_combos 
+                    GROUP BY character_card_number, attribute_card_no, gameplay_mode 
+                    HAVING COUNT(*) > 1
+                ) b
+                WHERE a.character_card_number = b.character_card_number 
+                AND a.attribute_card_no = b.attribute_card_no
+                AND a.gameplay_mode = b.gameplay_mode
+                AND a.id > b.id
+            ''')
+            
+            for statement in SCHEMA_SQL:
+                await conn.execute(statement)
+
+            # Ensure combo_id is a PRIMARY KEY to support ON CONFLICT
+            pk_check = await conn.fetchval("""
+                SELECT count(*) FROM pg_constraint 
+                WHERE conrelid = 'card_embeddings'::regclass AND contype = 'p'
+            """)
+            if pk_check == 0:
+                print("[INFRA] Database Repair: Establishing Primary Key on card_embeddings...")
+                await conn.execute("ALTER TABLE card_embeddings ADD PRIMARY KEY (combo_id)")
+
+            await _migrate_embeddings(conn)
+
+
+async def _migrate_embeddings(conn: asyncpg.Connection) -> None:
+    has_embedding_column = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'card_combos'
+              AND column_name = 'embedding'
         )
-        return response.data[0].embedding
-    except Exception as e:
-        print(f"Embedding Generation Error: {e}")
+        """
+    )
+    if not has_embedding_column:
+        return
+
+    await conn.execute(
+        """
+        INSERT INTO card_embeddings (combo_id, embedding)
+        SELECT id, embedding
+        FROM card_combos
+        WHERE embedding IS NOT NULL
+        ON CONFLICT (combo_id) DO NOTHING
+        """
+    )
+
+
+async def get_available_modes() -> list[str]:
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT gameplay_mode
+            FROM card_combos
+            WHERE gameplay_mode IS NOT NULL
+            ORDER BY gameplay_mode
+            """
+        )
+    return [row["gameplay_mode"] for row in rows]
+
+
+def _cache_key(prefix: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"epicverse:{prefix}:{digest}"
+
+
+async def _cache_get(key: str) -> str | None:
+    if not _REDIS_ENABLED:
+        return None
+    client_instance = await init_redis()
+    if client_instance is None:
+        return None
+    try:
+        return await client_instance.get(key)
+    except Exception:
         return None
 
-async def semantic_search_database(query: str, limit: int = 3) -> str:
-    """Performs a vector search on the database to find semantically relevant card combos."""
+
+async def _cache_set(key: str, value: Any, ttl: int) -> None:
+    if not _REDIS_ENABLED:
+        return
+    client_instance = await init_redis()
+    if client_instance is None:
+        return
+    try:
+        await client_instance.set(key, json.dumps(value), ex=ttl)
+    except Exception:
+        return
+
+
+async def get_embedding(text: str) -> list[float] | None:
+    try:
+        response = await client.embeddings.create(
+            input=[text.replace("\n", " ").strip()],
+            model=settings.EMBEDDING_MODEL,
+        )
+        return response.data[0].embedding
+    except Exception as exc:
+        print(f"Embedding Generation Error: {exc}")
+        return None
+
+
+def _normalize_card_numbers(first: int, second: int) -> tuple[int, int]:
+    if first <= 24 < second:
+        return first, second
+    if second <= 24 < first:
+        return second, first
+    return first, second
+
+
+def _record_to_dict(row: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "gameplay_mode": row["gameplay_mode"],
+        "character_card_number": row["character_card_number"],
+        "attribute_card_no": row["attribute_card_no"],
+        "final_segment": row["final_segment"],
+        "final_status": row["final_status"],
+        "revised_scholar_reason": row["revised_scholar_reason"],
+    }
+
+
+async def get_segment_exact(character_card_number: int, attribute_card_no: int, gameplay_mode: str) -> dict[str, Any] | None:
+    character_card_number, attribute_card_no = _normalize_card_numbers(
+        character_card_number,
+        attribute_card_no,
+    )
+    key = _cache_key(
+        "exact_lookup",
+        {
+            "character_card_number": character_card_number,
+            "attribute_card_no": attribute_card_no,
+            "gameplay_mode": gameplay_mode,
+        },
+    )
+    cached = await _cache_get(key)
+    if cached:
+        return json.loads(cached)
+
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            EXACT_LOOKUP_SQL,
+            character_card_number,
+            attribute_card_no,
+            gameplay_mode,
+        )
+
+    if row is None:
+        return None
+
+    payload = _record_to_dict(row)
+    await _cache_set(key, payload, settings.REDIS_LOOKUP_TTL_SECONDS)
+    return payload
+
+
+async def semantic_search_segments(
+    query: str,
+    limit: int = 5,
+    similarity_threshold: float = 0.70,
+) -> list[dict[str, Any]]:
+    key = _cache_key(
+        "semantic_lookup",
+        {
+            "query": query,
+            "limit": limit,
+            "similarity_threshold": similarity_threshold,
+        },
+    )
+    cached = await _cache_get(key)
+    if cached:
+        return json.loads(cached)
+
     embedding = await get_embedding(query)
-    if not embedding:
-        return "Error generating embedding for search."
-        
-    vec_str = "[" + ",".join(map(str, embedding)) + "]"
-    
-    await init_db_pool()
-    if not db_pool:
-        return "The knowledge base is currently offline."
-    async with db_pool.acquire() as conn:
-        try:
-            # Semantic search using cosine distance (<=> operator in pgvector)
-            # We filter for rows that actually have an embedding
-            sql = '''
-                SELECT gameplay_mode, character, virtue_karma, validation_reason, valmiki_reference_anchor, kanda,
-                       1 - (embedding <=> $1) as similarity
-                FROM card_combos
-                WHERE embedding IS NOT NULL
-                ORDER BY embedding <=> $1
-                LIMIT $2
-            '''
-            rows = await conn.fetch(sql, vec_str, limit)
-            
-            if not rows:
-                return "No semantically similar combos found."
-                
-            results = []
-            for row in rows:
-                results.append(
-                    f"[Similarity: {row['similarity']:.3f}] Mode: {row['gameplay_mode']}, "
-                    f"Combo: {row['character']} + {row['virtue_karma']}\n"
-                    f"Reason: {row['validation_reason']}\n"
-                    f"Ref: {row['kanda']}, {row['valmiki_reference_anchor']}\n"
-                )
-            return "\n---\n".join(results)
-            
-        except Exception as e:
-            print(f"Semantic Search Error: {e}")
-            return f"Error performing semantic search: {str(e)}"
+    if embedding is None:
+        return []
+
+    vector = "[" + ",".join(str(value) for value in embedding) + "]"
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            SEMANTIC_SEARCH_SQL,
+            vector,
+            similarity_threshold,
+            limit,
+        )
+
+    results = []
+    for row in rows:
+        item = _record_to_dict(row)
+        item["similarity"] = float(row["similarity"])
+        results.append(item)
+
+    await _cache_set(key, results, settings.REDIS_SEMANTIC_TTL_SECONDS)
+    return results
+
+
+def _extract_card_numbers(query: str) -> tuple[int, int] | None:
+    tokens = []
+    current = []
+    for char in query:
+        if char.isdigit():
+            current.append(char)
+        elif current:
+            tokens.append(int("".join(current)))
+            current = []
+    if current:
+        tokens.append(int("".join(current)))
+    if len(tokens) < 2:
+        return None
+    return _normalize_card_numbers(tokens[0], tokens[1])
+
+
+async def resolve_segment_lookup(
+    character_card_number: int | None = None,
+    attribute_card_no: int | None = None,
+    query: str | None = None,
+    game_mode: str = "Mode 1 Origin Arc( Balakanda)",
+) -> dict[str, Any]:
+    if character_card_number is not None and attribute_card_no is not None:
+        exact = await get_segment_exact(character_card_number, attribute_card_no, game_mode)
+        return {
+            "lookup_type": "exact",
+            "result": exact,
+        }
+
+    if query:
+        numbers = _extract_card_numbers(query)
+        if numbers is not None:
+            exact = await get_segment_exact(numbers[0], numbers[1], game_mode)
+            if exact is not None:
+                return {
+                    "lookup_type": "exact",
+                    "result": exact,
+                }
+
+        semantic = await semantic_search_segments(query)
+        return {
+            "lookup_type": "semantic",
+            "result": semantic,
+        }
+
+    return {
+        "lookup_type": "none",
+        "result": None,
+    }
+
+
+async def semantic_search_database(query: str, limit: int = 3) -> str:
+    results = await semantic_search_segments(query=query, limit=limit)
+    if not results:
+        return "No semantically similar combos found."
+    return "\n---\n".join(
+        [
+            (
+                f"[Similarity: {item['similarity']:.3f}] "
+                f"{item['character_card_number']} + {item['attribute_card_no']}\n"
+                f"{item.get('final_status') or ''}\n"
+                f"{item.get('revised_scholar_reason') or item.get('final_segment') or ''}"
+            ).strip()
+            for item in results
+        ]
+    )
+
 
 async def query_postgres_database(mode: str, character: str, karma: str) -> str:
-    """Queries the live PostgreSQL database for the specified combo in the given mode."""
-    # Ensure mode name matches the format in the DB (e.g., "Mode 1")
-    # Handle formats like "mode_1", "mode1", "Mode 1"
-    formatted_mode = mode.replace("_", " ").strip()
-    if formatted_mode.lower() == "mode1": formatted_mode = "Mode 1"
-    elif formatted_mode.lower() == "mode2": formatted_mode = "Mode 2"
-    else:
-        # Generic "mode X" to "Mode X"
-        import re
-        match = re.match(r"mode\s*(\d+)", formatted_mode, re.IGNORECASE)
-        if match:
-            formatted_mode = f"Mode {match.group(1)}"
-        else:
-            formatted_mode = formatted_mode.title()
-    
-    await init_db_pool()
-    if not db_pool:
-        return f"Database lookup failed for {formatted_mode}. Using offline mode."
-    async with db_pool.acquire() as conn:
-        try:
-            # Search by name OR by card number (Order Independent)
-            query = '''
-                SELECT combo_status, final_status, validation_reason, valmiki_reference_anchor, kanda
-                FROM card_combos 
-                WHERE LOWER(gameplay_mode) = LOWER($1)
-                AND (
-                    (
-                        (LOWER(character) = LOWER($2) OR CAST(character_card_number AS TEXT) = $2)
-                        AND (LOWER(virtue_karma) = LOWER($3) OR CAST(virtue_karma_card_number AS TEXT) = $3)
-                    )
-                    OR
-                    (
-                        (LOWER(character) = LOWER($3) OR CAST(character_card_number AS TEXT) = $3)
-                        AND (LOWER(virtue_karma) = LOWER($2) OR CAST(virtue_karma_card_number AS TEXT) = $2)
-                    )
-                )
-            '''
-            
-            row = await conn.fetchrow(query, formatted_mode, character, karma)
-            
-            if row:
-                # Provide full details including reference anchor and kanda for the AI
-                return (
-                    f"Combo Status: {row['combo_status']} (Final Status: {row['final_status']})\n"
-                    f"Validation Reason: {row['validation_reason']}\n"
-                    f"Reference: {row['valmiki_reference_anchor']}\n"
-                    f"Kanda: {row['kanda']}"
-                )
-            else:
-                return f"No matching combo found in {formatted_mode} for Character: {character} and Virtue: {karma}."
-                
-        except Exception as e:
-            print(f"PostgreSQL Query Error: {e}")
-            return f"Error retrieving data from database: {str(e)}"
+    try:
+        exact = await get_segment_exact(int(character), int(karma), mode)
+    except (TypeError, ValueError):
+        exact = None
 
+    if exact is None:
+        return json.dumps({
+            "status": "Invalid",
+            "final_segment": "This combination (character/attribute) is not mentioned in the scriptures for this mode.",
+            "revised_scholar_reason": "No scholarly reference exists for this specific combination in the current dataset."
+        })
+    
+    return json.dumps({
+        "status": exact.get("final_status", "Unknown"),
+        "final_segment": str(exact.get("final_segment") or ""),
+        "revised_scholar_reason": str(exact.get("revised_scholar_reason") or "")
+    })

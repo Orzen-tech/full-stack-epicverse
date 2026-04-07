@@ -2,7 +2,7 @@ import os
 import asyncpg
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from app.services.retriever import init_db_pool
+from app.services.retriever import ensure_card_search_schema, init_db_pool
 
 load_dotenv()
 
@@ -52,6 +52,11 @@ async def init_db():
             )
         ''')
         
+        # 3. High-Performance Indexes for 100+ User Concurrency
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_uid ON chat_history(uid)')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_history(created_at)')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)')
+        
         # Temporary Debug Check (Verification)
         result = await conn.fetch("SELECT uid, email, display_name FROM users LIMIT 20")
         print(f"\n[DB DEBUG] Found {len(result)} users in PostgreSQL:")
@@ -61,6 +66,7 @@ async def init_db():
              name = row['display_name'] if 'display_name' in row else 'N/A'
              print(f" - UID: {row['uid']}, Email: {email}, Name: {name}")
         print("-" * 30 + "\n")
+    await ensure_card_search_schema()
 
 async def save_user(user: UserRecord):
     try:
@@ -84,7 +90,7 @@ async def save_user(user: UserRecord):
 from firebase_admin import auth
 
 async def get_user(uid: str):
-    # Tier 1: Try PostgreSQL
+    # Tier 1: Try PostgreSQL (High Speed Path)
     try:
         pool = await get_db_pool()
         if pool:
@@ -95,28 +101,9 @@ async def get_user(uid: str):
     except Exception as e:
         print(f"PostgreSQL Profile Fetch Error: {e}")
 
-    # Tier 2: Try Firebase Admin (Real identity data)
-    try:
-        user = auth.get_user(uid)
-        return {
-            "uid": uid,
-            "email": user.email,
-            "display_name": user.display_name or "New User",
-            "primary_language": "English",
-            "profile_picture": None, # App expects Base64 for custom uploads; Google photos are URLs
-            "current_mode": "Mode 1"
-        }
-    except Exception as e:
-        print(f"Firebase Profile Fetch Error: {e}")
-        # Final Mock Fallback
-        return {
-            "uid": uid,
-            "email": f"{uid}@example.com",
-            "display_name": "Dev User",
-            "primary_language": "English",
-            "profile_picture": None,
-            "current_mode": "Mode 1"
-        }
+    # Tier 2: Return None if not in DB. 
+    # The frontend will now handle the sync with the data it already has from the login.
+    return None
 
 async def get_chat_history(uid: str, limit: int = 10):
     """Fetches chat history for a specific user (UID) with DB-offline safety."""

@@ -1,0 +1,2102 @@
+[
+  {
+    "user": "senior_tester_0",
+    "query": "Check combo 5 and 42",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Try again... invalid combo.",
+    "latency": 10.442,
+    "success": true
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Check combo 3 and 48",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Hmm... invalid combo.",
+    "latency": 9.399,
+    "success": true
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "コンボ 20 と 101 を確認してください",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ja",
+    "expected": "Valid but Excluded",
+    "actual": "ほぼそこです... 有効ですが、実行されていません。",
+    "latency": 11.245,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Vérifier le combo 23 et 63",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Presque... combo invalide.",
+    "latency": 11.382,
+    "success": true
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Check combo 5 and 53",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Doesn't quite work... invalid combo.",
+    "latency": 9.438,
+    "success": true
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 7 మరియు 42 சரிபார்க்கவும்",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "Almost there! Valid, not executed.",
+    "latency": 11.361,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 14 and 34",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "So near... valid, not executed.",
+    "latency": 9.116,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Verificar combo 2 y 99",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "Intenta de nuevo... combo inválido.",
+    "latency": 11.247,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "コンボ 19 と 46 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "うーん... 無効なコンボです。",
+    "latency": 11.202,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Verificar combo 7 y 50",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Cerca... válido, no ejecutado.",
+    "latency": 11.1,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Vérifier le combo 19 et 55",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "En route... valide, non exécuté.",
+    "latency": 11.369,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "कॉम्బో 9 और 87 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Valid",
+    "actual": "स्वीकृत... यह मान्य है।",
+    "latency": 12.006,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "कॉम्బో 17 और 91 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "लगभग... अमान्य कॉम्बो।",
+    "latency": 10.939,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 6 మరియు 99 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "சாத்திருக்னன் — பிரஹ்மாஸ்திரம் (செல்லாது): இந்த கந்தத்தில் அவரது கதைப்பரப்பில் தெய்வீக ஆயுதங்களுக்கு எந்த தொடர்பும் இல்லை; வால்மீகி கதை இங்கு பிரஹ்மாஸ்திரத்தில் எந்த அடிப்படையும் உறுதிப்படுத்தவில்லை — அயோத்தியா கந்தம் (சர்கா 84).",
+    "latency": 12.667,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "कॉम्బో 9 और 103 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यह फिसल गया... अमान्य कॉम्बो।",
+    "latency": 11.307,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 4 と 102 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "オフトラック... 無効なコンボ。",
+    "latency": 11.45,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "காம்போ 13 మరియు 39 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "சரி... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.355,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 19 మరియు 60 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "கூடுதலாக, ஆனால்... காம்போ தவறானது.",
+    "latency": 11.864,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "కాంబో 9 మరియు 26ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "சற்று தவறாக உள்ளது... தவறான கம்போ.",
+    "latency": 11.817,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Vérifier le combo 21 et 40",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "Si près... valide, non exécuté.",
+    "latency": 11.695,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 21 మరియు 48ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "Almost there... valid, not executed.",
+    "latency": 11.288,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Check combo 1 and 31",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Off track... invalid combo.",
+    "latency": 9.585,
+    "success": true
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "காம்போ 13 మరియు 81 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "நீங்கள் அருகில் இருக்கிறீர்கள்... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 13.043,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 8 మరియు 85 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "ஹ்ம்ம்... செல்லாது.",
+    "latency": 11.065,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "காம்போ 1 మరియు 30 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "அறிவுடன் விளையாடப்பட்டது... செல்லுபடியாகிறது.",
+    "latency": 11.412,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 9 మరియు 29 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "அது நிலவவில்லை... தவறான காம்போ.",
+    "latency": 11.621,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "कॉम्బో 23 और 65 की जांच करें",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यह सफल नहीं हुआ... अमान्य कॉम्बो।",
+    "latency": 11.564,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "कॉम्బో 10 और 25 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "करीब! मान्य, अभी तक निष्पादित नहीं हुआ।",
+    "latency": 12.909,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Check combo 23 and 33",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Almost... invalid combo.",
+    "latency": 9.081,
+    "success": true
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "कॉम्బో 10 और 93 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यह फिसल गया... अमान्य कॉम्बो।",
+    "latency": 11.171,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Vérifier le combo 2 et 36",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "En route... valide, non exécuté.",
+    "latency": 11.448,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Verificar combo 8 y 79",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Casi allí... válido, no ejecutado.",
+    "latency": 11.126,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "कॉम्బో 4 और 104 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "लगभग... अमान्य कॉम्बो।",
+    "latency": 11.067,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 18 మరియు 73 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "ஆம்... இது உண்மையான, செல்லுபடியாகும் காம்போ.",
+    "latency": 9.942,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Check combo 7 and 28",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Not quite... invalid combo.",
+    "latency": 9.138,
+    "success": true
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 3 మరియు 89 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "அது நிலவவில்லை... தவறான காம்போ.",
+    "latency": 11.277,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Verificar combo 24 y 59",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "No del todo... combo inválido.",
+    "latency": 11.208,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Check combo 3 and 46",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Hmm... invalid combo.",
+    "latency": 9.149,
+    "success": true
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "காம்போ 1 మరియు 36 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "நீங்கள் நன்றாக கற்றுக்கொள்கிறீர்கள்... இது செல்லுபடியாகும்.",
+    "latency": 12.001,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "コンボ 6 と 103 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "このコンボは無効です... 無効なコンボ。",
+    "latency": 11.17,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Vérifier le combo 5 et 45",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Presque... combo invalide.",
+    "latency": 10.977,
+    "success": true
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "कॉम्బో 18 और 100 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "संगति नहीं है... अमान्य कॉम्‍बो।",
+    "latency": 11.821,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Verificar combo 21 y 65",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Cerca... válido, no ejecutado.",
+    "latency": 12.186,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 5 మరియు 47 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "அது சரியாகவில்லை... செல்லுபடியாகாத காம்போ.",
+    "latency": 11.146,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "कॉम्బో 17 और 61 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "गलत रास्ते पर... अमान्य कॉम्‍बो।",
+    "latency": 11.379,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Check combo 3 and 104",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Close, but... invalid combo.",
+    "latency": 9.082,
+    "success": true
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "コンボ 10 と 31 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "ほぼ…無効なコンボです。",
+    "latency": 12.04,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Verificar combo 20 y 91",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Cerca... válido, no ejecutado.",
+    "latency": 11.457,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "कॉम्బో 20 और 54 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "लगभग वहाँ! मान्य, निष्पादित नहीं हुआ।",
+    "latency": 11.246,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Verificar combo 13 y 28",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "No del todo... válido, no ejecutado.",
+    "latency": 10.904,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 14 మరియు 44ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "மண்டோதரி — அவள் ராவணனை போரை முடிக்கவும் சீதையை திரும்பப் பெறவும் அழைக்கிறாள், அவளது துக்கம் பெருமையின் செலவைக் காட்டுகிறது; சரிபார்ப்பு முக்கியமானது, ஆனால் ஆய்வாளர்கள் இதனை முக்கியமாகக் காணவில்லை, ஏனெனில் வால்மீகி கதை அவளை அழிவின் உணர்வுள்ள பார்வையாளராக வடிவமைக்கிறது.",
+    "latency": 12.329,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Verificar combo 5 y 73",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Valid",
+    "actual": "Ah... correctamente colocado. Válido.",
+    "latency": 12.424,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "कॉम्బో 11 और 32 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "वहाँ पहुँच रहे हैं... मान्य, निष्पादित नहीं हुआ।",
+    "latency": 11.958,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "కాంబో 17 మరియు 56ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "அது சரியாகவில்லை... செல்லுபடியாகாத காம்போ.",
+    "latency": 11.557,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "कॉम्బో 15 और 99 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "गलत रास्ते पर... अमान्य कॉम्‍बो।",
+    "latency": 11.293,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 1 と 47 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "それは無効です... 無効なコンボ。",
+    "latency": 11.024,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "காம்போ 4 మరియు 65 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "சரி... இது செல்லுபடியாகிறது.",
+    "latency": 10.021,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 11 మరియు 66 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "அவசரமாக இருக்கிறது... செல்லுபடியாகிறது, ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.562,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "कॉम्బో 4 और 79 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Valid",
+    "actual": "हाँ... एक सच्चा, मान्य कॉम्बो।",
+    "latency": 10.462,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "కాంబో 9 మరియు 95ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "అది సరైనది కాదు... అమాన్య కాంబో.",
+    "latency": 12.009,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 17 మరియు 34ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "தவறான பாதை... தவறான காம்போ.",
+    "latency": 12.976,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 14 మరియు 58ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "Almost right... valid, not executed.",
+    "latency": 11.536,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "కాంబో 6 మరియు 36ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "సరిగ్గా కాదు... అమాన్య కాంబో.",
+    "latency": 11.821,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "कॉम्బో 23 और 45 की जांच करें",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यह सही नहीं है... अमान्य कॉम्‍बो।",
+    "latency": 11.778,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "कॉम्బో 1 और 45 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "गलत रास्ते पर... अमान्य कॉम्‍बो।",
+    "latency": 11.296,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Vérifier le combo 9 et 61",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Pas tout à fait... combo invalide.",
+    "latency": 10.936,
+    "success": true
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 1 and 83",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Valid",
+    "actual": "Proceed... this is valid.",
+    "latency": 9.323,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Check combo 7 and 72",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Hmm... invalid combo.",
+    "latency": 9.113,
+    "success": true
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "コンボ 4 と 39 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "再試行してください... 無効なコンボです。",
+    "latency": 11.011,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Vérifier le combo 4 et 91",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Presque... combo invalide.",
+    "latency": 11.075,
+    "success": true
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 15 మరియు 53ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "தவறான பாதை... தவறான காம்போ.",
+    "latency": 11.576,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "காம்போ 17 మరియు 68 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "Hmm... தவறான காம்போ.",
+    "latency": 12.304,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "காம்போ 11 మరియు 27 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": " casi சரி... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.416,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Check combo 15 and 60",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "Good one... valid, not executed.",
+    "latency": 9.008,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "காம்போ 6 మరియు 67 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மன்னிப்பு — அமானியமாக உள்ளது: அவர் தண்டனைக்கு முன்னேறுகிறார், மன்னிப்புக்கு அல்ல; வால்மீகி கதை மன்னிப்பில் அடிப்படையைக் காட்டவில்லை, இதனால் இந்த இணைப்பு வெளியே உள்ளது.",
+    "latency": 11.584,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 6 と 91 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "近いですが... 無効なコンボです。",
+    "latency": 11.091,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "కాంబో 21 మరియు 30ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "கட்டாயமாக... இது செல்லுபடியாகிறது, ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 12.571,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "కాంబో 17 మరియు 104ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... செல்லுபடியாகவில்லை.",
+    "latency": 11.627,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Verificar combo 22 y 35",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Buena... válida, no ejecutada.",
+    "latency": 11.178,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Check combo 18 and 53",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Bit off... invalid combo.",
+    "latency": 9.095,
+    "success": true
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "कॉम्బో 15 और 91 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "जुड़ाव असत्य है। कारण: जटायु — धोखा (अमान्य): याद की गई सत्य के माध्यम से ले जाई गई सुराग। धोखा उसकी कथा में कार्य के साथ मेल नहीं खाता। कहानी उसे सत्य का वाहक बनाती है जो दिशा को आकार देती है, जिससे यह जोड़ असंगत हो जाता है। उसका सत्य खोज को मार्गदर्शित करता रहता है — अरण्य कांड (सर्ग 68)।",
+    "latency": 12.883,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "காம்போ 22 మరియు 27 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "கிட்டத்தட்ட இருக்கிறது! செல்லுபடியாகிறது, ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.916,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "కాంబో 4 మరియు 85ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": " casi சரி... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.133,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "コンボ 4 と 51 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Valid",
+    "actual": "よく整合しています... 有効です。",
+    "latency": 11.753,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "कॉम्బో 9 और 55 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "हम्म... अमान्य कॉम्बो।",
+    "latency": 11.138,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Check combo 4 and 31",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Off track... invalid combo.",
+    "latency": 9.702,
+    "success": true
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Vérifier le combo 8 et 39",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "C'est un peu décalé... combo invalide.",
+    "latency": 11.83,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "కాంబో 1 మరియు 77ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "முன்னேறு... இது செல்லுபடியாகிறது.",
+    "latency": 12.248,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Vérifier le combo 9 et 68",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Presque... combo invalide.",
+    "latency": 11.942,
+    "success": true
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "కాంబో 19 మరియు 36ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "Almost there... valid, not executed.",
+    "latency": 11.832,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Vérifier le combo 13 et 93",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "Sur la bonne voie... valide, non exécuté.",
+    "latency": 11.647,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Check combo 13 and 56",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "On track... valid, not executed.",
+    "latency": 9.049,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Vérifier le combo 9 et 69",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Ne fonctionne pas tout à fait... combo invalide.",
+    "latency": 11.215,
+    "success": true
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "కాంబో 22 మరియు 29ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": " casi allí... válido, no ejecutado.",
+    "latency": 11.926,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "కాంబో 20 మరియు 59ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "நீங்கள் நன்றாக கற்றுக்கொள்கிறீர்கள்... இது செல்லுபடியாகும்.",
+    "latency": 11.837,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "కాంబో 13 మరియు 65ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "సమర్థంగా ఆడారు... చెల్లుబాటు ఉంది.",
+    "latency": 11.729,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 3 and 66",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Almost... invalid combo.",
+    "latency": 9.072,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "コンボ 19 と 69 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "それはうまくいきませんでした... 無効なコンボです。",
+    "latency": 11.313,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Vérifier le combo 10 et 65",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "Si près... valide, non exécuté.",
+    "latency": 11.77,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "காம்போ 17 మరియు 85 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "சரியானது... இது செல்லுபடியாகும்.",
+    "latency": 11.996,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 17 మరియు 53ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "ஏற்கெனவே... இது செல்லுபடியாகும்.",
+    "latency": 12.001,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "காம்போ 19 మరియు 71 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... செல்லுபடியாகாத காம்போ.",
+    "latency": 11.698,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Verificar combo 13 y 35",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid",
+    "actual": "Bien... esto es válido.",
+    "latency": 11.241,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 24 మరియు 52 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "இது சரியாக வேலை செய்யவில்லை... செல்லுபடியாகாத காம்போ.",
+    "latency": 12.485,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Verificar combo 6 y 66",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "Fuera de pista... combo inválido.",
+    "latency": 11.8,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 1 మరియు 101 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "Hmm... தவறான காம்போ.",
+    "latency": 12.329,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "కాంబో 2 మరియు 40ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "சரி இல்லை... தவறான காம்போ.",
+    "latency": 11.04,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 2 మరియు 61 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "சரி, இதன் காரணம்: சீதா — பரிதாபம் (செல்லாது): அவர் செய்தி மற்றவரின் துன்பத்தை உணர்வது பற்றியதல்ல, ஆனால் பிரிவை மறுக்கிறதற்காக; வால்மீகி கதை அவரது குரோன் ஷிப்ட் பாத்திரம் பரிதாபத்தில் அடிப்படையில்லை என்பதை காட்டுகிறது, மற்றும் அந்த மிஸ்மேட்ச் ஜோடியை வெளியே வைக்கிறது.",
+    "latency": 12.315,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "コンボ 17 と 58 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Valid",
+    "actual": "はい... 真の、有効なコンボです。",
+    "latency": 10.346,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Vérifier le combo 3 et 103",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Cela ne fonctionne pas tout à fait... combo invalide.",
+    "latency": 11.224,
+    "success": true
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Check combo 20 and 31",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid",
+    "actual": "Ah... rightly placed. Valid.",
+    "latency": 9.16,
+    "success": true
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 8 మరియు 47ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... செல்லுபடியாகாத காம்போ.",
+    "latency": 11.524,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Check combo 13 and 66",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "Close enough... valid, not executed.",
+    "latency": 9.072,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 21 మరియు 47 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "ஜம்பவான் — ஆதாரம் (செல்லுபடியாகாது): அவர் ஞானியாய், தேடலை நிலைநாட்டுகிறார் மற்றும் ஹனுமானின் சக்தியை திறக்கிறார்; வால்மீகி கதை அவரது GlowLine வேடம் ஆதாரத்தில் rests இல்லை என்பதை காட்டுகிறது, மற்றும் அந்த மாறுபாடு ஜோடியை வெளியே வைக்கிறது, நம்பிக்கை மற்றும் தலைமை வழியாக வளைவாக நகரும் — கிஷ்கிந்தா கந்த (சர்கா 40).",
+    "latency": 13.425,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "காம்போ 10 మరియు 49 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "சரியில்லை... தவறான காம்போ.",
+    "latency": 11.636,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 21 と 81 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Valid but Excluded",
+    "actual": "良いですね... 有効ですが、実行されていません。",
+    "latency": 11.249,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "காம்போ 8 మరియు 97 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "தவறான காம்போ.",
+    "latency": 11.53,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "కాంబో 18 మరియు 89ని తనిఖీ చేయండి",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "சரி, இதன் காரணம்: சீதா — பரிதாபம் (செல்லாது): அவர் செய்தி மற்றவரின் துன்பத்தை உணர்வது பற்றியதல்ல, ஆனால் பிரிவை மறுக்கிறதற்காக; வால்மீகி கதை அவரது குரோன் ஷிப்ட் பாத்திரம் பரிதாபத்தில் அடிப்படையில்லை என்பதை காட்டுகிறது, மற்றும் அந்த மிஸ்மேட்ச் ஜோடியை வெளியே வைக்கிறது.",
+    "latency": 13.549,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "காம்போ 7 మరియు 70 சரிபார்க்கவும்",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "நீங்கள் அருகில் இருக்கிறீர்கள்... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 10.571,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "காம்போ 21 మరియు 98 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "ஜம்பவான் — நாகபாஷா அம்பு (செல்லாது): அறிவாளி மூத்தவர் உத்திகளை வழிநடத்துகிறார். போர்க்களத்திற்கான பண்புகள் அவரது வரையறைச் சோலைக்கு வெளியே உள்ளன. அவரது தாக்கம் அறிவியல், ஆயுதங்களை அடிப்படையாகக் கொண்டது அல்ல. அவர் மனங்களைத் தயாரிக்கிறார், ஆயுதங்களை அல்ல.",
+    "latency": 12.746,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "காம்போ 5 మరియు 66 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "இது சரியாக இல்லை... செல்லுபடியாகாத காம்போ.",
+    "latency": 12.263,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 19 మరియు 66ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... செல்லுபடியாகாத காம்போ.",
+    "latency": 11.371,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "कॉम्బో 15 और 66 की जांच करें",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "शांतता कथा की गति के साथ मेल नहीं खाती। कहानी खोज की गति पर ध्यान केंद्रित करती है। उसकी सच्चाई मिशन को मार्गदर्शित करती रहती है।",
+    "latency": 12.32,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Vérifier le combo 10 et 71",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "Presque juste... valide, non exécuté.",
+    "latency": 11.531,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "காம்போ 6 మరియు 73 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "சத்ருக்னா — உயர்வு (தவறானது): அவர் செயல்பாட்டாளராக, உயர்த்துவதோ அல்லது மீட்டெடுக்குவதோ அல்ல, ஆனால் உணரப்பட்ட தவறுகளுக்கு எதிராக செயல்படுகிறார்; வால்மீகி கதை அவரது பாத்திரத்தை உயர்வுடன் ஒத்துப்போகவில்லை.",
+    "latency": 12.794,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Verificar combo 2 y 70",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "¡Cerca! Válido, no ejecutado aún.",
+    "latency": 11.609,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Verificar combo 22 y 60",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Casi... válido, no ejecutado.",
+    "latency": 11.27,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Vérifier le combo 5 et 63",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid",
+    "actual": "Bon flux... valide.",
+    "latency": 11.995,
+    "success": true
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "కాంబో 1 మరియు 68ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "நீங்கள் அருகில் இருக்கிறீர்கள்... செல்லுபடியாகும்.",
+    "latency": 11.608,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "காம்போ 6 మరియు 93 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... செல்லாது.",
+    "latency": 12.384,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "कॉम्బో 1 और 54 की जांच करें",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यह सही नहीं है... अमान्य कॉम्बो।",
+    "latency": 11.995,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Vérifier le combo 19 et 99",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Près, mais... combo invalide.",
+    "latency": 12.204,
+    "success": true
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Verificar combo 17 y 52",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "es",
+    "expected": "Valid",
+    "actual": "Jugado sabiamente... válido.",
+    "latency": 9.993,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "コンボ 23 と 48 を確認してください",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "道を外れています... 無効なコンボです。",
+    "latency": 11.226,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Vérifier le combo 9 et 45",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Presque... combo invalide.",
+    "latency": 10.995,
+    "success": true
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 19 と 104 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "少し外れています... 無効なコンボです。",
+    "latency": 11.241,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "కాంబో 19 మరియు 70ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "கட்டாயமாக... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 12.191,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "コンボ 3 と 42 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "うーん... 無効なコンボです。",
+    "latency": 11.222,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "コンボ 3 と 40 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "うーん... 無効なコンボ。",
+    "latency": 11.763,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "कॉम्బో 13 और 101 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "संगति नहीं है... अमान्य कॉम्‍बो।",
+    "latency": 11.037,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "காம்போ 24 మరియు 31 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "அறிக்கையிடுங்கள்... அமானிய காம்போ.",
+    "latency": 13.561,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "காம்போ 15 మరియు 30 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "தவறான பாதையில்... தவறான காம்போ.",
+    "latency": 11.923,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "コンボ 2 と 104 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "少し外れています... 無効なコンボです。",
+    "latency": 11.133,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "कॉम्బో 22 और 25 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "करीब! मान्य, अभी तक निष्पादित नहीं हुआ।",
+    "latency": 11.552,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "కాంబో 6 మరియు 45ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "சரியானது... காம்போ தவறானது.",
+    "latency": 11.681,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Vérifier le combo 10 et 30",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Peu près, mais... combo invalide.",
+    "latency": 10.99,
+    "success": true
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 3 and 55",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Valid",
+    "actual": "Wisely played... valid.",
+    "latency": 9.054,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Check combo 15 and 70",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Doesn't quite work... invalid combo.",
+    "latency": 9.081,
+    "success": true
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Verificar combo 18 y 36",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "es",
+    "expected": "Valid",
+    "actual": "Eso encaja... válido.",
+    "latency": 12.117,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "कॉम्బో 22 और 44 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "लगभग सही... मान्य, निष्पादित नहीं।",
+    "latency": 12.147,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "Check combo 6 and 54",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Hmm... invalid combo.",
+    "latency": 9.087,
+    "success": true
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 1 మరియు 75ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "முன்னேறு... இது செல்லுபடியாகும்.",
+    "latency": 11.344,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "காம்போ 4 మరియు 29 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "சரி... இது செல்லுபடியாகிறது.",
+    "latency": 10.405,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "కాంబో 5 మరియు 85ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "சரியானது... தவறான கூட்டம்.",
+    "latency": 11.439,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "コンボ 7 と 58 を確認してください",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ja",
+    "expected": "Valid",
+    "actual": "良い...これは有効です。",
+    "latency": 11.35,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Verificar combo 13 y 30",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "En camino... válido, no ejecutado.",
+    "latency": 11.312,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 23 and 30",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Hmm... invalid combo.",
+    "latency": 9.147,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 2 మరియు 53 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "அது தவறியது... செல்லாத காம்போ.",
+    "latency": 11.829,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "காம்போ 4 మరియు 83 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "முன்னேறு... இது செல்லுபடியாகும்.",
+    "latency": 10.132,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "காம்போ 7 మరియు 59 சரிபார்க்கவும்",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "நீங்கள் நன்றாக கற்றுக்கொள்கிறீர்கள்... இது மதிப்பீடு செய்யப்படுகிறது.",
+    "latency": 11.349,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "காம்போ 3 మరియు 77 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "அஹ்... சரியாக இடம் பெற்றது. செல்லுபடியாகும்.",
+    "latency": 10.484,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 20 మరియు 60ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "మంచి విషయం... ఇది చెల్లుబాటు అవుతుంది, కానీ అమలు చేయబడలేదు.",
+    "latency": 12.349,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Check combo 13 and 89",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "Not quite... valid, not executed.",
+    "latency": 9.091,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Vérifier le combo 15 et 55",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Cela n'a pas fonctionné... combo invalide.",
+    "latency": 11.592,
+    "success": true
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Verificar combo 2 y 37",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "En camino... válido, no ejecutado.",
+    "latency": 12.077,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "Vérifier le combo 10 et 46",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Essayez à nouveau... combo invalide.",
+    "latency": 11.682,
+    "success": true
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Vérifier le combo 15 et 71",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Cela a glissé... combo invalide.",
+    "latency": 11.159,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "コンボ 24 と 89 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "それは外れています... 無効なコンボです。",
+    "latency": 11.82,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "కాంబో 20 మరియు 46ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid",
+    "actual": "இது செல்லுபடியாகும்... இந்த இரண்டு காம்போக்களும் செல்லுபடியாகும். \n\nஇந்தியராஜிதின் — உண்மைத்தன்மை (செல்லுபடியாகும்): மந்திரவாதியின் மாஸ்டர் ஆக, அவர் போர் மிக ஆபத்தான சக்தியாக உள்ளார், ராமாவின் பக்கம் எல்லை வரை அழுத்துகிறார்; வால்மீகி ராமாயணத்தில், உண்மைத்தன்மை உள்ளதாகவே உள்ளது ஆனால் முக்கியமாக இல்லை, அவரது செயல்கள் வெற்றியை சிரமமாகக் காட்டுகின்றன, அது சாத்தியமாகும் முன். — யுத்த காண்டம் (சர்கா 81).",
+    "latency": 14.495,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Check combo 7 and 98",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Close, but... invalid combo.",
+    "latency": 9.024,
+    "success": true
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 8 మరియు 50ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "அஹ்... அமானிய காம்போ.",
+    "latency": 11.135,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Verificar combo 8 y 64",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Valid",
+    "actual": "Ah... correctamente colocado. Válido.",
+    "latency": 11.328,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "コンボ 24 と 40 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "少し外れています... 無効なコンボです。",
+    "latency": 11.385,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Verificar combo 21 y 72",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Buena... válida, no ejecutada.",
+    "latency": 11.518,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Verificar combo 11 y 50",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "¡Cerca! Válido, no ejecutado aún.",
+    "latency": 11.434,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 14 మరియు 61 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid but Excluded",
+    "actual": "சரியாக! செல்லுபடியாகும், ஆனால் இன்னும் செயல்படுத்தப்படவில்லை.",
+    "latency": 12.745,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Vérifier le combo 5 et 72",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Valid",
+    "actual": "Procéder... cela est valide.",
+    "latency": 11.782,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "Check combo 17 and 25",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Try again... invalid combo.",
+    "latency": 9.059,
+    "success": true
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "कॉम्బో 13 और 103 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "यहाँ... यह अमान्य संयोजन है।",
+    "latency": 11.732,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Check combo 6 and 35",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "Not quite... valid, not executed.",
+    "latency": 9.061,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "コンボ 8 と 75 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "一致しません... 無効なコンボです。",
+    "latency": 11.335,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "Vérifier le combo 5 et 43",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Réessayez... combo invalide.",
+    "latency": 11.06,
+    "success": true
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "कॉम्బో 14 और 52 की जांच करें",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "hi",
+    "expected": "Valid but Excluded",
+    "actual": "यह सही नहीं है... मान्य है, लेकिन निष्पादित नहीं हुआ।",
+    "latency": 11.22,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "కాంబో 22 మరియు 73ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "அதற்கான காரணம்: கும்பகர்ணன் — தூக்குதல் (செல்லாது): ஆவலில்லாத மாபெரும் மனிதன், ஆறு மாத உறக்கத்திலிருந்து எழுந்து, ராமன் அவரை கொல்லும் முன் ஆயிரக்கணக்கான வானரங்களை கொல்லும் மாபெரும் உடல் சவால்களை முன்வைக்கிறார்; வால்மீகி ராமாயணத்தில், தூக்குதல் அவரது போர் பணிக்கு பொருந்தவில்லை மற்றும் சரியான நாடக எடையை எடுத்துக்கொள்ளவில்லை.",
+    "latency": 13.003,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "కాంబో 6 మరియు 98ని తనిఖీ చేయండి",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "te",
+    "expected": "Invalid",
+    "actual": "అనుకూలంగా లేదు... అమాన్య కాంబో.",
+    "latency": 11.313,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 20 మరియు 63 சரிபார்க்கவும்",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "முன்னேறு... இது செல்லுபடியாகும்.",
+    "latency": 10.669,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Check combo 23 and 28",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "en",
+    "expected": "Invalid",
+    "actual": "Doesn't quite work... invalid combo.",
+    "latency": 9.137,
+    "success": true
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 1 మరియు 73 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "ஏற்கெனவே... இது செல்லுபடியாகிறது.",
+    "latency": 11.495,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "कॉम्బో 23 और 25 की जांच करें",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "hi",
+    "expected": "Invalid",
+    "actual": "कर्तव्य को बलाकांडा में मारीच के माध्यम से मजबूती से नहीं देखा जा सकता। कथा उसे सही कार्य या दायित्व के माध्यम से एक परिभाषित विशेषता के रूप में नहीं बनाती। यह पढ़ाई व्याख्या को गलत दिशा में धकेलती है और एपिसोड की संरचना के साथ मेल नहीं खाती।",
+    "latency": 13.063,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Verificar combo 17 y 98",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "No del todo... combo inválido.",
+    "latency": 11.451,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "కాంబో 22 మరియు 32ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "அங்கு செல்லும்... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.217,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "కాంబో 22 మరియు 30ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "அங்கு செல்லும்... செல்லுபடியாகும், ஆனால் செயல்படுத்தப்படவில்லை.",
+    "latency": 11.959,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Verificar combo 22 y 31",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Es una buena... válida, no ejecutada.",
+    "latency": 11.992,
+    "success": false
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "காம்போ 17 మరియు 60 சரிபார்க்கவும்",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ta",
+    "expected": "Valid",
+    "actual": "வழக்கமாக விளையாடப்பட்டது... செல்லுபடியாகும்.",
+    "latency": 9.987,
+    "success": false
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Check combo 22 and 55",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "en",
+    "expected": "Valid but Excluded",
+    "actual": "On track... valid, not executed.",
+    "latency": 9.102,
+    "success": false
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "காம்போ 19 మరియు 58 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "முன்னேறு... இது செல்லுபடியாகாது.",
+    "latency": 12.865,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "コンボ 4 と 93 を確認してください",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "ja",
+    "expected": "Invalid",
+    "actual": "それは外れています... 無効なコンボです。",
+    "latency": 11.243,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 23 మరియు 37 சரிபார்க்கவும்",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மிகவும் தெளிவாகக் காணப்படவில்லை... இது செல்லுபடியாகாது.",
+    "latency": 12.143,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Verificar combo 9 y 33",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "Hmm... combinación inválida.",
+    "latency": 11.501,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "కాంబో 20 మరియు 87ని తనిఖీ చేయండి",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "te",
+    "expected": "Valid but Excluded",
+    "actual": "நெருக்கமாக! செல்லுபடியாகும், ஆனால் இன்னும் செயல்படுத்தப்படவில்லை.",
+    "latency": 12.135,
+    "success": false
+  },
+  {
+    "user": "senior_tester_0",
+    "query": "காம்போ 23 మరియు 89 சரிபார்க்கவும்",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மரிச்சனின் மூலம் சுயநலத்தன்மை பலகண்டாவில் வலுவாகக் காணப்படுவதில்லை. இது அப்ஸ்ட்ராக்ஷனில் ஈர்க்கக்கூடியதாக இருக்கலாம், ஆனால் கதை அவரை சுயநல நோக்கத்துடன் உருவாக்கவில்லை. இந்த விளக்கம் அத்தியாயத்தின் கட்டமைப்புடன் ஒத்துப்போகவில்லை.",
+    "latency": 14.475,
+    "success": false
+  },
+  {
+    "user": "senior_tester_1",
+    "query": "コンボ 19 と 33 を確認してください",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ja",
+    "expected": "Valid but Excluded",
+    "actual": "近いです... 有効ですが、実行されていません。",
+    "latency": 11.621,
+    "success": false
+  },
+  {
+    "user": "senior_tester_2",
+    "query": "Vérifier le combo 22 et 81",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Hmm... combo invalide.",
+    "latency": 11.773,
+    "success": true
+  },
+  {
+    "user": "senior_tester_3",
+    "query": "Vérifier le combo 17 et 69",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "fr",
+    "expected": "Invalid",
+    "actual": "Pas tout à fait... combo invalide.",
+    "latency": 11.842,
+    "success": true
+  },
+  {
+    "user": "senior_tester_4",
+    "query": "Check combo 18 and 56",
+    "mode": "GlowLine (Kishkindha Kanda)",
+    "lang": "en",
+    "expected": "Valid",
+    "actual": "Well aligned... valid.",
+    "latency": 9.612,
+    "success": true
+  },
+  {
+    "user": "senior_tester_5",
+    "query": "コンボ 20 と 51 を確認してください",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "ja",
+    "expected": "Valid but Excluded",
+    "actual": "ほぼ正しい... 有効ですが、実行されていません。",
+    "latency": 12.748,
+    "success": false
+  },
+  {
+    "user": "senior_tester_6",
+    "query": "Verificar combo 23 y 27",
+    "mode": "Origin Arc( Balakanda)",
+    "lang": "es",
+    "expected": "Invalid",
+    "actual": "Eso se deslizó... combo inválido.",
+    "latency": 11.587,
+    "success": false
+  },
+  {
+    "user": "senior_tester_7",
+    "query": "காம்போ 2 మరియు 73 சரிபார்க்கவும்",
+    "mode": "CrownShift (Ayodhya Kanda)",
+    "lang": "ta",
+    "expected": "Invalid",
+    "actual": "மீண்டும் முயற்சிக்கவும்... இது செல்லுபடியாகாது.",
+    "latency": 12.391,
+    "success": false
+  },
+  {
+    "user": "senior_tester_8",
+    "query": "Vérifier le combo 20 et 83",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "fr",
+    "expected": "Valid but Excluded",
+    "actual": "Si près... valide, non exécuté.",
+    "latency": 11.747,
+    "success": false
+  },
+  {
+    "user": "senior_tester_9",
+    "query": "Verificar combo 13 y 64",
+    "mode": "WarRoom (Yuddha Kanda)",
+    "lang": "es",
+    "expected": "Valid but Excluded",
+    "actual": "Cerca... válido, no ejecutado.",
+    "latency": 12.852,
+    "success": false
+  }
+]

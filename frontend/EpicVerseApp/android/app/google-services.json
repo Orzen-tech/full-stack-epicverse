@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "528735951861",
+    "project_id": "epicverse-13267",
+    "storage_bucket": "epicverse-13267.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:528735951861:android:be6633bae3849e58dfdebc",
+        "android_client_info": {
+          "package_name": "com.mltiverse.mltiverse_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBaznkDU36SRG9voRU88zfMCiWujXd1R0E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,11 @@
+Category,Current (Turbo) Breakdown,Realtime API Breakdown,Delta (Factor),Latency
+STT (Whisper-1),$13.50 ($0.006/min),$8.93 (Audio tokens),-34%,1.5s -> 0s
+LLM Intelligence,$1.63 (GPT-4o-mini),$54.45 (GPT-4o),+3240%,2.0s -> 0.2s
+TTS (Voice Out),$20.25 (TTS-1),$62.50 (Audio tokens),+208%,1.0s -> 0.3s
+Total Hourly Cost,$35.38,$125.88,+255%,4.2s -> 0.6s
+Cost per User/Hr,$0.35,$1.26,+$0.91,7x Speedup
+Input Tokens (Text),9.27 Million,9.0 Million,-3%,-
+Output Tokens (Text),0.4 Million,0.4 Million,0%,-
+Audio Tokens (In),0,0.9 Million,New,-
+Audio Tokens (Out),0,4.5 Million,New,-
+Strategy,High-Profit/Scale,Premium/Realtime,Mixed,Instant

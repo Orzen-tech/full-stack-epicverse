@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes
 from app.core.config import settings
-from app.services.retriever import load_excel_data
+from app.services.retriever import close_db_pool, close_redis, init_redis, load_excel_data, redis_client
 from app.services.user_db import init_db
 import firebase_admin
 from firebase_admin import credentials
@@ -16,34 +16,46 @@ try:
         firebase_admin.initialize_app(cred)
 except Exception as e:
     print(f"Firebase Init Warning: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Runs on server startup: preloads all Excel game mode files into RAM."""
-    print("Server starting up - loading game mode data from Excel files...")
     import asyncio
     from app.services.retriever import init_db_pool
     
-    # DB initialization with timeout to prevent server from hanging forever on startup
+    # Infrastructure Initialization with timeouts
     try:
         print("Connecting to Database...")
-        await asyncio.wait_for(init_db_pool(), timeout=15)
+        await asyncio.wait_for(init_db_pool(), timeout=60)
         print("Database Pool initialized.")
         
         print("Initializing Database Tables...")
-        await asyncio.wait_for(init_db(), timeout=15)
+        await asyncio.wait_for(init_db(), timeout=60)
         print("Database Tables initialized.")
+
+        print("Connecting to Redis...")
+        await asyncio.wait_for(init_redis(), timeout=15)
     except asyncio.TimeoutError:
-        print("CRITICAL: Database connection timed out. Server running without live DB.")
+        print("CRITICAL: Database/Redis connection timed out. Server running with degraded services.")
     except Exception as e:
         print(f"CRITICAL Error during Database initialization: {e}")
     
+    # Final Transition to Ready State
     await load_excel_data()
-    from app.services.wake_word import WakeWordDetector
-    WakeWordDetector() # Initialize singleton
     
-    print("All game mode data loaded and ready!")
+    print("\n" + "="*50)
+    print(f" EPICVERSE BACKEND: {settings.VERSION} ")
+    print("="*50)
+    print(f" DB Pool:  [ACTIVE]")
+    print(f" Redis:    [{'ACTIVE' if redis_client else 'OFFLINE (Degraded Mode)'}]")
+    print(f" Datasets: [LOADED]")
+    print("="*50 + "\n")
+    
     yield
+    
     print("Server shutting down.")
+    await close_redis()
+    await close_db_pool()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

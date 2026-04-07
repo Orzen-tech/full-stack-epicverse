@@ -1,18 +1,17 @@
-import pandas as pd
+import asyncio
+import asyncpg
 import os
+from dotenv import load_dotenv
 
-data_dir = "e:/kriyora/model_try/backend/data"
-for file in os.listdir(data_dir):
-    if file.endswith(".xlsx"):
-        df = pd.read_excel(os.path.join(data_dir, file))
-        print(f"File: {file}")
-        # Find column
-        game_mode_col = None
-        for col in df.columns:
-            if str(col).lower().strip() in ['gameplay mode', 'game mode', 'gamemode', 'mode']:
-                game_mode_col = col
-                break
-        if game_mode_col:
-            print(f"Unique values in {game_mode_col}: {df[game_mode_col].unique().tolist()}")
-        else:
-            print("Gameplay Mode column NOT found")
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+async def check():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT DISTINCT gameplay_mode FROM card_combos")
+    for r in rows:
+        print(f"'{r[0]}'")
+    await conn.close()
+
+if __name__ == "__main__":
+    asyncio.run(check())

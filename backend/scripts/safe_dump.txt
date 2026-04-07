@@ -1,0 +1,26 @@
+'Gameplay Mode': Mode 2
+'Level Name': Crownshift
+'Ka': Ayodhy Ka
+'Character': Rama
+'Character Subtitle': Ideal King
+'Combo Type': Character + Virtue
+'Virtue Category': DHARMA
+'Virtue / Karma': Sacrifice
+'Card Subtitle': Noble Loss
+'Karma Polarity': nan
+'Karma Direction (at play)': nan
+'Combo Status (Base)': Valid
+'Validation Reason (Valmiki-based)': Valid: In Valmikis Ayodhy Ka, Rama is framed through coronation preparations; accepts exile; forest departure, aligning directly with the virtue Sacrifice. Therefore, Rama + Sacrifice is valid in Crownshift (Mode 2).
+'Valmiki Reference Anchor': Valmiki Ramayana  Ayodhy Ka: coronation preparations; accepts exile; forest departure
+'Intensity Score': 131.0
+'Rank (1=Highest)': 1.0
+'Mode 2 Combo Set': Included (Top 108)
+'App Explanation (if Excluded)': nan
+'Final Status (Mode 2)': Valid (Active)
+'Combo Display': Rama + Sacrifice
+'Avatar Dispute Response (Default)': nan
+'Avatar Dispute Response (Witty Options)': nan
+'Avatar Explain Ranking (Short)': nan
+'Avatar Follow-up (Firm)': nan
+'Character Card Number': 1
+'Virtu/Karma Card Number': 27
