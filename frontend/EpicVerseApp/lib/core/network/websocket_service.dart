@@ -157,7 +157,13 @@ class WebSocketService {
   }
 
   void updateMode(String mode) {
-    _currentMode = mode;
+    if (_currentMode != mode) {
+       debugPrint("WS: Switching Journey from $_currentMode to $mode");
+       _currentMode = mode;
+       if (_isConnected) {
+         disconnect(); // Close existing stale session
+       }
+    }
   }
 
   void dispose() {

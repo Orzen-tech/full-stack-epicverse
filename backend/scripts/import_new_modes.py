@@ -9,32 +9,42 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 async def import_all_modes():
     data_dir = "e:/kriyora/EpicVerse/backend/data"
-    # All 7 modes for the Ramayana Edition
-    files = [f"mode{i}.xlsx" for i in range(1, 8)]
+    # Mapping of File Index -> Correct Mode Name
+    KANDA_MAP = {
+        1: "OriginArc (Balakanda)",
+        2: "CrownShift (AyodhyaKanda)",
+        3: "WildRun (AranyaKanda)",
+        4: "GlowLine (KishkindhaKanda)",
+        5: "lankaLeap (SundaraKanda)",
+        6: "WarRoom (YuddhaKanda)",
+        7: "AfterLight (UttaraKanda)"
+    }
     
     print(f"Connecting to database...")
-    conn = await asyncpg.connect(DATABASE_URL)
+    url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn = await asyncpg.connect(url)
     
-    # 1. Global Reset (Clean State for Final Sync)
-    print("Performing Global Reset of card_combos for Final Truth Sync...")
+    print("GLOBAL RESET: Deleting all existing card_combos...")
     await conn.execute("DELETE FROM card_combos")
     
     total_added = 0
-    for file in files:
+    for i in range(1, 8):
+        file = f"mode {i}.xlsx"
         path = os.path.join(data_dir, file)
+        correct_mode = KANDA_MAP[i]
+        
         if not os.path.exists(path):
             print(f"SKIPPING: {file} not found.")
             continue
             
-        print(f"--- Reading {file} ---")
-        df = pd.read_excel(path)
-        print(f"Importing {len(df)} rows for {file}...")
+        print(f"--- Reading {file} (Target: {correct_mode}) ---")
+        df = pd.read_excel(path).replace({pd.NA: None})
         
         success_count = 0
         for _, row in df.iterrows():
             try:
-                # Synchronizing Scholarship: App Message (Crisp) maps to both Segment and Scholar Reason
                 scripture_text = str(row.get('App Message (Crisp)', ''))
+                status = str(row.get('Final Segment', '')) # Current Excel maps status to 'Final Segment'
                 
                 await conn.execute('''
                     INSERT INTO card_combos (
@@ -43,19 +53,19 @@ async def import_all_modes():
                         final_segment, final_status, revised_scholar_reason
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ''', 
-                str(row.get('Game Play Mode', '')),
+                correct_mode, # FORCE THE CORRECT LABEL
                 str(row.get('Character', '')),
                 int(row.get('Character Card No.', 0)) if pd.notnull(row.get('Character Card No.')) else 0,
                 str(row.get('Attribute', '')),
                 int(row.get('Attribute Card No.', 0)) if pd.notnull(row.get('Attribute Card No.')) else 0,
                 scripture_text,
-                str(row.get('Final Segment', '')),
-                scripture_text # Syncing Scholar Reason with App Msg
+                status,
+                scripture_text # Scholar reason
                 )
                 success_count += 1
             except Exception as e:
-                # Skip row if fatal error (mapping delta safeguard)
-                pass
+                # pass
+                if success_count == 0: print(f"Row error: {e}")
         
         print(f"SUCCESS: {success_count} rows added.")
         total_added += success_count

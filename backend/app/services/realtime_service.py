@@ -31,14 +31,6 @@ EXCLUDE_MSGS = [
     "Close enough... valid, not executed."
 ]
 
-TRANSLATIONS = {
-    "ta": {"Valid": "காம்போ உறுதியானது.", "Invalid": "காம்போ தவறானது.", "Exclude": "உறுதியானது, ஆனால் இன்னும் இல்லை."},
-    "te": {"Valid": "కాంబో చెల్లుబాటు అయ్యేది.", "Invalid": "కాంబో చెల్లదు.", "Exclude": "చెల్లుబాటు, కానీ అమలు కాలేదు."},
-    "hi": {"Valid": "कॉम्बो वैध है।", "Invalid": "यह कॉम्बो अवैध है।", "Exclude": "वैध है, लेकिन निष्पादित नहीं।"},
-    "es": {"Valid": "El combo es válido.", "Invalid": "El combo es inválido.", "Exclude": "Casi... válido, pero no ejecutado."},
-    "ja": {"Valid": "有効なコンボです。", "Invalid": "無効なコンボです。", "Exclude": "有効ですが、まだ実行されていません。"},
-    "fr": {"Valid": "Le combo est valide.", "Invalid": "Le combo est invalide.", "Exclude": "Presque... valide, pas encore exécuté."}
-}
 
 OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 
@@ -50,6 +42,7 @@ class RealtimeService:
         self.openai_ws = None
         self.last_numbers = [] # PERSISTENT MEMORY FOR 'WHY?' QUESTIONS
         self._relay_count = 0 # Diagnostic Counter
+        self._current_transcript = "" # Accumulator for terminal logging
 
     async def connect(self):
         """Unified Connection: Restores session context and establishes OpenAI WebSocket."""
@@ -93,34 +86,22 @@ class RealtimeService:
             "type": "session.update",
             "session": {
                 "modalities": ["audio", "text"],
-                "instructions": f"""You are the EpicVerse AI game master.
-                Current Mode: {clean_name}.
-                HIERARCHICAL TRUTH RULES:
-                1. PRIMARY COMBO CHECK (First Question):
-                   - When a user calls 'query_database_for_combo', you MUST respond with ONLY ONE of these rhythmic messages, TRANSLATED into the user's language:
-                     "Ah... rightly placed.", "Good flow... valid.", "Yes... a true, valid combo."
-                   - DO NOT provide any scripture details or segments in the first response.
-                2. DEEP-DIVE (WHY/HOW):
-                   - If the user follows up with "Why?", "How?", or "Explain", you MUST translate the 'final_segment' and 'revised_scholar_reason' into the user's language.
-                   - Provide the full scholarly context with reverence, maintaining the user's language throughout.
-                3. GLOBAL POLYGLOT FIDELITY: You MUST respond in the EXACT language the user spoke. You are a global master of 100+ world languages. Identify the seeker's language and mirror it with 100% accuracy for the rhythmic intro, the scripture truth, and the scholarly reason. NEVER leak English into a non-English conversation.
-                4. SMART SPLIT NUMERICAL RULES: Seekers provide two card numbers between 1-120. If you hear a concatenated number, you MUST split it:
-                   - 3 digits (e.g., "129") -> card1: "1", card2: "29".
-                   - 4 digits (e.g., "1256") -> card1: "12", card2: "56".
-                   - Ensure both cards are within the 1-120 range before calling the tool.
-                Context Memory (Previously discussed): {self.last_numbers if self.last_numbers else 'No combos yet'}.
-                If they ask 'Why?' immediately, refer to these numbers.
-""",
+                "instructions": f"""Role: Robotic Scribe. 
+Rule 1: CALL 'query_postgres_database' for every number pair.
+Rule 2: MUST speak ONLY the text in 'MANDATORY_SPEAK_THIS' for Turn 1. 
+Rule 3: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving". 
+Rule 4: Turn 2 (Why/How) -> Read 'revised_scholar_reason' exactly. Do not add intro or outro.
+Journey: {clean_name}.""",
                 "tools": [
                     {
                     "type": "function",
                     "name": "query_postgres_database",
-                    "description": "Call this whenever the user mentions two card numbers or a 'combo' (e.g., '1 and 29', '56 and 88', 'Check numbers 12 and 13'). Return the result to the user with a scholarly, divine tone.",
+                    "description": "Truth check for card combo IDs (1-120).",
                     "parameters": {
                             "type": "object",
                             "properties": {
-                                 "card1": {"type": "string", "description": "ID of first card (1-120). If merged (e.g. 129), split it into 1 & 29."},
-                                 "card2": {"type": "string", "description": "ID of second card (1-120). If merged (e.g. 1256), split it into 12 & 56."}
+                                 "card1": {"type": "string"},
+                                 "card2": {"type": "string"}
                             },
                             "required": ["card1", "card2"]
                         }
@@ -130,8 +111,8 @@ class RealtimeService:
                  "turn_detection": {
                      "type": "server_vad",
                      "threshold": 0.5,
-                     "prefix_padding_ms": 500,
-                     "silence_duration_ms": 1200
+                     "prefix_padding_ms": 300,
+                     "silence_duration_ms": 650
                  },
                  "input_audio_format": "pcm16",
                  "input_audio_transcription": {"model": "whisper-1"}
@@ -214,18 +195,39 @@ class RealtimeService:
                     try:
                         await self.client_ws.send_bytes(audio_bytes)
                     except Exception:
-                        # BUG FIX: Client may have disconnected, but we must NOT stop here.
-                        # We keep draining OpenAI so tool calls complete cleanly.
                         pass
 
                 # 2. JSON Event Relay (skip raw audio buffer echoes)
                 elif event["type"] != "input_audio_buffer.append":
+                    # LOGGING: Print non-audio events to catch errors
+                    print(f"[REALTIME] OpenAI Event: {event['type']}")
+                    if event["type"] == "error":
+                        print(f"[REALTIME] CRITICAL OPENAI ERROR: {json.dumps(event.get('error', {}), indent=2)}")
+                    
                     try:
                         await self.client_ws.send_text(raw_message)
                     except Exception:
                         pass  # Client disconnected, continue for tool calls
 
-                # 3. Intercept Tool Call — executes DB query and feeds result back
+                # 3. Transcript Logging
+                elif event["type"] == "response.audio_transcript.delta":
+                    self._current_transcript += event["delta"]
+                    # Print delta to terminal for real-time visibility
+                    print(f"\r[AI]: {self._current_transcript}", end="", flush=True)
+
+                elif event["type"] == "response.audio_transcript.done":
+                    print(f"\n[AI FINAL]: {self._current_transcript}")
+                    self._current_transcript = "" # Reset for next turn
+
+                # 4. FAST-PATH: Intercept User Transcript for Pre-Fetch
+                elif event["type"] == "conversation.item.input_audio_transcription.completed":
+                    transcript = event.get("transcript", "")
+                    nums = re.findall(r'\d+', transcript)
+                    if len(nums) >= 2:
+                        print(f"[FAST-PATH] Detected {nums[0]} & {nums[1]}. Triggering Pre-Fetch...")
+                        asyncio.create_task(query_postgres_database(self.game_mode, nums[0], nums[1]))
+
+                # 5. Intercept Tool Call — executes DB query and feeds result back
                 if event["type"] == "response.done":
                     output_items = event.get("response", {}).get("output", [])
                     for item in output_items:
@@ -257,20 +259,32 @@ class RealtimeService:
             status = data.get("status", "Invalid")
             
             # Select Random Preferred Message based on status
-            msg_list = VALID_MSGS if status == "Valid" else INVALID_MSGS
-            if status == "Exclude": msg_list = EXCLUDE_MSGS
+            # Important: Database uses 'Valid but Excluded', code was only checking 'Exclude'
+            if status == "Valid":
+                msg_list = VALID_MSGS
+            elif "Excluded" in status or status == "Exclude":
+                msg_list = EXCLUDE_MSGS
+            else:
+                msg_list = INVALID_MSGS
+            
             random_msg = random.choice(msg_list)
             
-            # Enrichment for AI Brain
+            # Enrichment for AI Brain - Hard Forced keys
             enriched_result = {
                 "status": status,
-                "preferred_message": random_msg,
-                "final_segment": data.get("final_segment"),
+                "MANDATORY_SPEAK_THIS": random_msg,
+                "scripture_logic": data.get("final_segment"),
                 "revised_scholar_reason": data.get("revised_scholar_reason"),
-                "instruction": "Prepend the translated 'preferred_message' to your response. For the first answer, use ONLY 'final_segment'. If they ask 'Why?', reveal 'revised_scholar_reason'."
+                "CONSTRAINTS": "You are a SCRIBE. READ MANDATORY_SPEAK_THIS word-for-word. DO NOT INTERPRET."
             }
             output_str = json.dumps(enriched_result)
-        except Exception:
+            
+            # ENHANCED TERMINAL LOG FOR TOOL RESULT
+            print(f"\n[MATRIX RESULT]: Mode='{self.game_mode}' | Cards={num1}&{num2} | Status='{status}' | Sent_Msg='{random_msg}'")
+            if status == "Valid":
+                print(f"[MATRIX DATA]: {data.get('final_segment')[:100]}...")
+        except Exception as e:
+            print(f"[REALTIME] Tool Enrichment Error: {e}")
             output_str = raw_result
 
         # Relay Output to AI Brain
@@ -283,6 +297,14 @@ class RealtimeService:
             }
         }))
         await self.openai_ws.send(json.dumps({"type": "response.create"}))
+
+    async def cleanup(self):
+        if self.openai_ws:
+            try:
+                await self.openai_ws.close()
+            except Exception:
+                pass
+        print(f"[REALTIME] Session Cleaned Up for: {self.user_uid}")
 
     async def run(self):
         """Two-Phase Bridge: client relay finishes first, then OpenAI drains fully."""
@@ -300,6 +322,8 @@ class RealtimeService:
         # Now we give OpenAI up to 45 seconds to finish the response.
         try:
             await asyncio.wait_for(asyncio.shield(t2), timeout=45.0)
+            # AI Finished Speaking
+            print(f"[REALTIME] AI response finished for {self.user_uid}")
         except asyncio.TimeoutError:
             print(f"[REALTIME] AI response timeout (45s) for {self.user_uid}")
         except Exception:

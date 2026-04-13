@@ -40,14 +40,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           1,
-                          'Origin Arc (Balakanda)',
+                          'OriginArc (Balakanda)',
                           'assets/images/mode_1_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 1');
+                            webSocketService.updateMode('OriginArc (Balakanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 1')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'OriginArc (Balakanda)')),
                             );
                           },
                         ),
@@ -57,14 +57,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           2,
-                          'CrownShift (Ayodhya Kanda)',
+                          'CrownShift (AyodhyaKanda)',
                           'assets/images/mode_2_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 2');
+                            webSocketService.updateMode('CrownShift (AyodhyaKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 2')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'CrownShift (AyodhyaKanda)')),
                             );
                           },
                         ),
@@ -78,10 +78,10 @@ class ModeSelectionScreen extends StatelessWidget {
                           'assets/images/mode_3_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 3');
+                            webSocketService.updateMode('WildRun (AranyaKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 3')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'WildRun (AranyaKanda)')),
                             );
                           },
                         ),
@@ -91,14 +91,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           4,
-                          'GlowLine (Kishkindha Kanda)',
+                          'GlowLine (KishkindhaKanda)',
                           'assets/images/mode_4_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 4');
+                            webSocketService.updateMode('GlowLine (KishkindhaKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 4')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'GlowLine (KishkindhaKanda)')),
                             );
                           },
                         ),
@@ -108,14 +108,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           5,
-                          'LankaLeap (SundaraKanda)',
+                          'lankaLeap (SundaraKanda)',
                           'assets/images/mode_5_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 5');
+                            webSocketService.updateMode('lankaLeap (SundaraKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 5')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'lankaLeap (SundaraKanda)')),
                             );
                           },
                         ),
@@ -125,14 +125,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           6,
-                          'WarRoom (Yuddha Kanda)',
+                          'WarRoom (YuddhaKanda)',
                           'assets/images/mode_6_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 6');
+                            webSocketService.updateMode('WarRoom (YuddhaKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 6')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'WarRoom (YuddhaKanda)')),
                             );
                           },
                         ),
@@ -142,14 +142,14 @@ class ModeSelectionScreen extends StatelessWidget {
                         child: _buildModeCard(
                           context,
                           7,
-                          'Afterlight (Uttara Kanda)',
+                          'AfterLight (UttaraKanda)',
                           'assets/images/mode_7_bg.png',
                           isUnlocked: true,
                           onTap: () {
-                            webSocketService.updateMode('Mode 7');
+                            webSocketService.updateMode('AfterLight (UttaraKanda)');
                             Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'Mode 7')),
+                              MaterialPageRoute(builder: (_) => const CompanionReadyScreen(gameMode: 'AfterLight (UttaraKanda)')),
                             );
                           },
                         ),

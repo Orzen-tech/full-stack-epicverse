@@ -89,30 +89,40 @@ SCHEMA_SQL = [
 ]
 
 db_pool: asyncpg.Pool | None = None
+_db_pool_failed: bool = False  # once True, skip retrying so endpoints return fast
 redis_client: Redis | None = None
 _REDIS_ENABLED: bool = True
 
 KNOWLEDGE_BASE_CACHE: list[dict[str, Any]] = []
 
 
-async def init_db_pool() -> asyncpg.Pool:
-    global db_pool
+async def init_db_pool() -> asyncpg.Pool | None:
+    global db_pool, _db_pool_failed
+    if _db_pool_failed:
+        return None
     if db_pool is None:
-        db_pool = await asyncpg.create_pool(
-            settings.ASYNC_DATABASE_URL,
-            min_size=settings.DB_POOL_MIN_SIZE,
-            max_size=settings.DB_POOL_MAX_SIZE,
-            max_inactive_connection_lifetime=300,
-            command_timeout=settings.DB_COMMAND_TIMEOUT_SECONDS,
-        )
+        try:
+            db_pool = await asyncpg.create_pool(
+                settings.ASYNC_DATABASE_URL,
+                min_size=1,   # start with 1 connection so timeout=10 is per-pool not per-connection*20
+                max_size=settings.DB_POOL_MAX_SIZE,
+                max_inactive_connection_lifetime=300,
+                command_timeout=settings.DB_COMMAND_TIMEOUT_SECONDS,
+                timeout=10,   # fail fast if DB is unreachable
+            )
+        except Exception as e:
+            print(f"[DB] Pool creation failed: {e}")
+            _db_pool_failed = True
+            db_pool = None
     return db_pool
 
 
 async def close_db_pool() -> None:
-    global db_pool
+    global db_pool, _db_pool_failed
     if db_pool is not None:
         await db_pool.close()
         db_pool = None
+    _db_pool_failed = False
 
 
 async def init_redis() -> Redis | None:
@@ -210,16 +220,22 @@ async def _migrate_embeddings(conn: asyncpg.Connection) -> None:
 
 async def get_available_modes() -> list[str]:
     pool = await init_db_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT gameplay_mode
-            FROM card_combos
-            WHERE gameplay_mode IS NOT NULL
-            ORDER BY gameplay_mode
-            """
-        )
-    return [row["gameplay_mode"] for row in rows]
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT gameplay_mode
+                FROM card_combos
+                WHERE gameplay_mode IS NOT NULL
+                ORDER BY gameplay_mode
+                """
+            )
+        return [row["gameplay_mode"] for row in rows]
+    except Exception as e:
+        print(f"[DB] get_available_modes error: {e}")
+        return []
 
 
 def _cache_key(prefix: str, payload: dict[str, Any]) -> str:

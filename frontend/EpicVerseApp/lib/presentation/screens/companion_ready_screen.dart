@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
@@ -57,6 +58,9 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     _vibrationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _speechVibrationController, curve: Curves.easeInOutSine),
     );
+    
+    // Initialize Professional PCM Sound Engine (24kHz Mono Int16)
+    _initPcmSound();
     
     // Lazy Handshake: Connection is now triggered ONLY by Mic Click
     _statusText = "Tap mic to start";
@@ -109,11 +113,18 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         });
         
         // Lazy Handshake Cycle: Disconnect after AI finishes speaking to save resources
-        webSocketService.disconnect();
+        // webSocketService.disconnect(); // TEMPORARILY DISABLED TO ENSURE KEEP-ALIVE
         
         // --- NEXT SENTENCE AUTO-PLAY ---
         _isPlayerBusy = false;
         _processAudioQueue();
+      }
+    });
+
+    // --- AUTO-SYNC CONNECTION ON LOAD ---
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_isConnected) {
+         _startVoiceTurn(); // Triggers lazy handshake with correct widget.gameMode
       }
     });
   }
@@ -138,29 +149,47 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
            setState(() => _statusText = "${data['status']}: ${data['message'] ?? ""}");
         } else if (data['aiResponse'] != null) {
            setState(() => _statusText = data['aiResponse']);
+        } else if (data['type'] == 'response.done') {
+           // AI Finished Speaking - Clear visual state
+           if (mounted) {
+              setState(() {
+                _isTalking = false;
+                _speechVibrationController.stop();
+                _speechVibrationController.reset();
+              });
+           }
         }
       } else if (message is Uint8List) {
-        _audioQueue.add(message);
-        _processAudioQueue();
+        // [REALTIME FIX] Feed high-fidelity PCM stream directly to hardware
+        // Convert Uint8List to ByteData for PcmArrayInt16
+        FlutterPcmSound.feed(PcmArrayInt16(bytes: message.buffer.asByteData()));
+        
+        // Mouth Action trigger
+        if (!_isTalking) {
+           setState(() => _isTalking = true);
+           _speechVibrationController.repeat(reverse: true);
+        }
+        
+        // Reset talking state after a small silence if needed, 
+        // but for now, we rely on the backend 'response.done'
       }
     } catch (e) {
       debugPrint('Error parsing message: $e');
     }
   }
 
-  Future<void> _processAudioQueue() async {
-    if (_isPlayerBusy || _audioQueue.isEmpty) return;
-    
-    _isPlayerBusy = true;
-    final nextChunk = _audioQueue.removeAt(0);
-    
+  Future<void> _initPcmSound() async {
     try {
-      await _audioPlayer.play(BytesSource(nextChunk));
+      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      // Removed FlutterPcmSound.play() as it is not supported in this version 
+      // and playback starts automatically on feed in the Android implementation.
     } catch (e) {
-      debugPrint('Audio playback error: $e');
-      _isPlayerBusy = false;
-      _processAudioQueue();
+      debugPrint('Error setting up PCM sound: $e');
     }
+  }
+
+  Future<void> _processAudioQueue() async {
+    // Legacy logic - Keep for backward compat or remove if unused 🧘
   }
 
   Future<void> _initWakeWord() async {
@@ -254,8 +283,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       final stream = await _audioRecorder.startStream(const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         numChannels: 1,
-        sampleRate: 16000,
-        bitRate: 128000, // 16 * 1000 * 16 / 2
+        sampleRate: 24000,
+        bitRate: 384000, // 24 * 1000 * 16 / 1
       ));
       
       _micSubscription = stream.listen((data) {
@@ -520,30 +549,69 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                   
                   const Spacer(),
 
-                    // Centered Mic Button (Typing box removed)
+                    // Repositioned Mic Button with Pentagon Background
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 30.0),
-                      child: Center(
+                      padding: const EdgeInsets.only(bottom: 40.0, right: 30.0),
+                      child: Align(
+                        alignment: Alignment.bottomRight,
                         child: GestureDetector(
-                          onTap: () => _isRecording ? _stopRecording() : _startVoiceTurn(10), // Tap to toggle (10s auto-end)
-                          onLongPressStart: (_) => _startVoiceTurn(60), // Hold to speak (Longer timeout)
-                          onLongPressEnd: (_) => _stopRecording(), // Release to stop
+                          onTap: () => _isRecording ? _stopRecording() : _startVoiceTurn(10),
+                          onLongPressStart: (_) => _startVoiceTurn(60),
+                          onLongPressEnd: (_) => _stopRecording(),
                           child: TweenAnimationBuilder<double>(
-                            tween: Tween<double>(begin: 1.0, end: _isRecording ? 1.6 : 1.0),
+                            tween: Tween<double>(begin: 1.0, end: _isRecording ? 1.4 : 1.0),
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.elasticOut,
                             builder: (context, scale, child) {
                               return Transform.scale(
                                 scale: scale,
-                                child: Icon(
-                                  _isRecording ? Icons.mic_rounded : Icons.mic_none_rounded,
-                                  color: _isRecording ? Colors.redAccent : AppColors.primaryGold,
-                                  size: 48, // Slightly larger since it's centered
-                                  shadows: [
-                                    Shadow(
-                                      color: (_isRecording ? Colors.redAccent : AppColors.primaryGold).withOpacity(0.5),
-                                      blurRadius: _isRecording ? 30 : 10,
-                                    )
+                                child: Stack(
+                                  alignment: Alignment.center,
+                                  children: [
+                                    // Pentagon Background Component
+                                    ClipPath(
+                                      clipper: PentagonClipper(),
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 300),
+                                        width: 80,
+                                        height: 80,
+                                        decoration: BoxDecoration(
+                                          gradient: _isRecording 
+                                            ? RadialGradient(
+                                                colors: [
+                                                  AppColors.primaryGold.withOpacity(0.5),
+                                                  AppColors.primaryGold.withOpacity(0.0),
+                                                ],
+                                                radius: 0.8,
+                                              )
+                                            : LinearGradient(
+                                                begin: Alignment.topLeft,
+                                                end: Alignment.bottomRight,
+                                                colors: [
+                                                  AppColors.primaryGold.withOpacity(0.15),
+                                                  AppColors.primaryGold.withOpacity(0.05),
+                                                ],
+                                              ),
+                                          border: Border.all(
+                                            color: AppColors.primaryGold.withOpacity(0.4),
+                                            width: 1,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    
+                                    // Mic Icon
+                                    Icon(
+                                      _isRecording ? Icons.mic_rounded : Icons.mic_none_rounded,
+                                      color: AppColors.primaryGold,
+                                      size: 32,
+                                      shadows: [
+                                        Shadow(
+                                          color: AppColors.primaryGold.withOpacity(0.5),
+                                          blurRadius: _isRecording ? 20 : 10,
+                                        )
+                                      ],
+                                    ),
                                   ],
                                 ),
                               );
@@ -635,4 +703,29 @@ class _CosmicPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_CosmicPainter oldDelegate) => true;
+}
+
+class PentagonClipper extends CustomClipper<Path> {
+  @override
+  Path getClip(Size size) {
+    Path path = Path();
+    double radius = size.width / 2;
+    double centerX = size.width / 2;
+    double centerY = size.height / 2;
+    double angle = (2 * math.pi) / 5;
+    
+    // Start at top (adjust by -pi/2 to make it point upwards)
+    path.moveTo(centerX + radius * math.cos(-math.pi / 2),
+                centerY + radius * math.sin(-math.pi / 2));
+    
+    for (int i = 1; i <= 5; i++) {
+      path.lineTo(centerX + radius * math.cos(-math.pi / 2 + i * angle),
+                  centerY + radius * math.sin(-math.pi / 2 + i * angle));
+    }
+    path.close();
+    return path;
+  }
+
+  @override
+  bool shouldReclip(CustomClipper<Path> oldClipper) => false;
 }

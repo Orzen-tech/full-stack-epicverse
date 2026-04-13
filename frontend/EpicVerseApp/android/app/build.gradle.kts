@@ -10,6 +10,7 @@ android {
     compileSdk = 36
     // speech_to_text requires NDK 28.2.13676358
     ndkVersion = "28.2.13676358"
+    buildToolsVersion = "34.0.0"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -23,7 +24,7 @@ android {
     defaultConfig {
         applicationId = "com.mltiverse.mltiverse_app"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

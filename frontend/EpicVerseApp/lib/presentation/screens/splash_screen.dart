@@ -19,6 +19,7 @@ class SplashScreen extends ConsumerStatefulWidget {
 
 class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProviderStateMixin {
   late AnimationController _controller;
+  late AnimationController _spinController;
   late Animation<double> _logoOpacity;
   late Animation<double> _logoScale;
   late Animation<double> _bgScale;
@@ -53,6 +54,12 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
       ),
     );
 
+    // Continuous spin for loading symbol
+    _spinController = AnimationController(
+      duration: const Duration(seconds: 4),
+      vsync: this,
+    )..repeat();
+
     _controller.forward();
     _checkAuth();
   }
@@ -60,6 +67,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
   @override
   void dispose() {
     _controller.dispose();
+    _spinController.dispose();
     super.dispose();
   }
 
@@ -176,9 +184,14 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                 const SizedBox(height: 50),
                 FadeTransition(
                   opacity: _logoOpacity,
-                  child: const CircularProgressIndicator(
-                    color: Color(0xFFC5A358), // Gold
-                    strokeWidth: 2,
+                  child: RotationTransition(
+                    turns: _spinController,
+                    child: Image.asset(
+                      'assets/images/loading image.png',
+                      width: 64,
+                      height: 64,
+                      fit: BoxFit.contain,
+                    ),
                   ),
                 ),
               ],
