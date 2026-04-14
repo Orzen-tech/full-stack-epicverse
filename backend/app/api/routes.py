@@ -25,23 +25,30 @@ async def validate_invite(code: str):
 @router.post("/sync-user")
 async def sync_user(user: UserRecord):
     """Saves user info to the SQL database after verifying invite code."""
-    from app.services.user_db import validate_invite_code, consume_invite_code, save_user
+    from app.services.user_db import validate_invite_code, consume_invite_code, save_user, get_user
     
-    # 1. Verification Step (Required for all new users)
-    if not user.invite_code:
-        raise HTTPException(status_code=400, detail="Invite code is required for registration")
+    # Check if user already exists in our database
+    existing_user = await get_user(user.uid)
     
-    validation = await validate_invite_code(user.invite_code)
-    if not validation["valid"]:
-        raise HTTPException(status_code=403, detail=validation["message"])
+    if not existing_user:
+        # 1. Verification Step (Required ONLY for new users)
+        if not user.invite_code:
+            raise HTTPException(status_code=400, detail="Invite code is required for registration")
         
-    # 2. Save User
-    await save_user(user)
-    
-    # 3. Consume Code (Burn it)
-    await consume_invite_code(user.invite_code)
-    
-    return {"status": "success", "message": "User synchronized and invite consumed"}
+        validation = await validate_invite_code(user.invite_code)
+        if not validation["valid"]:
+            raise HTTPException(status_code=403, detail=validation["message"])
+            
+        # 2. Save User
+        await save_user(user)
+        
+        # 3. Consume Code (Burn it)
+        await consume_invite_code(user.invite_code)
+        return {"status": "success", "message": "New user registered and invite consumed"}
+    else:
+        # Existing user: Just update their profile info
+        await save_user(user)
+        return {"status": "success", "message": "User profile updated"}
 
 @router.get("/user/{firebase_id}")
 async def fetch_user(firebase_id: str):

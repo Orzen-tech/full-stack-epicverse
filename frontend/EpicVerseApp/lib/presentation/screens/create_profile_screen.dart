@@ -135,19 +135,25 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       );
 
       // 3. Sync with Backend SQL Database (Includes Invite Code Consumption)
-      final backendUrl = '${ApiConfig.apiUrl}/sync-user';
-      await _dio.post(
-        backendUrl,
-        data: {
-          "firebase_id": firebaseUser.uid,
-          "display_name": newUser.displayName,
-          "email": newUser.email,
-          "primary_language": newUser.primaryLanguage,
-          "invite_code": inviteCode,
-          "profile_picture": newUser.profilePicture,
-        },
-        options: Options(headers: ApiConfig.headers),
-      );
+      try {
+        final backendUrl = '${ApiConfig.apiUrl}/sync-user';
+        await _dio.post(
+          backendUrl,
+          data: {
+            "firebase_id": firebaseUser.uid,
+            "display_name": newUser.displayName,
+            "email": newUser.email,
+            "primary_language": newUser.primaryLanguage,
+            "invite_code": inviteCode,
+            "profile_picture": newUser.profilePicture,
+          },
+          options: Options(headers: ApiConfig.headers),
+        );
+      } catch (e) {
+        // [FAIL-SAFE] If Postgres sync fails, delete the Firebase account so the state isn't broken
+        await firebaseUser.delete();
+        throw Exception("Database synchronization failed. Please try again or use a different invite code. Details: $e");
+      }
 
       // 4. Update local state and Navigate
       ref.read(userProvider.notifier).setUser(newUser);
