@@ -7,10 +7,13 @@ plugins {
 
 android {
     namespace = "com.mltiverse.mltiverse_app"
-    compileSdk = 36
+    compileSdk = 35 // Stick to 35 for stability with AGP 8.6.0
+    
+    // Build tools will be automatically selected based on compileSdk if omitted
+    // buildToolsVersion = "35.0.0" 
+
     // speech_to_text requires NDK 28.2.13676358
     ndkVersion = "28.2.13676358"
-    buildToolsVersion = "34.0.0"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -24,7 +27,7 @@ android {
     defaultConfig {
         applicationId = "com.mltiverse.mltiverse_app"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35 // Match compileSdk
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

@@ -6,6 +6,7 @@ import '../widgets/network_background.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'dart:convert';
 import 'dart:io';
 import '../../providers/user_provider.dart';
@@ -25,12 +26,8 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _inviteController = TextEditingController();
 
-  final List<String> _languages = [
-    'English', 'Hindi', 'Tamil', 'Telugu', 'Bengali', 'Marathi', 'Gujarati', 
-    'Kannada', 'Malayalam', 'Sindhi', 'Punjabi', 'Sanskrit', 'Odia', 'Assamese'
-  ];
-  String? _primaryLanguage;
   bool _isLoading = false;
   final Dio _dio = Dio();
   File? _profileImage;
@@ -41,6 +38,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _inviteController.dispose();
     super.dispose();
   }
 
@@ -51,30 +49,65 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     }
   }
 
-  Future<void> _submitForm() async {
-    final bool isFormValid = _formKey.currentState!.validate();
-    final bool isLanguageValid = _primaryLanguage != null;
-
-    if (!isFormValid || !isLanguageValid) {
-      String errorMessage = 'Please complete all required fields correctly.';
-      if (isFormValid && !isLanguageValid) {
-        errorMessage = 'Please select your primary gameplay language.';
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(errorMessage),
-          backgroundColor: AppColors.error.withOpacity(0.8),
-          behavior: SnackBarBehavior.floating,
+  Future<void> _showQRScanner() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            onPressed: () => Navigator.pop(context),
+          ),
+          title: const Text('Scan Invite QR', style: TextStyle(color: Colors.white)),
         ),
-      );
+        body: MobileScanner(
+          onDetect: (capture) {
+            final List<Barcode> barcodes = capture.barcodes;
+            for (final barcode in barcodes) {
+              if (barcode.rawValue != null) {
+                Navigator.pop(context, barcode.rawValue);
+                break;
+              }
+            }
+          },
+        ),
+      ),
+    );
+
+    if (result != null) {
+      _inviteController.text = result;
+    }
+  }
+
+  Future<void> _submitForm() async {
+    if (!_formKey.currentState!.validate()) {
+      _showError('Please complete all required fields correctly.');
       return;
     }
 
     setState(() => _isLoading = true);
 
     try {
-      // 1. Register with Firebase Auth
+      // 1. Pre-verify Invite Code with Backend
+      final inviteCode = _inviteController.text.trim();
+      final validateUrl = '${ApiConfig.apiUrl}/validate-invite/$inviteCode';
+      
+      try {
+        final validateResponse = await _dio.get(
+          validateUrl,
+          options: Options(headers: ApiConfig.headers),
+        );
+        if (validateResponse.statusCode != 200) {
+          throw Exception(validateResponse.data['detail'] ?? "Invalid invite code");
+        }
+      } on DioException catch (de) {
+        throw Exception(de.response?.data['detail'] ?? "Invite code verification failed");
+      }
+
+      // 2. Register with Firebase Auth
       final UserCredential credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
@@ -96,12 +129,12 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         id: firebaseUser.uid,
         displayName: _nameController.text.trim(),
         email: _emailController.text.trim(),
-        primaryLanguage: _primaryLanguage!,
-        preferredLanguages: [_primaryLanguage!],
+        primaryLanguage: 'English', // Defaulting to English since we swapped the UI
+        preferredLanguages: ['English'],
         profilePicture: base64Image,
       );
 
-      // 2. Sync with Backend SQL Database
+      // 3. Sync with Backend SQL Database (Includes Invite Code Consumption)
       final backendUrl = '${ApiConfig.apiUrl}/sync-user';
       await _dio.post(
         backendUrl,
@@ -110,12 +143,13 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
           "display_name": newUser.displayName,
           "email": newUser.email,
           "primary_language": newUser.primaryLanguage,
+          "invite_code": inviteCode,
           "profile_picture": newUser.profilePicture,
         },
         options: Options(headers: ApiConfig.headers),
       );
 
-      // 3. Update local state and Navigate
+      // 4. Update local state and Navigate
       ref.read(userProvider.notifier).setUser(newUser);
 
       if (!mounted) return;
@@ -123,10 +157,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
     } on FirebaseAuthException catch (e) {
-      String error = e.message ?? "Authentication failed";
-      _showError(error);
+      _showError(e.message ?? "Authentication failed");
     } catch (e) {
-      _showError("System Error: $e");
+      _showError(e.toString().replaceAll('Exception: ', ''));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -214,20 +247,6 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                           ),
                         ),
                         const SizedBox(height: 32),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Your identity in the EpicVerse', 
-                                style: TextStyle(color: AppColors.textSecondary, fontSize: 14),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 32),
-                        const SizedBox(height: 32),
                         
                         _buildFieldLabel('DISPLAY NAME'),
                         TextFormField(
@@ -237,11 +256,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                             hintText: 'Enter your name',
                             icon: Icons.person_outline,
                           ),
-                          validator: (value) {
-                            if (value == null || value.trim().isEmpty) return 'Name is required';
-                            if (value.trim().length < 2) return 'Minimum 2 characters';
-                            return null;
-                          },
+                          validator: (value) => (value == null || value.trim().isEmpty) ? 'Name is required' : null,
                         ),
                         
                         const SizedBox(height: 24),
@@ -256,9 +271,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                           ),
                           validator: (value) {
                             if (value == null || value.trim().isEmpty) return 'Email is required';
-                            if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(value.trim())) {
-                              return 'Enter a valid email address';
-                            }
+                            if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(value.trim())) return 'Invalid email';
                             return null;
                           },
                         ),
@@ -273,20 +286,28 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                             hintText: 'Minimum 6 characters',
                             icon: Icons.lock_outline,
                           ),
-                          validator: (value) {
-                            if (value == null || value.isEmpty) return 'Password is required';
-                            if (value.length < 6) return 'Minimum 6 characters';
-                            return null;
-                          },
+                          validator: (value) => (value == null || value.length < 6) ? 'Min 6 characters' : null,
                         ),
                         
                         const SizedBox(height: 24),
-                        _buildFieldLabel('PRIMARY GAMEPLAY LANGUAGE'),
-                        _buildLanguageDropdown(),
+                        _buildFieldLabel('UNIQUE INVITE CODE'),
+                        TextFormField(
+                          controller: _inviteController,
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 2),
+                          decoration: _buildGlassInputDecoration(
+                            hintText: 'Enter code or scan QR',
+                            icon: Icons.vpn_key_outlined,
+                            suffixIcon: IconButton(
+                              icon: const Icon(Icons.qr_code_scanner, color: AppColors.primaryGold),
+                              onPressed: _showQRScanner,
+                            ),
+                          ),
+                          validator: (value) => (value == null || value.trim().isEmpty) ? 'Invite code required' : null,
+                        ),
                         
                         const SizedBox(height: 48),
                         GestureDetector(
-                          onTap: _submitForm,
+                          onTap: _isLoading ? null : _submitForm,
                           child: Container(
                             width: double.infinity,
                             height: 60,
@@ -311,11 +332,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                               ? const CircularProgressIndicator(color: Colors.white)
                               : const Text(
                                   'Create Companion Profile',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                                  style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
                                 ),
                           ),
                         ),
@@ -332,30 +349,19 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     );
   }
 
-  InputDecoration _buildGlassInputDecoration({required String hintText, required IconData icon}) {
+  InputDecoration _buildGlassInputDecoration({required String hintText, required IconData icon, Widget? suffixIcon}) {
     return InputDecoration(
       hintText: hintText,
-      hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 14),
+      hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
       prefixIcon: Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 20),
+      suffixIcon: suffixIcon,
       filled: true,
       fillColor: AppColors.glassBackground,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: AppColors.glassBorder),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: AppColors.glassBorder),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: AppColors.primaryGold.withOpacity(0.5), width: 1.5),
-      ),
-      errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.error, width: 1),
-      ),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.glassBorder)),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.glassBorder)),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.primaryGold.withOpacity(0.5), width: 1.5)),
+      errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.error, width: 1)),
       errorStyle: const TextStyle(color: AppColors.error, fontSize: 12),
     );
   }
@@ -363,46 +369,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   Widget _buildFieldLabel(String label) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10.0, left: 4),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: AppColors.primaryGold, 
-          fontSize: 11, 
-          fontWeight: FontWeight.w800, 
-          letterSpacing: 1.5,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLanguageDropdown() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      decoration: BoxDecoration(
-        color: AppColors.glassBackground,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.glassBorder),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: _primaryLanguage,
-          hint: const Text(
-            'Select Language',
-            style: TextStyle(color: AppColors.textMuted, fontSize: 15),
-          ),
-          isExpanded: true,
-          dropdownColor: AppColors.surface,
-          iconEnabledColor: AppColors.primaryGold,
-          style: const TextStyle(color: Colors.white, fontSize: 15),
-          items: _languages.map((lang) => DropdownMenuItem(
-            value: lang, 
-            child: Text(lang)
-          )).toList(),
-          onChanged: (value) {
-            if (value != null) {
-              setState(() => _primaryLanguage = value);
-            }
-          },
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          label,
+          style: const TextStyle(color: AppColors.primaryGold, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.5),
         ),
       ),
     );

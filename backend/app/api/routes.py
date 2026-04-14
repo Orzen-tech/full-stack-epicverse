@@ -13,11 +13,35 @@ from app.api.dependencies import get_current_user
 
 router = APIRouter()
 
+@router.get("/validate-invite/{code}")
+async def validate_invite(code: str):
+    """Checks if an invite code is valid."""
+    from app.services.user_db import validate_invite_code
+    result = await validate_invite_code(code)
+    if not result["valid"]:
+        raise HTTPException(status_code=403, detail=result["message"])
+    return result
+
 @router.post("/sync-user")
 async def sync_user(user: UserRecord):
-    """Saves user info to the SQL database."""
+    """Saves user info to the SQL database after verifying invite code."""
+    from app.services.user_db import validate_invite_code, consume_invite_code, save_user
+    
+    # 1. Verification Step (Required for all new users)
+    if not user.invite_code:
+        raise HTTPException(status_code=400, detail="Invite code is required for registration")
+    
+    validation = await validate_invite_code(user.invite_code)
+    if not validation["valid"]:
+        raise HTTPException(status_code=403, detail=validation["message"])
+        
+    # 2. Save User
     await save_user(user)
-    return {"status": "success", "message": "User synchronized"}
+    
+    # 3. Consume Code (Burn it)
+    await consume_invite_code(user.invite_code)
+    
+    return {"status": "success", "message": "User synchronized and invite consumed"}
 
 @router.get("/user/{firebase_id}")
 async def fetch_user(firebase_id: str):
