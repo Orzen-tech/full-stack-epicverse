@@ -8,12 +8,12 @@ from app.services.retriever import ensure_card_search_schema, init_db_pool
 load_dotenv()
 
 class UserRecord(BaseModel):
-    uid: str
+    uid: str = Field(..., alias="firebase_id")
     email: str | None = None
-    display_name: str | None = Field(None, alias="displayName")
-    primary_language: str | None = Field(None, alias="primaryLanguage")
-    invite_code: str | None = Field(None, alias="inviteCode")
-    profile_picture: str | None = Field(None, alias="profilePicture")
+    display_name: str | None = Field(None, alias="display_name")
+    primary_language: str | None = Field(None, alias="primary_language")
+    invite_code: str | None = Field(None, alias="invite_code")
+    profile_picture: str | None = Field(None, alias="profile_picture")
 
     class Config:
         populate_by_name = True
