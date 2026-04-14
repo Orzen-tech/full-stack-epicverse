@@ -40,8 +40,9 @@ backend/tmp/
 backend/tmp_*.py
 build_latest.log
 
-# IDEs
+# IDEs & AI Tools
 **/.vscode/
 **/.idea/
+**/.claude/
 **/*.swp
 **/*.swo
