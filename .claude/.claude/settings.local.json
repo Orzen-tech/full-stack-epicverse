@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -E \"\\\\.\\(txt|toml|lock\\)$\")",
-      "Bash(curl -s --max-time 5 http://localhost:8000/)",
-      "Bash(echo \"EXIT:$?\")"
-    ]
-  }
-}
