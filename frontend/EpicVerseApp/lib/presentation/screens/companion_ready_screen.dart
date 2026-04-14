@@ -8,6 +8,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:lottie/lottie.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
@@ -426,9 +427,24 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                            child: child,
                          );
                        },
-                       child: Image.asset(
-                          'assets/images/cute_companion.png',
-                          fit: BoxFit.cover,
+                       child: Stack(
+                         alignment: Alignment.center,
+                         children: [
+                           // Base Character Image (Fallback/Background)
+                           Image.asset(
+                             'assets/images/cute_companion.png',
+                             fit: BoxFit.cover,
+                           ),
+                           // Lottie Mouth Animation (Overlay)
+                           // Only active when AI is talking
+                           Lottie.asset(
+                             'assets/animations/companion_talking.json',
+                             animate: _isTalking,
+                             repeat: true,
+                             fit: BoxFit.cover,
+                             errorBuilder: (context, error, stackTrace) => const SizedBox(), // Hide if file missing
+                           ),
+                         ],
                        ),
                      ),
                    ),
@@ -492,10 +508,6 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                       children: [
                          const Icon(AppIcons.companion, color: AppColors.primaryGold, size: 24),
                          const Spacer(),
-                         IconButton(
-                           icon: const Icon(AppIcons.settings, color: AppColors.primaryGold, size: 20), 
-                           onPressed: _showWakeWordSettings,
-                         ),
                          IconButton(icon: const Icon(AppIcons.close, color: AppColors.textMuted, size: 20), onPressed: () => Navigator.pop(context)),
                       ],
                     ),

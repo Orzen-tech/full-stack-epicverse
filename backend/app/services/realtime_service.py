@@ -30,6 +30,13 @@ EXCLUDE_MSGS = [
     "Getting there... valid, not executed.", "Not quite... valid, not executed.",
     "Close enough... valid, not executed."
 ]
+MODE_FAILURE_MSGS = [
+    "Wrong mode. This character has no part in this chapter. Big card, wrong room.",
+    "This character is not part of this mode's story. Not their chapter, not their moment.",
+    "This character sat this mode out entirely. No role, no lines, no score.",
+    "Not their era. The plot moved on without them for this one.",
+    "Lore-accurate no-show. This character simply doesn't exist in this mode."
+]
 
 
 OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
@@ -41,6 +48,7 @@ class RealtimeService:
         self.user_uid = user_uid
         self.openai_ws = None
         self.last_numbers = [] # PERSISTENT MEMORY FOR 'WHY?' QUESTIONS
+        self.primary_language = "en" # Default
         self._relay_count = 0 # Diagnostic Counter
         self._current_transcript = "" # Accumulator for terminal logging
 
@@ -48,9 +56,14 @@ class RealtimeService:
         """Unified Connection: Restores session context and establishes OpenAI WebSocket."""
         clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
         try:
-            # 1. Restore 'Zero-Amnesia' Context from Redis
+            # 1. Restore 'Zero-Amnesia' Context from Redis & Postgres
+            from app.services.user_db import get_user
+            user_profile = await get_user(self.user_uid)
             session_data = await session_store.get_session_data(self.user_uid)
+            
             self.last_numbers = session_data.get("last_numbers", [])
+            if user_profile:
+                self.primary_language = user_profile.get("primary_language", "en")
             
             # 2. Establish OpenAI Handshake
             headers = {
@@ -88,10 +101,13 @@ class RealtimeService:
                 "modalities": ["audio", "text"],
                 "instructions": f"""Role: Robotic Scribe. 
 Rule 1: CALL 'query_postgres_database' for every number pair.
-Rule 2: MUST speak ONLY the text in 'MANDATORY_SPEAK_THIS' for Turn 1. 
+Rule 2: MUST speak the text in 'MANDATORY_SPEAK_THIS' (translated accurately to the user's spoken language) for Turn 1. 
 Rule 3: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving". 
-Rule 4: Turn 2 (Why/How) -> Read 'revised_scholar_reason' exactly. Do not add intro or outro.
-Journey: {clean_name}.""",
+Rule 4: Turn 2 (Why/How) -> Read 'revised_scholar_reason' exactly (translated to the user's spoken language). Do not add intro or outro.
+Rule 5: ABSOLUTE LANGUAGE MIRRORING. You MUST detect the user's spoken language (e.g., Hindi, English, Sanskrit) and respond EXCLUSIVELY in that same language. Do not provide translations. THIS IS A HARD CONSTRAINT.
+Rule X: MODE VALIDATION FAILURE HANDLING. If the database tool returns 'Invalid', you MUST only speak the exact text provided in 'MANDATORY_SPEAK_THIS'. Do NOT explain. Do NOT add extra text. Output ONLY the selected line.
+Journey: {clean_name}.
+Primary Language Hint: {self.primary_language}""",
                 "tools": [
                     {
                     "type": "function",
@@ -114,8 +130,10 @@ Journey: {clean_name}.""",
                      "prefix_padding_ms": 300,
                      "silence_duration_ms": 650
                  },
-                 "input_audio_format": "pcm16",
-                 "input_audio_transcription": {"model": "whisper-1"}
+                 "output_audio_format": "pcm16",
+                 "input_audio_transcription": {
+                     "model": "whisper-1"
+                 }
             }
         }
         # Force 16kHz for mobile low-latency compatibility
@@ -149,9 +167,12 @@ Journey: {clean_name}.""",
                         msg_type = data.get("type", "")
 
                         if msg_type == "end":
-                            print("[REALTIME] FORCE RESPONSE: Client signaled 'end'.")
-                            await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                            await self.openai_ws.send(json.dumps({"type": "response.create"}))
+                            if self._relay_count > 2: # Only commit if we actually sent some audio chunks
+                                print(f"[REALTIME] FORCE RESPONSE: Client signaled 'end' after {self._relay_count} chunks.")
+                                await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                                await self.openai_ws.send(json.dumps({"type": "response.create"}))
+                            else:
+                                print("[REALTIME] IGNORED 'end': Buffer too small (< 2 chunks).")
 
                         elif msg_type in self._BACKEND_ONLY_TYPES:
                             # BUG FIX: These are backend control signals only.
@@ -192,6 +213,8 @@ Journey: {clean_name}.""",
                 # 1. Audio Streaming Delta — send as binary bytes
                 if event["type"] == "response.audio.delta":
                     audio_bytes = base64.b64decode(event["delta"])
+                    if self._relay_count % 10 == 0:
+                        print(f"[TTS DEBUG] Streaming Audio: {len(audio_bytes)} bytes")
                     try:
                         await self.client_ws.send_bytes(audio_bytes)
                     except Exception:
@@ -200,7 +223,11 @@ Journey: {clean_name}.""",
                 # 2. JSON Event Relay (skip raw audio buffer echoes)
                 elif event["type"] != "input_audio_buffer.append":
                     # LOGGING: Print non-audio events to catch errors
-                    print(f"[REALTIME] OpenAI Event: {event['type']}")
+                    if event["type"] == "input_audio_buffer.speech_started":
+                        print("\n[STT INPUT] >>> User started speaking...")
+                    elif event["type"] == "input_audio_buffer.speech_stopped":
+                        print("\n[STT INPUT] <<< User stopped speaking. Transcribing...")
+                    
                     if event["type"] == "error":
                         print(f"[REALTIME] CRITICAL OPENAI ERROR: {json.dumps(event.get('error', {}), indent=2)}")
                     
@@ -222,6 +249,7 @@ Journey: {clean_name}.""",
                 # 4. FAST-PATH: Intercept User Transcript for Pre-Fetch
                 elif event["type"] == "conversation.item.input_audio_transcription.completed":
                     transcript = event.get("transcript", "")
+                    print(f"\n[STT DEBUG] User said: '{transcript}'")
                     nums = re.findall(r'\d+', transcript)
                     if len(nums) >= 2:
                         print(f"[FAST-PATH] Detected {nums[0]} & {nums[1]}. Triggering Pre-Fetch...")
@@ -265,9 +293,18 @@ Journey: {clean_name}.""",
             elif "Excluded" in status or status == "Exclude":
                 msg_list = EXCLUDE_MSGS
             else:
-                msg_list = INVALID_MSGS
+                msg_list = MODE_FAILURE_MSGS
             
             random_msg = random.choice(msg_list)
+            
+            # Explicitly stream text to client for immediate UI/Test feedback
+            try:
+                await self.client_ws.send_text(json.dumps({
+                    "type": "response.audio_transcript.delta",
+                    "delta": f"{random_msg} "
+                }))
+            except:
+                pass
             
             # Enrichment for AI Brain - Hard Forced keys
             enriched_result = {
