@@ -21,6 +21,7 @@ class WebSocketService {
   final _messageController = StreamController<dynamic>.broadcast();
   final _statusController = StreamController<String>.broadcast();
   final _connectionStateController = StreamController<bool>.broadcast();
+  final _concurrentLogoutController = StreamController<String>.broadcast();
   
   String _currentMode = 'Mode 1';
   String _sessionId = const Uuid().v4();
@@ -34,6 +35,7 @@ class WebSocketService {
   Stream<dynamic> get messages => _messageController.stream;
   Stream<String> get statusTextStream => _statusController.stream;
   Stream<bool> get connectionState => _connectionStateController.stream;
+  Stream<String> get concurrentLogoutStream => _concurrentLogoutController.stream;
 
   Future<void> connect({String? hostOrUrl, bool? isListening, String? game_mode}) async {
     if (_isConnected) return;
@@ -100,6 +102,14 @@ class WebSocketService {
 
           try {
             final data = jsonDecode(message);
+            
+            // Check for Concurrent Session Conflict
+            if (data['type'] == 'concurrent_logout') {
+               debugPrint("WS: Concurrent Session Detected - Forcing Logout");
+               _concurrentLogoutController.add(data['message'] ?? 'Profile active on another device');
+               return;
+            }
+
             if (data['type'] == 'connection_success') {
                debugPrint("WS: Unified Handshake Confirmed");
                if (!(_connectionCompleter?.isCompleted ?? true)) {

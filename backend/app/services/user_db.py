@@ -14,6 +14,7 @@ class UserRecord(BaseModel):
     primary_language: str | None = Field(None, alias="primary_language")
     invite_code: str | None = Field(None, alias="invite_code")
     profile_picture: str | None = Field(None, alias="profile_picture")
+    active_session_id: str | None = Field(None, alias="active_session_id")
 
     class Config:
         populate_by_name = True
@@ -38,10 +39,13 @@ async def init_db():
                 primary_language TEXT,
                 invite_code TEXT,
                 profile_picture TEXT,
+                active_session_id TEXT,
                 current_mode TEXT DEFAULT 'Mode 1',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Migration: Ensure active_session_id exists in existing table
+        await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS active_session_id TEXT')
         
         # 2. Chat History Table
         await conn.execute('''
@@ -93,16 +97,17 @@ async def save_user(user: UserRecord):
         if not pool: return False
         async with pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture, active_session_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (uid) 
                 DO UPDATE SET 
                     email = EXCLUDED.email,
                     display_name = EXCLUDED.display_name,
                     primary_language = EXCLUDED.primary_language,
                     invite_code = EXCLUDED.invite_code,
-                    profile_picture = EXCLUDED.profile_picture
-            ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture)
+                    profile_picture = EXCLUDED.profile_picture,
+                    active_session_id = EXCLUDED.active_session_id
+            ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.active_session_id)
     except Exception as e:
         print(f"Warning: Could not save user {user.uid} to DB: {e}")
     return True
@@ -190,18 +195,18 @@ async def validate_invite_code(code: str) -> dict:
         return {"valid": False, "message": f"Validation error: {e}"}
 
 async def consume_invite_code(code: str) -> bool:
-    """Increments the usage count of an invite code."""
+    """Deletes an invite code after it is successfully used."""
     try:
+        # Protect the master developer code from deletion
+        if code == "EPIC-DEV-2026":
+            return True
+
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
-            await conn.execute('''
-                UPDATE invite_codes 
-                SET current_uses = current_uses + 1 
-                WHERE code = $1
-            ''', code)
+            await conn.execute('DELETE FROM invite_codes WHERE code = $1', code)
             return True
     except Exception as e:
-        print(f"Invite Consumption Error: {e}")
+        print(f"Invite Deletion Error: {e}")
         return False
 
