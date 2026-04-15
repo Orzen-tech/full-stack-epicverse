@@ -9,6 +9,7 @@ class UserModel {
 
   final String? profilePicture;
   final String? inviteCode;
+  final String? sessionId;
 
   UserModel({
     required this.id,
@@ -20,6 +21,7 @@ class UserModel {
     this.level = 1,
     this.profilePicture,
     this.inviteCode,
+    this.sessionId,
   });
 
   factory UserModel.fromJson(Map<String, dynamic> json) {
@@ -37,6 +39,7 @@ class UserModel {
       level: json['level'] ?? 1,
       profilePicture: json['profile_picture'] ?? json['profilePicture'],
       inviteCode: json['invite_code'] ?? json['inviteCode'],
+      sessionId: json['session_id'] ?? json['sessionId'],
     );
   }
 
@@ -51,6 +54,7 @@ class UserModel {
       'level': level,
       'profile_picture': profilePicture,
       'invite_code': inviteCode,
+      'session_id': sessionId,
     };
   }
 

@@ -15,6 +15,7 @@ import '../widgets/network_background.dart';
 import '../../core/network/websocket_service.dart';
 import '../../services/wake_word_service.dart';
 import '../../core/network/api_config.dart';
+import 'login_screen.dart';
 
 class CompanionReadyScreen extends StatefulWidget {
   final String gameMode;
@@ -148,8 +149,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         if (data['status'] != null) {
            if (_isRecording) _stopRecording(); 
            setState(() => _statusText = "${data['status']}: ${data['message'] ?? ""}");
-        } else if (data['aiResponse'] != null) {
-           setState(() => _statusText = data['aiResponse']);
+        } else if (data['type'] == 'error' && (data['code'] == 'SESSION_KICKED' || data['code'] == 'SESSION_INVALID')) {
+           _showKickedDialog(data['message'] ?? "Logged in elsewhere.");
         } else if (data['type'] == 'response.done') {
            // AI Finished Speaking - Clear visual state
            if (mounted) {
@@ -178,6 +179,35 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       debugPrint('Error parsing message: $e');
     }
   }
+
+  void _showKickedDialog(String message) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => WillPopScope(
+        onWillPop: () async => false,
+        child: AlertDialog(
+          backgroundColor: AppColors.surfaceElevated,
+          title: const Text('Session Ended', style: TextStyle(color: AppColors.primaryGold)),
+          content: Text(message, style: const TextStyle(color: AppColors.textPrimary)),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).popUntil((route) => route.isFirst);
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+              },
+              child: const Text('OK', style: TextStyle(color: AppColors.primaryGold)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
 
   Future<void> _initPcmSound() async {
     try {

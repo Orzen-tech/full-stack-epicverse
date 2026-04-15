@@ -61,28 +61,57 @@ async def fetch_user(firebase_id: str):
 import firebase_admin.auth as auth
 from app.services.realtime_service import RealtimeService
 
-# Global tracker for active WebSocket sessions to enforce Single Device Policy
-active_sessions: dict[str, WebSocket] = {}
+# Centralized connection tracking for Single Device Login policy
+active_sessions = {}  # {uid: {"session_id": str, "ws": WebSocket}}
 
 @router.websocket("/ws/realtime")
 async def websocket_realtime(websocket: WebSocket):
     """
-    ULTRA-FAST Realtime API endpoint with Database Truth injection.
-    Enforces Single Device Policy by disconnecting previous sessions.
+    ULTRA-FAST Realtime API endpoint with Single Device Session enforcement.
     """
-    gameMode = websocket.query_params.get("gameMode", "Mode 1")
-    idToken = websocket.query_params.get("token")
+    from app.services.user_db import verify_session
     
     await websocket.accept()
     
-    # 1. Verify Identity
-    user_uid = "guest"
+    # 1. Identify User and Session
+    user_uid = websocket.query_params.get("uid", "guest")
+    game_mode = websocket.query_params.get("mode", "Mode 1")
+    current_session_id = websocket.query_params.get("session_id", "unknown")
+    
+    # 2. Single Device Enforcement (The "Kick" Logic)
+    if user_uid != "guest":
+        # Check against Database (Hard Truth)
+        is_valid = await verify_session(user_uid, current_session_id)
+        if not is_valid:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "code": "SESSION_INVALID",
+                "message": "Logged in on another device."
+            }))
+            await websocket.close(code=1008)
+            return
+
+        # Handle Active Connections (Memory Path)
+        if user_uid in active_sessions:
+            old_session = active_sessions[user_uid]
+            if old_session["session_id"] != current_session_id:
+                try:
+                    print(f"[AUTH] Kicking old session for {user_uid}")
+                    await old_session["ws"].send_text(json.dumps({
+                        "type": "error",
+                        "code": "SESSION_KICKED",
+                        "message": "You have been logged in on another device."
+                    }))
+                    await old_session["ws"].close(code=1008)
+                except:
+                    pass
+        
+        # Register current session
+        active_sessions[user_uid] = {"session_id": current_session_id, "ws": websocket}
+
+    # 3. Initialize Service
+    service = RealtimeService(websocket, game_mode, user_uid)
     try:
-        if idToken == "epic-stress-test-token":
-            user_uid = f"simulated_user_{uuid.uuid4().hex[:6]}"
-            print(f"[WS-RT] STRESS TEST BYPASS: User {user_uid}")
-        elif idToken:
-            decoded_token = await asyncio.to_thread(auth.verify_id_token, idToken)
             user_uid = decoded_token.get("uid")
             print(f"[WS-RT] AUTH SUCCESS: User {user_uid}")
     except Exception as e:
@@ -91,31 +120,7 @@ async def websocket_realtime(websocket: WebSocket):
         await websocket.close(code=4001)
         return
 
-    # 2. Single Device Policy (Kill-switch)
-    if user_uid != "guest":
-        if user_uid in active_sessions:
-            print(f"[WS-RT] Conflict: Logging out previous session for {user_uid}")
-            old_socket = active_sessions[user_uid]
-            try:
-                # Custom message to trigger frontend logout
-                await old_socket.send_text(json.dumps({
-                    "type": "concurrent_logout",
-                    "message": "Your profile is now active on another device."
-                }))
-                await old_socket.close(code=4002) 
-            except:
-                pass 
-        
-        active_sessions[user_uid] = websocket
-
-    # 3. Launch Realtime Relay
+    # 2. Launch Realtime Relay
     print(f"[WS-RT] Launching Realtime Bridge for {user_uid} in {gameMode}")
     service = RealtimeService(websocket, game_mode=gameMode, user_uid=user_uid)
-    
-    try:
-        await service.run()
-    finally:
-        # Cleanup session tracker on disconnect
-        if user_uid in active_sessions and active_sessions[user_uid] == websocket:
-            del active_sessions[user_uid]
-            print(f"[WS-RT] Cleaned up session for {user_uid}")
+    await service.run()

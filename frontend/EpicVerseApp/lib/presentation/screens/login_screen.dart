@@ -11,6 +11,7 @@ import '../../models/user_model.dart';
 import 'dashboard_screen.dart';
 import '../../core/network/api_config.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/network/session_manager.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -48,13 +49,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final firebaseUser = credential.user;
       if (firebaseUser == null) throw Exception("Login failed");
 
-      // 2. Optimistic UI: Create User Model from Firebase data immediately
+      // 2. Optimistic UI with Session Tracking
+      final sessionId = await SessionManager.getSessionId();
       final loggedInUser = UserModel(
         id: firebaseUser.uid,
         displayName: firebaseUser.displayName ?? "Epic Explorer",
         email: firebaseUser.email ?? _emailController.text.trim(),
         primaryLanguage: 'English',
         preferredLanguages: ['English'],
+        sessionId: sessionId,
       );
 
       // 3. Update Provider and Local Persistence
@@ -118,6 +121,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           "email": fallback.email,
           "primary_language": fallback.primaryLanguage,
           "profile_picture": null,
+          "session_id": fallback.sessionId,
         },
         options: Options(headers: ApiConfig.headers),
       ).catchError((_) => null); // Ignore background sync errors

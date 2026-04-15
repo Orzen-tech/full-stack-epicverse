@@ -8,7 +8,7 @@ import 'presentation/screens/welcome_screen.dart';
 import 'presentation/screens/dashboard_screen.dart';
 import 'core/network/websocket_service.dart';
 
-import 'presentation/widgets/session_observer.dart';
+import 'presentation/screens/splash_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,9 +35,6 @@ class EpicVerseApp extends StatelessWidget {
       title: 'EpicVerse',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.epicTheme,
-      builder: (context, child) {
-        return SessionObserver(child: child!);
-      },
       home: const SplashScreen(),
     );
   }

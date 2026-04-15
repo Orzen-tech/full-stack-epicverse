@@ -13,6 +13,7 @@ import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
 import 'dashboard_screen.dart';
 import '../../core/network/api_config.dart';
+import '../../core/network/session_manager.dart';
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
   const CreateProfileScreen({super.key});
@@ -125,6 +126,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         base64Image = base64Encode(bytes);
       }
 
+      final sessionId = await SessionManager.getSessionId();
       final newUser = UserModel(
         id: firebaseUser.uid,
         displayName: _nameController.text.trim(),
@@ -132,6 +134,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         primaryLanguage: 'English', // Defaulting to English since we swapped the UI
         preferredLanguages: ['English'],
         profilePicture: base64Image,
+        sessionId: sessionId,
       );
 
       // 3. Sync with Backend SQL Database (Includes Invite Code Consumption)
@@ -146,6 +149,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
             "primary_language": newUser.primaryLanguage,
             "invite_code": inviteCode,
             "profile_picture": newUser.profilePicture,
+            "session_id": sessionId,
           },
           options: Options(headers: ApiConfig.headers),
         );

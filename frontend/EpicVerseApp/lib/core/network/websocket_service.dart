@@ -4,11 +4,9 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
-import 'package:uuid/uuid.dart';
-
-import 'api_config.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../../services/wake_word_service.dart';
+import 'api_config.dart';
+import 'session_manager.dart';
 
 class WebSocketService {
   static final WebSocketService _instance = WebSocketService._internal();
@@ -21,10 +19,8 @@ class WebSocketService {
   final _messageController = StreamController<dynamic>.broadcast();
   final _statusController = StreamController<String>.broadcast();
   final _connectionStateController = StreamController<bool>.broadcast();
-  final _concurrentLogoutController = StreamController<String>.broadcast();
   
   String _currentMode = 'Mode 1';
-  String _sessionId = const Uuid().v4();
   bool _isConnecting = false;
   
   Completer<void>? _connectionCompleter;
@@ -35,7 +31,6 @@ class WebSocketService {
   Stream<dynamic> get messages => _messageController.stream;
   Stream<String> get statusTextStream => _statusController.stream;
   Stream<bool> get connectionState => _connectionStateController.stream;
-  Stream<String> get concurrentLogoutStream => _concurrentLogoutController.stream;
 
   Future<void> connect({String? hostOrUrl, bool? isListening, String? game_mode}) async {
     if (_isConnected) return;
@@ -53,6 +48,9 @@ class WebSocketService {
     _statusController.add('Connecting...');
 
     String? idToken;
+    String? uid;
+    String sessionId = await SessionManager.getSessionId();
+
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
@@ -60,6 +58,7 @@ class WebSocketService {
          _connectionCompleter?.completeError('User not logged in');
          return;
       }
+      uid = user.uid;
       idToken = await user.getIdToken().timeout(const Duration(seconds: 5));
     } catch (e) {
       debugPrint('Auth/Token error: $e');
@@ -71,11 +70,11 @@ class WebSocketService {
     _reconnectTimer?.cancel();
 
     final listenFlag = isListening ?? false;
-    String queryParams = 'gameMode=${Uri.encodeComponent(_currentMode)}&sessionId=$_sessionId&listening=$listenFlag&token=$idToken';
+    // Updated query params to include uid and session_id for backend verification
+    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag&token=$idToken';
     
     Uri wsUri = Uri.parse('${ApiConfig.wsUrl}?$queryParams');
     if (hostOrUrl != null && hostOrUrl.isNotEmpty) {
-      // In custom host mode, we still allow the provided URL but prefer ApiConfig logic
       wsUri = Uri.parse('${hostOrUrl.startsWith('ws') ? hostOrUrl : 'ws://$hostOrUrl'}/api/v1/ws/realtime?$queryParams');
     }
     
@@ -94,7 +93,6 @@ class WebSocketService {
             }
           }
 
-          // [AUDIT] Binary Stream Hardening: Distinguish Voice from Data
           if (message is List<int>) {
              _messageController.add(Uint8List.fromList(message));
              return;
@@ -103,10 +101,11 @@ class WebSocketService {
           try {
             final data = jsonDecode(message);
             
-            // Check for Concurrent Session Conflict
-            if (data['type'] == 'concurrent_logout') {
-               debugPrint("WS: Concurrent Session Detected - Forcing Logout");
-               _concurrentLogoutController.add(data['message'] ?? 'Profile active on another device');
+            // Check for Session Kick
+            if (data['type'] == 'error' && (data['code'] == 'SESSION_KICKED' || data['code'] == 'SESSION_INVALID')) {
+               _handleDisconnect();
+               _statusController.add('Logged out: Active elsewhere');
+               _messageController.add(data); // Propagate to UI for dialog
                return;
             }
 

@@ -14,7 +14,7 @@ class UserRecord(BaseModel):
     primary_language: str | None = Field(None, alias="primary_language")
     invite_code: str | None = Field(None, alias="invite_code")
     profile_picture: str | None = Field(None, alias="profile_picture")
-    active_session_id: str | None = Field(None, alias="active_session_id")
+    session_id: str | None = Field(None, alias="session_id")
 
     class Config:
         populate_by_name = True
@@ -39,13 +39,11 @@ async def init_db():
                 primary_language TEXT,
                 invite_code TEXT,
                 profile_picture TEXT,
-                active_session_id TEXT,
                 current_mode TEXT DEFAULT 'Mode 1',
+                last_session_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Migration: Ensure active_session_id exists in existing table
-        await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS active_session_id TEXT')
         
         # 2. Chat History Table
         await conn.execute('''
@@ -97,20 +95,33 @@ async def save_user(user: UserRecord):
         if not pool: return False
         async with pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture, active_session_id)
+                INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture, last_session_id)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (uid) 
-                DO UPDATE SET 
+                ON CONFLICT (uid) DO UPDATE SET
                     email = EXCLUDED.email,
                     display_name = EXCLUDED.display_name,
                     primary_language = EXCLUDED.primary_language,
                     invite_code = EXCLUDED.invite_code,
                     profile_picture = EXCLUDED.profile_picture,
-                    active_session_id = EXCLUDED.active_session_id
-            ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.active_session_id)
+                    last_session_id = EXCLUDED.last_session_id
+            ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.session_id)
     except Exception as e:
         print(f"Warning: Could not save user {user.uid} to DB: {e}")
     return True
+
+async def verify_session(uid: str, session_id: str) -> bool:
+    """Checks if the given session_id is the active one in the database."""
+    try:
+        pool = await get_db_pool()
+        if not pool: return True # Default to true if DB is offline
+        async with pool.acquire() as conn:
+            db_session = await conn.fetchval('SELECT last_session_id FROM users WHERE uid = $1', uid)
+            if not db_session: return True # No session tracked yet
+            return db_session == session_id
+    except Exception as e:
+        print(f"Session Verification Error: {e}")
+        return True
+
 
 from firebase_admin import auth
 
