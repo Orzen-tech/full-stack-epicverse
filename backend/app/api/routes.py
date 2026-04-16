@@ -25,6 +25,7 @@ async def validate_invite(code: str):
 @router.post("/sync-user")
 async def sync_user(user: UserRecord):
     """Saves user info to the SQL database after verifying invite code."""
+    print(f"[SYNC] Received data for {user.uid}: Name={user.display_name}, Photo={'set' if user.profile_picture else 'None'}")
     from app.services.user_db import validate_invite_code, consume_invite_code, save_user, get_user
     
     # Check if user already exists in our database
@@ -35,20 +36,32 @@ async def sync_user(user: UserRecord):
         if not user.invite_code:
             raise HTTPException(status_code=400, detail="Invite code is required for registration")
         
-        validation = await validate_invite_code(user.invite_code)
-        if not validation["valid"]:
-            raise HTTPException(status_code=403, detail=validation["message"])
-            
-        # 2. Save User
-        await save_user(user)
+        is_valid = await validate_invite_code(user.invite_code)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite code")
         
-        # 3. Consume Code (Burn it)
+        # 2. Setup New User
+        await save_user(user)
         await consume_invite_code(user.invite_code)
         return {"status": "success", "message": "New user registered and invite consumed"}
     else:
-        # Existing user: Just update their profile info
-        await save_user(user)
-        return {"status": "success", "message": "User profile updated"}
+        # Existing user: Merge fields to avoid overwriting with None
+        # Priority: Incoming Value > Existing Value
+        merged_display_name = user.display_name if user.display_name else existing_user.get('display_name')
+        merged_profile_picture = user.profile_picture if user.profile_picture else existing_user.get('profile_picture')
+        merged_email = user.email if user.email else existing_user.get('email')
+        merged_primary_language = user.primary_language if user.primary_language else existing_user.get('primary_language')
+        
+        # Create a clean record for saving
+        from copy import copy
+        updated_user = copy(user)
+        updated_user.display_name = merged_display_name
+        updated_user.profile_picture = merged_profile_picture
+        updated_user.email = merged_email
+        updated_user.primary_language = merged_primary_language
+        
+        await save_user(updated_user)
+        return {"status": "success", "message": "User profile updated and merged"}
 
 @router.get("/user/{firebase_id}")
 async def fetch_user(firebase_id: str):
@@ -56,6 +69,8 @@ async def fetch_user(firebase_id: str):
     user = await get_user(firebase_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    print(f"[FETCH] Returning user {firebase_id}: Name={user.get('display_name')}, Photo={'YES' if user.get('profile_picture') else 'NO'}")
     return user
 
 import firebase_admin.auth as auth
@@ -109,18 +124,6 @@ async def websocket_realtime(websocket: WebSocket):
         # Register current session
         active_sessions[user_uid] = {"session_id": current_session_id, "ws": websocket}
 
-    # 3. Initialize Service
+    # 3. Initialize and Run Service
     service = RealtimeService(websocket, game_mode, user_uid)
-    try:
-            user_uid = decoded_token.get("uid")
-            print(f"[WS-RT] AUTH SUCCESS: User {user_uid}")
-    except Exception as e:
-        print(f"[WS-RT] AUTH FAILED: {str(e)}")
-        await websocket.send_text(json.dumps({"status": "Error", "message": "Auth failed"}))
-        await websocket.close(code=4001)
-        return
-
-    # 2. Launch Realtime Relay
-    print(f"[WS-RT] Launching Realtime Bridge for {user_uid} in {gameMode}")
-    service = RealtimeService(websocket, game_mode=gameMode, user_uid=user_uid)
     await service.run()

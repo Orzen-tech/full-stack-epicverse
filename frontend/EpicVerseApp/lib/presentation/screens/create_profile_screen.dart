@@ -14,6 +14,9 @@ import '../../models/user_model.dart';
 import 'dashboard_screen.dart';
 import '../../core/network/api_config.dart';
 import '../../core/network/session_manager.dart';
+import 'verification_pending_screen.dart';
+import 'welcome_screen.dart';
+
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
   const CreateProfileScreen({super.key});
@@ -93,7 +96,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
     try {
       // 1. Pre-verify Invite Code with Backend
-      final inviteCode = _inviteController.text.trim();
+      // We prepend 'EPIC -' as it's now a visual prefix in the UI
+      final rawCode = _inviteController.text.trim();
+      final inviteCode = rawCode.startsWith('EPIC -') ? rawCode : "EPIC -$rawCode";
       final validateUrl = '${ApiConfig.apiUrl}/validate-invite/$inviteCode';
       
       try {
@@ -162,9 +167,16 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       // 4. Update local state and Navigate
       ref.read(userProvider.notifier).setUser(newUser);
 
+      // 5. Trigger Email Verification & Navigate to Pending Screen
+      try {
+        await firebaseUser.sendEmailVerification();
+      } catch (e) {
+        debugPrint("Error sending verification email: $e");
+      }
+      
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const DashboardScreen()),
+        MaterialPageRoute(builder: (_) => const VerificationPendingScreen()),
       );
     } on FirebaseAuthException catch (e) {
       _showError(e.message ?? "Authentication failed");
@@ -198,7 +210,15 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                 elevation: 0,
                 leading: IconButton(
                   icon: const Icon(Icons.arrow_back, color: AppColors.textPrimary),
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () {
+                    if (Navigator.of(context).canPop()) {
+                      Navigator.of(context).pop();
+                    } else {
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                      );
+                    }
+                  },
                 ),
                 title: const Text(
                   'Create Companion Profile',
@@ -305,12 +325,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                           controller: _inviteController,
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 2),
                           decoration: _buildGlassInputDecoration(
-                            hintText: 'Enter code or scan QR',
+                            hintText: 'XXXXXX',
                             icon: Icons.vpn_key_outlined,
-                            suffixIcon: IconButton(
-                              icon: const Icon(Icons.qr_code_scanner, color: AppColors.primaryGold),
-                              onPressed: _showQRScanner,
-                            ),
+                            prefixText: 'EPIC -',
                           ),
                           validator: (value) => (value == null || value.trim().isEmpty) ? 'Invite code required' : null,
                         ),
@@ -359,11 +376,34 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     );
   }
 
-  InputDecoration _buildGlassInputDecoration({required String hintText, required IconData icon, Widget? suffixIcon}) {
+  InputDecoration _buildGlassInputDecoration({
+    required String hintText, 
+    required IconData icon, 
+    Widget? suffixIcon,
+    String? prefixText,
+  }) {
     return InputDecoration(
       hintText: hintText,
       hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
-      prefixIcon: Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 20),
+      prefixIcon: prefixText == null 
+        ? Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 20)
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(width: 14),
+              Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 18),
+              const SizedBox(width: 8),
+              Text(
+                prefixText, 
+                style: const TextStyle(
+                  color: AppColors.primaryGold, 
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                )
+              ),
+              const SizedBox(width: 4),
+            ],
+          ),
       suffixIcon: suffixIcon,
       filled: true,
       fillColor: AppColors.glassBackground,

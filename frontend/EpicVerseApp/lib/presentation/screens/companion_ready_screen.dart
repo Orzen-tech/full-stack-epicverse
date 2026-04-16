@@ -35,6 +35,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   StreamSubscription<Uint8List>? _micSubscription;
   late AnimationController _speechVibrationController;
   late Animation<double> _vibrationAnimation;
+  late AnimationController _waveController;
+  Timer? _talkingTimeout;
   bool _isTalking = false; // Tracks if AI is speaking
   
   // Service Subscriptions
@@ -59,6 +61,12 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     );
     _vibrationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _speechVibrationController, curve: Curves.easeInOutSine),
+    );
+
+    // Initialize Pulse Wave Effect (Ripples)
+    _waveController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800), // High-speed responsive pulse
     );
     
     // Initialize Professional PCM Sound Engine (24kHz Mono Int16)
@@ -86,44 +94,92 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
     _messageSub = webSocketService.messages.listen((message) {
       if (!mounted) return;
-      _handleIncomingMessage(message);
+      
+      try {
+        if (message is String) {
+          final data = jsonDecode(message);
+          
+          // --- Voice Event Handlers ---
+          if (data['type'] == 'response.done') {
+             _stopTalking(); // Completion Handler
+          } else if (data['type'] == 'error') {
+             _stopTalking(); // Error/Cancel Handler
+             _handleSystemError(data);
+          }
+          
+          _handleIncomingMessage(message);
+        } else if (message is Uint8List) {
+          // --- Start Handler (Immediate) ---
+          if (!_isTalking) {
+            _startTalking();
+          }
+          
+          // Feed high-fidelity PCM stream
+          FlutterPcmSound.feed(PcmArrayInt16(bytes: message.buffer.asByteData()));
+          
+          // Safety Timeout (Auto-Silence Detection)
+          _talkingTimeout?.cancel();
+          _talkingTimeout = Timer(const Duration(milliseconds: 3000), () {
+            if (mounted && _isTalking) {
+              _stopTalking();
+            }
+          });
+        }
+      } catch (e) {
+        debugPrint('Error in message listener: $e');
+        _stopTalking();
+      }
     });
 
     _audioPlayer.onPlayerStateChanged.listen((state) {
       if (mounted) {
-        final isNowTalking = (state == PlayerState.playing);
-        setState(() => _isTalking = isNowTalking);
-        if (isNowTalking) {
-           _speechVibrationController.repeat(reverse: true);
-        } else {
-           _speechVibrationController.stop();
-           _speechVibrationController.reset();
-           
-           // If stopping because it finished, this shouldn't be needed here 
-           // but we'll use onPlayerComplete for queue progression
+        if (state == PlayerState.playing) {
+           _startTalking();
+        } else if (state == PlayerState.completed || state == PlayerState.stopped) {
+           _stopTalking();
         }
       }
     });
 
-    _audioPlayer.onPlayerComplete.listen((_) {
-      if (mounted) {
-        setState(() {
-          _isTalking = false;
-          _statusText = "Ready";
-          _speechVibrationController.stop();
-          _speechVibrationController.reset();
-        });
-        
-        // Lazy Handshake Cycle: Disconnect after AI finishes speaking to save resources
-        // webSocketService.disconnect(); // TEMPORARILY DISABLED TO ENSURE KEEP-ALIVE
-        
-        // --- NEXT SENTENCE AUTO-PLAY ---
-        _isPlayerBusy = false;
-        _processAudioQueue();
-      }
+    _audioPlayer.onPlayerComplete.listen((_) => _stopTalking());
+    _postInitHandshake();
+  }
+
+  // --- Animation Handlers (Production-Ready) ---
+  void _startTalking() {
+    if (!mounted || _isTalking) return;
+    setState(() {
+      _isTalking = true;
+      _speechVibrationController.repeat(reverse: true);
+      _waveController.repeat();
+    });
+  }
+
+  void _stopTalking() {
+    if (!mounted || !_isTalking) return;
+    setState(() {
+      _isTalking = false;
+      _statusText = "Ready";
+      _talkingTimeout?.cancel();
+      _speechVibrationController.stop();
+      _speechVibrationController.reset();
+      _waveController.stop();
+      _waveController.reset();
     });
 
-    // --- AUTO-SYNC CONNECTION ON LOAD ---
+    // --- NEXT SENTENCE AUTO-PLAY ---
+    _isPlayerBusy = false;
+    _processAudioQueue();
+  }
+
+  void _handleSystemError(dynamic data) {
+    if (data['code'] == 'SESSION_KICKED' || data['code'] == 'SESSION_INVALID') {
+       _showKickedDialog(data['message'] ?? "Logged in elsewhere.");
+    }
+  }
+
+  // --- Core Lifecycle Handlers ---
+  void _postInitHandshake() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_isConnected) {
          _startVoiceTurn(); // Triggers lazy handshake with correct widget.gameMode
@@ -149,31 +205,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         if (data['status'] != null) {
            if (_isRecording) _stopRecording(); 
            setState(() => _statusText = "${data['status']}: ${data['message'] ?? ""}");
-        } else if (data['type'] == 'error' && (data['code'] == 'SESSION_KICKED' || data['code'] == 'SESSION_INVALID')) {
-           _showKickedDialog(data['message'] ?? "Logged in elsewhere.");
-        } else if (data['type'] == 'response.done') {
-           // AI Finished Speaking - Clear visual state
-           if (mounted) {
-              setState(() {
-                _isTalking = false;
-                _speechVibrationController.stop();
-                _speechVibrationController.reset();
-              });
-           }
         }
-      } else if (message is Uint8List) {
-        // [REALTIME FIX] Feed high-fidelity PCM stream directly to hardware
-        // Convert Uint8List to ByteData for PcmArrayInt16
-        FlutterPcmSound.feed(PcmArrayInt16(bytes: message.buffer.asByteData()));
-        
-        // Mouth Action trigger
-        if (!_isTalking) {
-           setState(() => _isTalking = true);
-           _speechVibrationController.repeat(reverse: true);
-        }
-        
-        // Reset talking state after a small silence if needed, 
-        // but for now, we rely on the backend 'response.done'
       }
     } catch (e) {
       debugPrint('Error parsing message: $e');
@@ -396,6 +428,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     _connSub?.cancel();
     _statusSub?.cancel();
     _messageSub?.cancel();
+    _waveController.dispose();
     super.dispose();
   }
 
@@ -404,29 +437,23 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     return Scaffold(
       resizeToAvoidBottomInset: true,
       body: NetworkBackground(
-        child: Stack(
-          children: [
-            // --- Premium 3D Character Layer ---
-            Positioned.fill(
-              child: Stack(
-                alignment: Alignment.center,
+        child: SizedBox.expand(
+          child: Stack(
+            children: [
+              // --- Premium 3D Character Layer ---
+              Positioned.fill(
+                child: Stack(
                 children: [
                    // Layer 1: Cinematic Cosmic Background (Floating Particles)
                    const Positioned.fill(
                      child: _CosmicParticlesBackground(),
                    ),
 
-                   // Layer 2: Blurred Deep Background (Motion Base)
+                   // Layer 2: Main Pattern Background (Filigree)
                    Positioned.fill(
-                     child: Opacity(
-                       opacity: 0.3,
-                       child: ImageFiltered(
-                         imageFilter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                         child: Image.asset(
-                            'assets/images/cute_companion.png',
-                            fit: BoxFit.cover,
-                         ),
-                       ),
+                     child: Image.asset(
+                        'assets/images/cute_companion.png',
+                        fit: BoxFit.cover,
                      ),
                    ),
                    
@@ -460,10 +487,11 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                        child: Stack(
                          alignment: Alignment.center,
                          children: [
-                           // Base Character Image (Fallback/Background)
+                           // Main EpicVerse Logo (Centered)
                            Image.asset(
-                             'assets/images/cute_companion.png',
-                             fit: BoxFit.cover,
+                             'assets/images/EPICVERSE COMPANION LOGO.png',
+                             width: 280,
+                             fit: BoxFit.contain,
                            ),
                            // Lottie Mouth Animation (Overlay)
                            // Only active when AI is talking
@@ -471,37 +499,72 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                              'assets/animations/companion_talking.json',
                              animate: _isTalking,
                              repeat: true,
-                             fit: BoxFit.cover,
-                             errorBuilder: (context, error, stackTrace) => const SizedBox(), // Hide if file missing
+                             width: 250, // Match logo scale
+                             fit: BoxFit.contain,
+                             errorBuilder: (context, error, stackTrace) => const SizedBox(), 
                            ),
                          ],
                        ),
                      ),
                    ),
 
-                   // Layer 4: Divine Aura Glow
-                   if (_isTalking)
-                     Center(
-                       child: Container(
-                         width: 450,
-                         height: 450,
-                         decoration: BoxDecoration(
-                           shape: BoxShape.circle,
-                           boxShadow: [
-                             BoxShadow(
-                               color: AppColors.primaryGold.withOpacity(0.08),
-                               blurRadius: 120,
-                               spreadRadius: 30,
-                             )
-                           ],
-                         ),
+                   // Layer 4: Premium Circular Audio Visualizer (Always Visible, Pulsing on Speech)
+                   Center(
+                     child: AnimatedBuilder(
+                       animation: _waveController,
+                       builder: (context, child) {
+                         return RepaintBoundary(
+                           child: CustomPaint(
+                             size: const Size(300, 300),
+                             painter: _CircularVisualizerPainter(
+                               animationValue: _waveController.value,
+                               isTalking: _isTalking,
+                             ),
+                           ),
+                         );
+                       },
+                     ),
+                   ),
+
+                   // Layer 5: Main Character Logo with "Popup" Scaling Effect
+                   Center(
+                     child: TweenAnimationBuilder<double>(
+                       tween: Tween<double>(begin: 1.0, end: _isTalking ? 1.05 : 1.0),
+                       duration: const Duration(milliseconds: 300),
+                       curve: Curves.elasticOut,
+                       builder: (context, scale, child) {
+                         return Transform.scale(
+                           scale: scale + (0.01 * math.sin(_waveController.value * 2 * math.pi)), // Subtle micro-bounce
+                           child: child,
+                         );
+                       },
+                       child: Stack(
+                         alignment: Alignment.center,
+                         children: [
+                           // Main EpicVerse Logo (Centered)
+                           Image.asset(
+                             'assets/images/EPICVERSE COMPANION LOGO.png',
+                             width: 280,
+                             fit: BoxFit.contain,
+                           ),
+                           // Lottie Mouth Animation (Overlay)
+                           Lottie.asset(
+                             'assets/animations/companion_talking.json',
+                             animate: _isTalking,
+                             repeat: true,
+                             width: 250, 
+                             fit: BoxFit.contain,
+                             errorBuilder: (context, error, stackTrace) => const SizedBox(), 
+                           ),
+                         ],
                        ),
                      ),
+                   ),
                 ],
               ),
             ),
             
-            // Character visualization base border
+            // Character visualization base border (Static)
             Center(
               child: Container(
                 width: 350,
@@ -509,21 +572,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: AppColors.primaryGold.withOpacity(0.05), 
+                    color: AppColors.primaryGold.withOpacity(0.02), 
                     width: 1,
-                  ),
-                ),
-                child: Center(
-                  child: Container(
-                    width: 250,
-                    height: 250,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: AppColors.primaryGold.withOpacity(0.1), 
-                        width: 2,
-                      ),
-                    ),
                   ),
                 ),
               ),
@@ -536,7 +586,6 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                     padding: const EdgeInsets.all(24.0),
                     child: Row(
                       children: [
-                         const Icon(AppIcons.companion, color: AppColors.primaryGold, size: 24),
                          const Spacer(),
                          IconButton(icon: const Icon(AppIcons.close, color: AppColors.textMuted, size: 20), onPressed: () => Navigator.pop(context)),
                       ],
@@ -548,7 +597,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                   const SizedBox(height: 16),
                   
                   const Text(
-                    'COMPANION READY',
+                    '',
                     style: TextStyle(
                       color: AppColors.primaryGold, 
                       fontSize: 18, 
@@ -668,6 +717,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           ],
         ),
       ),
+     ),
     );
   }
 }
@@ -745,6 +795,55 @@ class _CosmicPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_CosmicPainter oldDelegate) => true;
+}
+
+class _CircularVisualizerPainter extends CustomPainter {
+  final double animationValue;
+  final bool isTalking;
+
+  _CircularVisualizerPainter({required this.animationValue, required this.isTalking});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = (size.width / 2) - 30; // Leave room for rays
+    
+    const int barCount = 140; 
+    final random = math.Random(123); // Consistent noise
+
+    for (int i = 0; i < barCount; i++) {
+      final double angle = (i * 2 * math.pi) / barCount;
+      final double noise = random.nextDouble() * 8;
+      
+      double h;
+      if (isTalking) {
+        // High-energy movement during speech (Frequency simulation) - FASTER
+        h = 15 + noise + (45 * math.sin(animationValue * 10 * math.pi + i * 0.8)).abs();
+      } else {
+        // Still baseline (The "Idling" state)
+        h = 10 + noise;
+      }
+      
+      final startOffset = Offset(
+        center.dx + radius * math.cos(angle),
+        center.dy + radius * math.sin(angle),
+      );
+      final endOffset = Offset(
+        center.dx + (radius + h) * math.cos(angle),
+        center.dy + (radius + h) * math.sin(angle),
+      );
+
+      final linePaint = Paint()
+        ..color = AppColors.primaryGold.withOpacity(isTalking ? 0.8 : 0.3)
+        ..strokeWidth = 1.0
+        ..strokeCap = StrokeCap.round;
+
+      canvas.drawLine(startOffset, endOffset, linePaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CircularVisualizerPainter oldDelegate) => true;
 }
 
 class PentagonClipper extends CustomClipper<Path> {

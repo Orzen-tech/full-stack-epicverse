@@ -109,6 +109,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
   Widget build(BuildContext context) {
     final user = ref.watch(userProvider);
     final String displayName = user?.displayName ?? 'Explorer';
+    debugPrint("Dashboard Build: User=${user?.id}, PhotoPresent=${user?.profilePicture != null}");
 
     return Scaffold(
       body: NetworkBackground(
@@ -309,9 +310,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
             onPressed: () async {
               final newName = controller.text.trim();
               if (newName.isNotEmpty) {
+                // 1. Update UI and Firebase Auth (Primary state)
                 final updatedUser = user.copyWith(displayName: newName);
                 ref.read(userProvider.notifier).setUser(updatedUser);
+                
                 try {
+                  // Synchronize name with Firebase if possible
+                  await FirebaseAuth.instance.currentUser?.updateDisplayName(newName);
+
+                  // 2. Synchronize with SQL Database (Persistent state)
                   final dio = Dio();
                   await dio.post(
                     '${ApiConfig.apiUrl}/sync-user',
@@ -320,14 +327,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                       "display_name": updatedUser.displayName,
                       "email": updatedUser.email,
                       "primary_language": updatedUser.primaryLanguage,
+                      "profile_picture": updatedUser.profilePicture,
                     },
-                    options: Options(headers: ApiConfig.headers),
+                    options: Options(headers: ApiConfig.headers), // Critical for ngrok
                   );
                 } catch (e) {
-                  debugPrint("Error syncing name: $e");
+                  debugPrint("Error syncing profile updates: $e");
                 }
               }
-              Navigator.pop(context);
+              if (mounted) Navigator.pop(context);
             },
             child: const Text('Save', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
           ),

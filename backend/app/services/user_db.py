@@ -45,6 +45,15 @@ async def init_db():
             )
         ''')
         
+        # Ensure columns exist for existing tables (migration)
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_session_id TEXT")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_mode TEXT DEFAULT 'Mode 1'")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except Exception:
+            pass
+        
         # 2. Chat History Table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS chat_history (
@@ -78,14 +87,13 @@ async def init_db():
         await conn.execute("INSERT INTO invite_codes (code) VALUES ('EPIC-DEV-2026') ON CONFLICT DO NOTHING")
 
         
-        # Temporary Debug Check (Verification)
-        result = await conn.fetch("SELECT uid, email, display_name FROM users LIMIT 20")
+        result = await conn.fetch("SELECT uid, email, display_name, profile_picture FROM users LIMIT 20")
         print(f"\n[DB DEBUG] Found {len(result)} users in PostgreSQL:")
         for row in result:
-             # Records work like dicts but without .get()
              email = row['email'] if 'email' in row else 'N/A'
              name = row['display_name'] if 'display_name' in row else 'N/A'
-             print(f" - UID: {row['uid']}, Email: {email}, Name: {name}")
+             has_photo = "YES" if row['profile_picture'] else "NO"
+             print(f" - UID: {row['uid']}, Email: {email}, Name: {name}, Photo: {has_photo}")
         print("-" * 30 + "\n")
     await ensure_card_search_schema()
 
@@ -94,19 +102,20 @@ async def save_user(user: UserRecord):
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
+            print(f"[DB] Saving user {user.uid}: Name={user.display_name}, Email={user.email}, Photo={'YES' if user.profile_picture else 'NO'}")
             await conn.execute('''
                 INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture, last_session_id)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (uid) DO UPDATE SET
-                    email = EXCLUDED.email,
-                    display_name = EXCLUDED.display_name,
-                    primary_language = EXCLUDED.primary_language,
-                    invite_code = EXCLUDED.invite_code,
-                    profile_picture = EXCLUDED.profile_picture,
-                    last_session_id = EXCLUDED.last_session_id
+                    email = COALESCE(EXCLUDED.email, users.email),
+                    display_name = COALESCE(EXCLUDED.display_name, users.display_name),
+                    primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
+                    invite_code = COALESCE(EXCLUDED.invite_code, users.invite_code),
+                    profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture),
+                    last_session_id = COALESCE(EXCLUDED.last_session_id, users.last_session_id)
             ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.session_id)
     except Exception as e:
-        print(f"Warning: Could not save user {user.uid} to DB: {e}")
+        print(f"CRITICAL: Could not save user {user.uid} to DB: {e}")
     return True
 
 async def verify_session(uid: str, session_id: str) -> bool:

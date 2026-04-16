@@ -12,6 +12,8 @@ import 'dashboard_screen.dart';
 import '../../core/network/api_config.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/session_manager.dart';
+import 'verification_pending_screen.dart';
+import 'welcome_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -65,7 +67,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('isLoggedIn', true);
 
-      // 4. FAST-PATH: Navigate to Dashboard immediately
+      // 4. Verification Guard
+      if (firebaseUser != null && !firebaseUser.emailVerified) {
+        if (!mounted) return;
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const VerificationPendingScreen()),
+        );
+        return;
+      }
+
+      // 5. FAST-PATH: Navigate to Dashboard immediately
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
@@ -100,14 +111,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       
       if (response.statusCode == 200) {
         final data = response.data;
-        final fullUser = UserModel(
-          id: data['uid'] ?? uid,
-          displayName: data['display_name'] ?? fallback.displayName,
-          email: data['email'] ?? fallback.email,
-          primaryLanguage: data['primary_language'] ?? fallback.primaryLanguage,
-          preferredLanguages: [data['primary_language'] ?? 'English'],
-          profilePicture: data['profile_picture'],
-        );
+        // Use the factory to ensure consistent field mapping (including profile_picture)
+        final fullUser = UserModel.fromJson(data);
+        
         // Silently update the global state with rich backend data
         ref.read(userProvider.notifier).setUser(fullUser);
       }
@@ -168,7 +174,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 elevation: 0,
                 leading: IconButton(
                   icon: const Icon(Icons.arrow_back, color: AppColors.textPrimary),
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () {
+                    if (Navigator.of(context).canPop()) {
+                      Navigator.of(context).pop();
+                    } else {
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                      );
+                    }
+                  },
                 ),
                 title: const Text('Login', style: TextStyle(fontWeight: FontWeight.bold)),
               ),
