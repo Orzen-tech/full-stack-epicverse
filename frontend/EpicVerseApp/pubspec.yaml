@@ -83,8 +83,8 @@ flutter:
   assets:
     - assets/images/
     - assets/images/cute_companion.png
-    - assets/animations/
-    - assets/vectors/
+#    - assets/animations/
+#    - assets/vectors/
     - assets/wakeword/
 
   # An image asset can refer to one or more resolution-specific "variants", see

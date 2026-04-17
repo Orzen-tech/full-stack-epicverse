@@ -22,6 +22,40 @@ async def validate_invite(code: str):
         raise HTTPException(status_code=403, detail=result["message"])
     return result
 
+@router.post("/auth/send-otp")
+async def send_otp(email: str = Form(...)):
+    """Generates a 6-digit OTP, saves it to DB, and sends via SendGrid."""
+    import random
+    from app.services.user_db import save_otp
+    from app.services.email_service import send_otp_email
+    
+    otp = str(random.randint(100000, 999999))
+    
+    db_success = await save_otp(email, otp)
+    if not db_success:
+        raise HTTPException(status_code=500, detail="Database error while saving OTP")
+        
+    email_success = await send_otp_email(email, otp)
+    if not email_success:
+        # We still return success if the DB worked but email failed (for dev testing)
+        # but in production, you might want to raise an error
+        if not settings.SENDGRID_API_KEY:
+             return {"status": "partial", "message": f"OTP saved: {otp} (email skipped: no API key)", "otp": otp}
+        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+        
+    return {"status": "success", "message": "OTP sent successfully"}
+
+@router.post("/auth/verify-otp")
+async def verify_otp_route(email: str = Form(...), otp: str = Form(...)):
+        
+    # 2. Database Verification
+    from app.services.user_db import verify_otp
+    is_valid = await verify_otp(email, otp)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    return {"status": "success", "message": "OTP verified"}
+
+
 @router.post("/sync-user")
 async def sync_user(user: UserRecord):
     """Saves user info to the SQL database after verifying invite code."""

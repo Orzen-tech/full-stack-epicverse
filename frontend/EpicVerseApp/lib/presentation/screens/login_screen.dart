@@ -14,6 +14,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/session_manager.dart';
 import 'verification_pending_screen.dart';
 import 'welcome_screen.dart';
+import 'otp_verification_screen.dart';
+import 'create_profile_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -67,16 +69,54 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('isLoggedIn', true);
 
-      // 4. Verification Guard
-      if (firebaseUser != null && !firebaseUser.emailVerified) {
+      // 4. Check if Backend Profile Exists (Production Ready Sign-In Step)
+      bool profileExists = false;
+      try {
+        final res = await _dio.get(
+          '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
+          options: Options(headers: ApiConfig.headers),
+        );
+        if (res.statusCode == 200) {
+          profileExists = true;
+          // Update local state with rich backend data immediately
+          final fullUser = UserModel.fromJson(res.data);
+          ref.read(userProvider.notifier).setUser(fullUser);
+        }
+      } catch (e) {
+        debugPrint("User not found in backend: Proceeding to profile creation flow.");
+      }
+
+      // 5. Verification Guard (Only for first-time profile creation)
+      if (!profileExists) {
         if (!mounted) return;
+        
+        // Trigger OTP via Backend
+        try {
+           final formData = FormData.fromMap({'email': firebaseUser.email});
+           await _dio.post('${ApiConfig.apiUrl}/auth/send-otp', data: formData);
+        } catch (e) {
+           debugPrint("OTP Send failed: $e");
+        }
+
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const VerificationPendingScreen()),
+          MaterialPageRoute(
+            builder: (otpContext) => OtpVerificationScreen(
+              email: firebaseUser.email!,
+              onVerified: () {
+                 if (otpContext.mounted) {
+                   Navigator.of(otpContext).pushAndRemoveUntil(
+                     MaterialPageRoute(builder: (_) => const CreateProfileScreen()),
+                     (route) => false,
+                   );
+                 }
+              },
+            )
+          ),
         );
         return;
       }
 
-      // 5. FAST-PATH: Navigate to Dashboard immediately
+      // 6. Resume Journey: Already has profile, skip directly to Dashboard
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
@@ -130,7 +170,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           "session_id": fallback.sessionId,
         },
         options: Options(headers: ApiConfig.headers),
-      ).catchError((_) => null); // Ignore background sync errors
+      ).catchError((e) {
+        debugPrint("Background sync failed: $e");
+        return Response(requestOptions: RequestOptions(path: ''), statusCode: 500);
+      });
     }
   }
 
@@ -258,10 +301,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                 end: Alignment.bottomCenter,
                               ),
                               borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: Colors.white.withOpacity(0.1)),
+                              border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
                               boxShadow: [
                                 BoxShadow(
-                                  color: Colors.black.withOpacity(0.3),
+                                  color: Colors.black.withValues(alpha: 0.3),
                                   blurRadius: 15,
                                   offset: const Offset(0, 8),
                                 ),
@@ -289,12 +332,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     return InputDecoration(
       hintText: hint,
       hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 14),
-      prefixIcon: Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 20),
+      prefixIcon: Icon(icon, color: AppColors.primaryGold.withValues(alpha: 0.7), size: 20),
       filled: true,
-      fillColor: Colors.white.withOpacity(0.05),
+      fillColor: Colors.white.withValues(alpha: 0.05),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withOpacity(0.1))),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withOpacity(0.1))),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1))),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1))),
       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.primaryGold, width: 1.5)),
     );
   }

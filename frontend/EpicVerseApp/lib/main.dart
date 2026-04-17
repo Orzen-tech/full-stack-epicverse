@@ -13,11 +13,21 @@ import 'presentation/screens/splash_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Initialize Firebase
-  await Firebase.initializeApp();
+  // Initialize Firebase with Error Details
+  try {
+    await Firebase.initializeApp();
+    print("✅ [FIREBASE] Successfully initialized!");
+  } catch (e) {
+    print("❌ [FIREBASE-ERROR] Failed to initialize: $e");
+    print("💡 [TIP] For iOS, ensure GoogleService-Info.plist is added to Xcode and 'Target Membership' is checked.");
+  }
   
-  // Start server connection immediately on app startup
-  webSocketService.connect();
+  // Start server connection
+  try {
+    webSocketService.connect();
+  } catch (e) {
+    print("❌ [SOCKET-ERROR] $e");
+  }
 
   runApp(
     const ProviderScope(

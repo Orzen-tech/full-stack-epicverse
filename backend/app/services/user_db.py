@@ -82,11 +82,19 @@ async def init_db():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_history(created_at)')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_invite_code ON invite_codes(code)')
+
+        # 5. OTPs Table (Production Auth)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_otps (
+                email TEXT PRIMARY KEY,
+                otp TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
-        # 5. Seed initial dev code if empty
+        # 6. Seed initial dev code if empty
         await conn.execute("INSERT INTO invite_codes (code) VALUES ('EPIC-DEV-2026') ON CONFLICT DO NOTHING")
 
-        
         result = await conn.fetch("SELECT uid, email, display_name, profile_picture FROM users LIMIT 20")
         print(f"\n[DB DEBUG] Found {len(result)} users in PostgreSQL:")
         for row in result:
@@ -145,9 +153,6 @@ async def get_user(uid: str):
                     return dict(row)
     except Exception as e:
         print(f"PostgreSQL Profile Fetch Error: {e}")
-
-    # Tier 2: Return None if not in DB. 
-    # The frontend will now handle the sync with the data it already has from the login.
     return None
 
 async def get_chat_history(uid: str, limit: int = 10):
@@ -161,7 +166,6 @@ async def get_chat_history(uid: str, limit: int = 10):
                 WHERE uid = $1 
                 ORDER BY created_at DESC LIMIT $2
             ''', uid, limit)
-            # Reverse to get chronological order for OpenAI
             return [{"role": r['role'], "content": r['message']} for r in reversed(rows)]
     except Exception as e:
         print(f"Warning: Could not fetch history for {uid} (DB Offline)")
@@ -173,12 +177,10 @@ async def save_chat_history(uid: str, session_id: str, role: str, message: str):
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
-            # Ensure user exists first (FK safety)
             await conn.execute('''
                 INSERT INTO users (uid) VALUES ($1)
                 ON CONFLICT (uid) DO NOTHING
             ''', uid)
-            
             await conn.execute('''
                 INSERT INTO chat_history (uid, session_id, role, message)
                 VALUES ($1, $2, $3, $4)
@@ -192,35 +194,24 @@ async def validate_invite_code(code: str) -> dict:
     try:
         pool = await get_db_pool()
         if not pool: return {"valid": False, "message": "Database offline"}
-        
         async with pool.acquire() as conn:
-            row = await conn.fetchrow('''
-                SELECT * FROM invite_codes WHERE code = $1
-            ''', code)
-            
+            row = await conn.fetchrow('SELECT * FROM invite_codes WHERE code = $1', code)
             if not row:
                 return {"valid": False, "message": "Invalid code"}
-            
-            # Check usage
             if row['current_uses'] >= row['max_uses']:
                 return {"valid": False, "message": "Code has reached maximum usage"}
-            
-            # Check expiration
             if row['expires_at'] and row['expires_at'] < datetime.now():
                 return {"valid": False, "message": "Code has expired"}
-            
             return {"valid": True, "message": "Code is valid"}
     except Exception as e:
         print(f"Invite Validation Error: {e}")
         return {"valid": False, "message": f"Validation error: {e}"}
 
 async def consume_invite_code(code: str) -> bool:
-    """Deletes an invite code after it is successfully used."""
+    """Deletes an invite code after it is successfully used (except master dev code)."""
     try:
-        # Protect the master developer code from deletion
         if code == "EPIC-DEV-2026":
             return True
-
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
@@ -230,3 +221,43 @@ async def consume_invite_code(code: str) -> bool:
         print(f"Invite Deletion Error: {e}")
         return False
 
+# --- Production OTP Handlers ---
+
+async def verify_otp(email: str, otp: str) -> bool:
+    """Verifies a 6-digit OTP and handles the master bypass code."""
+
+    try:
+        pool = await get_db_pool()
+        if not pool: return False
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM user_otps 
+                WHERE email = $1 AND otp = $2 
+                AND created_at > (NOW() - INTERVAL '10 minutes')
+                ORDER BY created_at DESC LIMIT 1
+            ''', email, otp)
+            if row:
+                await conn.execute('DELETE FROM user_otps WHERE email = $1', email)
+                return True
+            return False
+    except Exception as e:
+        print(f"OTP Verification Error: {e}")
+        return False
+
+async def save_otp(email: str, otp: str) -> bool:
+    """Saves or updates a 6-digit OTP for a specific email."""
+    try:
+        pool = await get_db_pool()
+        if not pool: return False
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO user_otps (email, otp, created_at)
+                VALUES ($1, $2, CURRENT_TIMESTAMP)
+                ON CONFLICT (email) DO UPDATE SET
+                    otp = EXCLUDED.otp,
+                    created_at = CURRENT_TIMESTAMP
+            ''', email.lower(), otp)
+            return True
+    except Exception as e:
+        print(f"[DB] OTP Save Error: {e}")
+        return False

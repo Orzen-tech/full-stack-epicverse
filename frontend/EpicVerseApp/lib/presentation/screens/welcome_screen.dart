@@ -157,10 +157,10 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
                                   end: Alignment.bottomCenter,
                                 ),
                                 borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: Colors.white.withOpacity(0.12)),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
                                 boxShadow: [
                                   BoxShadow(
-                                    color: Colors.black.withOpacity(0.4),
+                                    color: Colors.black.withValues(alpha: 0.4),
                                     blurRadius: 25,
                                     offset: const Offset(0, 12),
                                   ),
@@ -181,7 +181,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
                                   const SizedBox(width: 8),
                                   Icon(
                                     Icons.chevron_right, 
-                                    color: const Color(0xFFC5A358).withOpacity(0.9),
+                                    color: const Color(0xFFC5A358).withValues(alpha: 0.9),
                                     size: 20,
                                   ),
                                 ],
@@ -199,9 +199,9 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
                               width: double.infinity,
                               height: 64,
                               decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.04),
+                                color: Colors.white.withValues(alpha: 0.04),
                                 borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: Colors.white.withOpacity(0.06)),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
                               ),
                               alignment: Alignment.center,
                               child: const Text(

@@ -172,12 +172,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                 ),
                                 padding: const EdgeInsets.all(25),
                                 child: Center(
-                                  child: Image(
-                                    image: const AssetImage('assets/images/button PNG.png'),
+                                  child: Image.asset(
+                                    'assets/images/button_png.png',
                                     width: 170,
                                     fit: BoxFit.contain,
-                                    // Subtle tilt matching floating
-                                    alignment: Alignment.center,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return const Icon(Icons.play_circle_fill, color: AppColors.primaryGold, size: 80);
+                                    },
                                   ),
                                 ),
                               ),

@@ -42,7 +42,7 @@ class NetworkBackground extends StatelessWidget {
             height: 300,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppColors.primaryGold.withOpacity(0.05),
+              color: AppColors.primaryGold.withValues(alpha: 0.05),
             ),
           ),
         ),

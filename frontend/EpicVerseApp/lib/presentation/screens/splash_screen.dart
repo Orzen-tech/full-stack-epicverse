@@ -190,7 +190,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                   child: RotationTransition(
                     turns: _spinController,
                     child: Image.asset(
-                      'assets/images/loading image.png',
+                      'assets/images/loading_image.png',
                       width: 64,
                       height: 64,
                       fit: BoxFit.contain,

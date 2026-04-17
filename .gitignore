@@ -46,3 +46,16 @@ build_latest.log
 **/.claude/
 **/*.swp
 **/*.swo
+
+# Project specific ignores
+backend/google-credentials.json
+**/google-credentials.json
+frontend/EpicVerseApp/*.txt
+backend/*.txt
+frontend/EpicVerseApp/build_log.txt
+frontend/EpicVerseApp/analysis*.txt
+frontend/EpicVerseApp/final_check.txt
+**/analyze_output.txt
+**/db_status_check.txt
+frontend/EpicVerseApp/assets/images/loading_image.png
+tmp/

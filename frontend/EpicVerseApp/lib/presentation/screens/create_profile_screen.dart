@@ -16,6 +16,7 @@ import '../../core/network/api_config.dart';
 import '../../core/network/session_manager.dart';
 import 'verification_pending_screen.dart';
 import 'welcome_screen.dart';
+import 'otp_verification_screen.dart';
 
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
@@ -32,13 +33,65 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _inviteController = TextEditingController();
 
+  bool _isInviteValid = false;
+  String? _inviteFeedback;
   bool _isLoading = false;
   final Dio _dio = Dio();
   File? _profileImage;
   final ImagePicker _picker = ImagePicker();
 
   @override
+  void initState() {
+    super.initState();
+    _inviteController.addListener(_onInviteChanged);
+  }
+
+  void _onInviteChanged() {
+    final text = _inviteController.text.trim();
+    if (text.length >= 6) {
+       _validateInviteCode(text);
+    } else {
+      if (mounted) {
+        setState(() {
+          _isInviteValid = false;
+          _inviteFeedback = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _validateInviteCode(String code) async {
+      String rawCode = code.replaceAll(' ', '');
+      if (rawCode.startsWith('EPIC-')) {
+        rawCode = rawCode.substring(5);
+      }
+      final inviteCode = "EPIC-$rawCode";
+      final validateUrl = '${ApiConfig.apiUrl}/validate-invite/$inviteCode';
+      
+      try {
+        final response = await _dio.get(
+          validateUrl,
+          options: Options(headers: ApiConfig.headers),
+        );
+        if (response.statusCode == 200 && mounted) {
+          setState(() {
+            _isInviteValid = true;
+            _inviteFeedback = "Valid code";
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _isInviteValid = false;
+            _inviteFeedback = null; // Don't show error while typing, just hide success
+          });
+        }
+      }
+  }
+
+  @override
   void dispose() {
+    _inviteController.removeListener(_onInviteChanged);
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
@@ -96,9 +149,12 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
     try {
       // 1. Pre-verify Invite Code with Backend
-      // We prepend 'EPIC -' as it's now a visual prefix in the UI
-      final rawCode = _inviteController.text.trim();
-      final inviteCode = rawCode.startsWith('EPIC -') ? rawCode : "EPIC -$rawCode";
+      // Sanitize invite code: Remove all spaces and ensure consistent prefix
+      String rawCode = _inviteController.text.trim().replaceAll(' ', '');
+      if (rawCode.startsWith('EPIC-')) {
+        rawCode = rawCode.substring(5); // Remove prefix if user typed it
+      }
+      final inviteCode = "EPIC-$rawCode";
       final validateUrl = '${ApiConfig.apiUrl}/validate-invite/$inviteCode';
       
       try {
@@ -167,16 +223,34 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       // 4. Update local state and Navigate
       ref.read(userProvider.notifier).setUser(newUser);
 
-      // 5. Trigger Email Verification & Navigate to Pending Screen
+      // 5. Trigger OTP Verification & Navigate to OTP Screen
       try {
-        await firebaseUser.sendEmailVerification();
+        final otpUrl = '${ApiConfig.apiUrl}/auth/send-otp';
+        final formData = FormData.fromMap({'email': _emailController.text.trim()});
+        await _dio.post(
+          otpUrl,
+          data: formData,
+          options: Options(headers: ApiConfig.headers),
+        );
       } catch (e) {
-        debugPrint("Error sending verification email: $e");
+        debugPrint("Error triggering OTP: $e");
       }
       
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const VerificationPendingScreen()),
+        MaterialPageRoute(
+          builder: (otpContext) => OtpVerificationScreen(
+            email: _emailController.text.trim(),
+            onVerified: () {
+               if (otpContext.mounted) {
+                 Navigator.of(otpContext).pushAndRemoveUntil(
+                   MaterialPageRoute(builder: (_) => const DashboardScreen()),
+                   (route) => false,
+                 );
+               }
+            },
+          )
+        ),
       );
     } on FirebaseAuthException catch (e) {
       _showError(e.message ?? "Authentication failed");
@@ -192,7 +266,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: AppColors.error.withOpacity(0.8),
+        backgroundColor: AppColors.error.withValues(alpha: 0.8),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -239,10 +313,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                               Container(
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  border: Border.all(color: AppColors.primaryGold.withOpacity(0.5), width: 2),
+                                  border: Border.all(color: AppColors.primaryGold.withValues(alpha: 0.5), width: 2),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: Colors.black.withOpacity(0.3),
+                                      color: Colors.black.withValues(alpha: 0.3),
                                       blurRadius: 15,
                                       spreadRadius: 2,
                                     ),
@@ -253,7 +327,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                                   backgroundColor: AppColors.glassBackground,
                                   backgroundImage: _profileImage != null ? FileImage(_profileImage!) : null,
                                   child: _profileImage == null
-                                      ? Icon(Icons.person_outline, size: 50, color: AppColors.primaryGold.withOpacity(0.5))
+                                      ? Icon(Icons.person_outline, size: 50, color: AppColors.primaryGold.withValues(alpha: 0.5))
                                       : null,
                                 ),
                               ),
@@ -327,10 +401,21 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                           decoration: _buildGlassInputDecoration(
                             hintText: 'XXXXXX',
                             icon: Icons.vpn_key_outlined,
-                            prefixText: 'EPIC -',
+                            prefixText: 'EPIC-',
                           ),
                           validator: (value) => (value == null || value.trim().isEmpty) ? 'Invite code required' : null,
                         ),
+                        if (_isInviteValid) 
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8.0, left: 4),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                _inviteFeedback ?? "",
+                                style: const TextStyle(color: Colors.greenAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ),
                         
                         const SizedBox(height: 48),
                         GestureDetector(
@@ -345,10 +430,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                                 end: Alignment.bottomCenter,
                               ),
                               borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: Colors.white.withOpacity(0.1)),
+                              border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
                               boxShadow: [
                                 BoxShadow(
-                                  color: Colors.black.withOpacity(0.3),
+                                  color: Colors.black.withValues(alpha: 0.3),
                                   blurRadius: 15,
                                   offset: const Offset(0, 8),
                                 ),
@@ -386,12 +471,12 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       hintText: hintText,
       hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
       prefixIcon: prefixText == null 
-        ? Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 20)
+        ? Icon(icon, color: AppColors.primaryGold.withValues(alpha: 0.7), size: 20)
         : Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               const SizedBox(width: 14),
-              Icon(icon, color: AppColors.primaryGold.withOpacity(0.7), size: 18),
+              Icon(icon, color: AppColors.primaryGold.withValues(alpha: 0.7), size: 18),
               const SizedBox(width: 8),
               Text(
                 prefixText, 
@@ -410,7 +495,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.glassBorder)),
       enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.glassBorder)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.primaryGold.withOpacity(0.5), width: 1.5)),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: AppColors.primaryGold.withValues(alpha: 0.5), width: 1.5)),
       errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.error, width: 1)),
       errorStyle: const TextStyle(color: AppColors.error, fontSize: 12),
     );

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     REALTIME_MODEL: str = "gpt-4o-realtime-preview"
 
+    # Email Service (SendGrid)
+    SENDGRID_API_KEY: str = ""
+    SENDGRID_FROM_EMAIL: str = "noreply@epicverse.ai"
+
     @computed_field
     @property
     def ASYNC_DATABASE_URL(self) -> str:
