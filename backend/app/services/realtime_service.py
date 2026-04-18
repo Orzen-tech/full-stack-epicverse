@@ -56,6 +56,8 @@ class RealtimeService:
         """Unified Connection: Restores session context and establishes OpenAI WebSocket."""
         clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
         try:
+            print(f"[AUTH] UID: {self.user_uid} | Requesting connection for Journey: {clean_name}")
+            
             # 1. Restore 'Zero-Amnesia' Context from Redis & Postgres
             from app.services.user_db import get_user
             user_profile = await get_user(self.user_uid)
@@ -70,15 +72,27 @@ class RealtimeService:
                 "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
                 "OpenAI-Beta": "realtime=v1"
             }
-            self.openai_ws = await asyncio.wait_for(
-                websockets.connect(OPENAI_URL, extra_headers=headers),
-                timeout=15.0
-            )
+            
+            print(f"[REALTIME] Connecting to OpenAI for {self.user_uid}...")
+            try:
+                self.openai_ws = await asyncio.wait_for(
+                    websockets.connect(OPENAI_URL, extra_headers=headers),
+                    timeout=15.0
+                )
+            except websockets.exceptions.InvalidStatusCode as e:
+                print(f"!!! [CONCURRENCY ERROR] OpenAI REJECTED connection for {self.user_uid}")
+                print(f"!!! Status Code: {e.status_code}")
+                if e.status_code == 429:
+                    print("!!! REASON: Rate Limit or Concurrent Session Limit reached on your OpenAI Tier.")
+                raise Exception(f"OpenAI connection rejected (Code: {e.status_code})")
+            except asyncio.TimeoutError:
+                print(f"!!! [CONCURRENCY ERROR] OpenAI Handshake TIMED OUT for {self.user_uid}")
+                raise Exception("OpenAI handshake timed out (Check backend net speed)")
             
             # 3. Configure Scholarly Instruction Set
             await self._setup_session()
             
-            # 4. Notify Client of Success (Crucial for Lazy-Connection Completer)
+            # 4. Notify Client of Success
             await self.client_ws.send_text(json.dumps({
                 "type": "connection_success",
                 "status": "Connected",
@@ -89,6 +103,15 @@ class RealtimeService:
             print(f"[REALTIME] Unified Connection Established for {self.user_uid}. Memory: {self.last_numbers}")
         except Exception as e:
             print(f"[REALTIME] Connection FAILED for {self.user_uid}: {e}")
+            # Send error back to phone before closing
+            try:
+                await self.client_ws.send_text(json.dumps({
+                    "type": "error",
+                    "code": "CONNECTION_FAILED",
+                    "message": str(e)
+                }))
+            except:
+                pass
             raise
 
     async def _setup_session(self):
@@ -100,12 +123,12 @@ class RealtimeService:
             "session": {
                 "modalities": ["audio", "text"],
                 "instructions": f"""Role: Robotic Scribe. 
-Rule 1: CALL 'query_postgres_database' for every number pair.
-Rule 2: MUST speak the text in 'MANDATORY_SPEAK_THIS' (translated accurately to the user's spoken language) for Turn 1. 
-Rule 3: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving". 
-Rule 4: Turn 2 (Why/How) -> Read 'revised_scholar_reason' exactly (translated to the user's spoken language). Do not add intro or outro.
-Rule 5: ABSOLUTE LANGUAGE MIRRORING. You MUST detect the user's spoken language (e.g., Hindi, English, Sanskrit) and respond EXCLUSIVELY in that same language. Do not provide translations. THIS IS A HARD CONSTRAINT.
-Rule X: MODE VALIDATION FAILURE HANDLING. If the database tool returns 'Invalid', you MUST only speak the exact text provided in 'MANDATORY_SPEAK_THIS'. Do NOT explain. Do NOT add extra text. Output ONLY the selected line.
+Rule 1: CALL 'query_postgres_database' for every number pair combo check.
+Rule 2: Turn 1 (Fact Check) -> ONLY speak the text in 'MANDATORY_SPEAK_THIS' (translated to user's language). No extra words.
+Rule 3: Turn 2 (Why/How) -> ONLY speak the 'revised_scholar_reason' raw text. NO modification. NO intro like "The reason is..." or "Here is why...". Speak the raw content immediately.
+Rule 4: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving", "unfold", "journey".
+Rule 5: ABSOLUTE LANGUAGE MIRRORING. Detect user language and respond EXCLUSIVELY in that language. THIS IS A HARD CONSTRAINT.
+Rule 6: NO CONVERSATIONAL FILLER. No "Sure!", "Okay!", "I understand", "Actually", or small talk.
 Journey: {clean_name}.
 Primary Language Hint: {self.primary_language}""",
                 "tools": [

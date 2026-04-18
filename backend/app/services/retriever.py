@@ -445,7 +445,18 @@ async def semantic_search_database(query: str, limit: int = 3) -> str:
 
 async def query_postgres_database(mode: str, character: str, karma: str) -> str:
     try:
-        exact = await get_segment_exact(int(character), int(karma), mode)
+        c_num = int(character)
+        k_num = int(karma)
+        
+        # LOGIC RULE: Both numbers are character cards (1 to 24)
+        if 1 <= c_num <= 24 and 1 <= k_num <= 24:
+            return json.dumps({
+                "status": "Invalid",
+                "final_segment": "Both numbers are character cards, they are not a combo.",
+                "revised_scholar_reason": "In the game rules, a combo must consist of one character card (1-24) and one attribute card (25+). Two character cards cannot form a combination."
+            })
+            
+        exact = await get_segment_exact(c_num, k_num, mode)
     except (TypeError, ValueError):
         exact = None
 

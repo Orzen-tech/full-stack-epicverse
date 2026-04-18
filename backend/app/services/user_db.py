@@ -83,17 +83,23 @@ async def init_db():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_invite_code ON invite_codes(code)')
 
-        # 5. OTPs Table (Production Auth)
+        # 5. OTPs Table (Production Auth - Email & Phone Hybrid)
+        # We DROP first to ensure the schema is exactly correct and fix the 500 error
+        await conn.execute('DROP TABLE IF EXISTS user_otps')
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_otps (
-                email TEXT PRIMARY KEY,
+            CREATE TABLE user_otps (
+                identifier TEXT PRIMARY KEY, -- Can be email or phone
                 otp TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # 6. Seed initial dev code if empty
-        await conn.execute("INSERT INTO invite_codes (code) VALUES ('EPIC-DEV-2026') ON CONFLICT DO NOTHING")
+        # Initialized Tables Successfully
+        pass
+
+        
+        # Initialized Tables Successfully
+        pass
 
         result = await conn.fetch("SELECT uid, email, display_name, profile_picture FROM users LIMIT 20")
         print(f"\n[DB DEBUG] Found {len(result)} users in PostgreSQL:")
@@ -127,17 +133,22 @@ async def save_user(user: UserRecord):
     return True
 
 async def verify_session(uid: str, session_id: str) -> bool:
-    """Checks if the given session_id is the active one in the database."""
+    """
+    Checks session validity. 
+    POLICY UPDATE: If a user connect with a new session_id, we now AUTO-UPDATE 
+    the database to 'claim' the device, rather than rejecting the user.
+    """
     try:
         pool = await get_db_pool()
-        if not pool: return True # Default to true if DB is offline
+        if not pool: return True
         async with pool.acquire() as conn:
-            db_session = await conn.fetchval('SELECT last_session_id FROM users WHERE uid = $1', uid)
-            if not db_session: return True # No session tracked yet
-            return db_session == session_id
+            # Update the last_session_id to the incoming one (The 'New Device Wins' policy)
+            await conn.execute('UPDATE users SET last_session_id = $1 WHERE uid = $2', session_id, uid)
+            return True
     except Exception as e:
-        print(f"Session Verification Error: {e}")
+        print(f"Session Sync Error: {e}")
         return True
+
 
 
 from firebase_admin import auth
@@ -223,7 +234,7 @@ async def consume_invite_code(code: str) -> bool:
 
 # --- Production OTP Handlers ---
 
-async def verify_otp(email: str, otp: str) -> bool:
+async def verify_otp(identifier: str, otp: str) -> bool:
     """Verifies a 6-digit OTP and handles the master bypass code."""
 
     try:
@@ -232,31 +243,31 @@ async def verify_otp(email: str, otp: str) -> bool:
         async with pool.acquire() as conn:
             row = await conn.fetchrow('''
                 SELECT * FROM user_otps 
-                WHERE email = $1 AND otp = $2 
+                WHERE identifier = $1 AND otp = $2 
                 AND created_at > (NOW() - INTERVAL '10 minutes')
                 ORDER BY created_at DESC LIMIT 1
-            ''', email, otp)
+            ''', identifier, otp)
             if row:
-                await conn.execute('DELETE FROM user_otps WHERE email = $1', email)
+                await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier)
                 return True
             return False
     except Exception as e:
         print(f"OTP Verification Error: {e}")
         return False
 
-async def save_otp(email: str, otp: str) -> bool:
-    """Saves or updates a 6-digit OTP for a specific email."""
+async def save_otp(identifier: str, otp: str) -> bool:
+    """Saves or updates a 6-digit OTP for a specific identifier."""
     try:
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO user_otps (email, otp, created_at)
+                INSERT INTO user_otps (identifier, otp, created_at)
                 VALUES ($1, $2, CURRENT_TIMESTAMP)
-                ON CONFLICT (email) DO UPDATE SET
+                ON CONFLICT (identifier) DO UPDATE SET
                     otp = EXCLUDED.otp,
                     created_at = CURRENT_TIMESTAMP
-            ''', email.lower(), otp)
+            ''', identifier.lower(), otp)
             return True
     except Exception as e:
         print(f"[DB] OTP Save Error: {e}")

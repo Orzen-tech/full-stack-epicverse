@@ -59,3 +59,6 @@ frontend/EpicVerseApp/final_check.txt
 **/db_status_check.txt
 frontend/EpicVerseApp/assets/images/loading_image.png
 tmp/
+*.log
+*.csv
+keys.txt

@@ -132,13 +132,18 @@ async def websocket_realtime(websocket: WebSocket):
         # Check against Database (Hard Truth)
         is_valid = await verify_session(user_uid, current_session_id)
         if not is_valid:
+            print(f"!!! [AUTH REJECTED] UID: {user_uid} failed session check.")
+            print(f"!!! Expected: Current DB Session | Got: {current_session_id}")
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "code": "SESSION_INVALID",
-                "message": "Logged in on another device."
+                "message": "Logged in on another device or invalid session ID."
             }))
             await websocket.close(code=1008)
             return
+        
+        print(f"[AUTH] Handshake passed for {user_uid} (Session: {current_session_id})")
+
 
         # Handle Active Connections (Memory Path)
         if user_uid in active_sessions:
