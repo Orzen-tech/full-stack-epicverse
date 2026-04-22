@@ -24,11 +24,20 @@ async def validate_invite(code: str):
 
 @router.post("/auth/send-otp")
 async def send_otp(email: str = Form(...)):
-    """Generates a 6-digit OTP, saves it to DB, and sends via SendGrid."""
+    """Generates a 6-digit OTP, saves it to DB, and sends via SendGrid with Rate Limiting."""
     import random
     from app.services.user_db import save_otp
     from app.services.email_service import send_otp_email
+    from app.services.memory_store import session_store
     
+    # 1. Rate Limit Check (Security Shield)
+    limit_check = await session_store.check_otp_rate_limit(email)
+    if not limit_check["allowed"]:
+        raise HTTPException(
+            status_code=429, 
+            detail=f"Too many attempts. Cooldown: {limit_check['mins']} mins remaining."
+        )
+
     otp = str(random.randint(100000, 999999))
     
     db_success = await save_otp(email, otp)
@@ -36,14 +45,17 @@ async def send_otp(email: str = Form(...)):
         raise HTTPException(status_code=500, detail="Database error while saving OTP")
         
     email_success = await send_otp_email(email, otp)
+    
     if not email_success:
-        # We still return success if the DB worked but email failed (for dev testing)
-        # but in production, you might want to raise an error
-        if not settings.SENDGRID_API_KEY:
-             return {"status": "partial", "message": f"OTP saved: {otp} (email skipped: no API key)", "otp": otp}
-        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+        print(f"⚠️  [OTP-FAILOVER] Email failed, but OTP {otp} is saved for {email}. USE THIS CODE MANUALLY.")
+        return {
+            "status": "partial", 
+            "message": f"OTP generated: {otp} (Email delivery failed. Checking terminal logs.)",
+            "otp": otp # Returning OTP for easier testing if email fails
+        }
         
     return {"status": "success", "message": "OTP sent successfully"}
+
 
 @router.post("/auth/verify-otp")
 async def verify_otp_route(email: str = Form(...), otp: str = Form(...)):
@@ -164,5 +176,5 @@ async def websocket_realtime(websocket: WebSocket):
         active_sessions[user_uid] = {"session_id": current_session_id, "ws": websocket}
 
     # 3. Initialize and Run Service
-    service = RealtimeService(websocket, game_mode, user_uid)
+    service = RealtimeService(websocket, game_mode, user_uid, current_session_id)
     await service.run()

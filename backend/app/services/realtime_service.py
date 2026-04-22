@@ -7,6 +7,7 @@ import re
 from fastapi import WebSocketDisconnect
 from app.core.config import settings
 from app.services.retriever import query_postgres_database
+from app.services.user_db import verify_session, is_session_active
 from app.services.memory_store import session_store
 
 # SCHOLARLY PREFERRED MESSAGES (LEGACY AI LOGIC)
@@ -23,12 +24,12 @@ INVALID_MSGS = [
     "Bit off... invalid combo.", "Doesn't quite work... invalid combo."
 ]
 EXCLUDE_MSGS = [
-    "Close! Valid, not executed yet.", "Almost there... valid, not executed.",
-    "Good one... valid, not executed.", "Nearly there! Valid, not executed.",
-    "On track... valid, not executed.", "So near... valid, not executed.",
-    "You're close... valid, not executed.", "Almost right... valid, not executed.",
-    "Getting there... valid, not executed.", "Not quite... valid, not executed.",
-    "Close enough... valid, not executed."
+    "Close! Valid, but excluded yet.", "Almost there... valid, but excluded.",
+    "Good one... valid, but excluded.", "Nearly there! Valid, but excluded.",
+    "On track... valid, but excluded.", "So near... valid, but excluded.",
+    "You're close... valid, but excluded.", "Almost right... valid, but excluded.",
+    "Getting there... valid, but excluded.", "Not quite... valid, but excluded.",
+    "Close enough... valid, but excluded."
 ]
 MODE_FAILURE_MSGS = [
     "Wrong mode. This character has no part in this chapter. Big card, wrong room.",
@@ -42,10 +43,11 @@ MODE_FAILURE_MSGS = [
 OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 
 class RealtimeService:
-    def __init__(self, client_ws, game_mode="Mode 1", user_uid="guest"):
+    def __init__(self, client_ws, game_mode="Mode 1", user_uid="guest", session_id="none"):
         self.client_ws = client_ws
         self.game_mode = game_mode
         self.user_uid = user_uid
+        self.session_id = session_id
         self.openai_ws = None
         self.last_numbers = [] # PERSISTENT MEMORY FOR 'WHY?' QUESTIONS
         self.primary_language = "en" # Default
@@ -129,6 +131,7 @@ Rule 3: Turn 2 (Why/How) -> ONLY speak the 'revised_scholar_reason' raw text. NO
 Rule 4: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving", "unfold", "journey".
 Rule 5: ABSOLUTE LANGUAGE MIRRORING. Detect user language and respond EXCLUSIVELY in that language. THIS IS A HARD CONSTRAINT.
 Rule 6: NO CONVERSATIONAL FILLER. No "Sure!", "Okay!", "I understand", "Actually", or small talk.
+Rule 7: SCOPE LOCK. ONLY respond to questions related to the EpicVerse game, its mechanics, or the Ramayana scriptures. If asked about unrelated topics (e.g., general news, math, music, or other apps), say: "I am the Guardian of the EpicVerse scriptures. I can only speak of the Ramayana journey. Let us return to the cards."
 Journey: {clean_name}.
 Primary Language Hint: {self.primary_language}""",
                 "tools": [
@@ -177,6 +180,17 @@ Primary Language Hint: {self.primary_language}""",
                 if "bytes" in message:
                     self._relay_count += 1
                     if self._relay_count % 20 == 0:
+                        # SECURITY: Check if this session has been 'Kicked' by a new device
+                        if not await is_session_active(self.user_uid, self.session_id):
+                            print(f"[AUTH] SESSION KICKED for {self.user_uid}. Another device logged in.")
+                            await self.client_ws.send_text(json.dumps({
+                                "type": "error",
+                                "code": "SESSION_EXPIRED",
+                                "message": "Logged in on another device."
+                            }))
+                            await self.client_ws.close()
+                            return
+
                         print(f"[REALTIME] RELAYING AUDIO: {len(message['bytes'])} bytes (Chunk {self._relay_count})")
                     audio_b64 = base64.b64encode(message["bytes"]).decode("utf-8")
                     await self.openai_ws.send(json.dumps({

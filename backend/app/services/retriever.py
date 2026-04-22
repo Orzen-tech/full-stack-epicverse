@@ -93,7 +93,8 @@ _db_pool_failed: bool = False  # once True, skip retrying so endpoints return fa
 redis_client: Redis | None = None
 _REDIS_ENABLED: bool = True
 
-KNOWLEDGE_BASE_CACHE: list[dict[str, Any]] = []
+# Global Cache for Dual-Reliability (DB + RAM Fallback)
+KNOWLEDGE_BASE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 async def init_db_pool() -> asyncpg.Pool | None:
@@ -111,7 +112,9 @@ async def init_db_pool() -> asyncpg.Pool | None:
                 timeout=10,   # fail fast if DB is unreachable
             )
         except Exception as e:
-            print(f"[DB] Pool creation failed: {e}")
+            import traceback
+            print(f"❌ [DB] Pool creation failed: {e}")
+            traceback.print_exc()
             _db_pool_failed = True
             db_pool = None
     return db_pool
@@ -157,7 +160,68 @@ async def close_redis() -> None:
 
 
 async def load_excel_data() -> None:
-    return None
+    """
+    Initializes the in-memory fallback cache by loading data from all spreadsheets.
+    This serves as a 'Safety Net' if the database connection fails.
+    """
+    global KNOWLEDGE_BASE_CACHE
+    import pandas as pd
+    import os
+
+    data_dir = "e:/kriyora/EpicVerse/backend/data"
+    KANDA_MAP = {
+        1: "OriginArc (Balakanda)",
+        2: "CrownShift (AyodhyaKanda)", 
+        3: "WildRun (AranyaKanda)",
+        4: "GlowLine (KishkindhaKanda)",
+        5: "lankaLeap (SundaraKanda)",
+        6: "WarRoom (YuddhaKanda)",
+        7: "AfterLight (UttaraKanda)"
+    }
+
+    print("[BOOT] Pre-loading RAM Fallback Cache from Excel...")
+    
+    count = 0
+    for i in range(1, 8):
+        file = f"mode {i}.xlsx"
+        path = os.path.join(data_dir, file)
+        mode_label = KANDA_MAP[i]
+        
+        if not os.path.exists(path):
+            continue
+            
+        try:
+            # Use pandas to read just the columns we need for the safety net
+            df = pd.read_excel(path).replace({pd.NA: None})
+            for _, row in df.iterrows():
+                try:
+                    c_num = int(row.get('Character Card No.', 0)) if pd.notnull(row.get('Character Card No.')) else 0
+                    a_num = int(row.get('Attribute Card No.', 0)) if pd.notnull(row.get('Attribute Card No.')) else 0
+                    
+                    if c_num == 0 or a_num == 0:
+                        continue
+                        
+                    # Normalize for lookup
+                    c_num, a_num = _normalize_card_numbers(c_num, a_num)
+                    
+                    # Store in flat dictionary for O(1) fallback
+                    cache_key = f"{mode_label}:{c_num}:{a_num}"
+                    KNOWLEDGE_BASE_CACHE[cache_key] = {
+                        "id": count,
+                        "gameplay_mode": mode_label,
+                        "character_card_number": c_num,
+                        "attribute_card_no": a_num,
+                        "final_segment": str(row.get('App Message (Crisp)', '')),
+                        "final_status": str(row.get('Final Segment', '')),
+                        "revised_scholar_reason": str(row.get('App Message (Crisp)', ''))
+                    }
+                    count += 1
+                except:
+                    continue
+        except Exception as e:
+            print(f"[BOOT] Failed to load {file} into RAM cache: {e}")
+
+    print(f"[BOOT] RAM Safety Net Ready: {count} combinations loaded.")
 
 
 async def ensure_card_search_schema() -> None:
@@ -318,15 +382,29 @@ async def get_segment_exact(character_card_number: int, attribute_card_no: int, 
         return json.loads(cached)
 
     pool = await init_db_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            EXACT_LOOKUP_SQL,
-            character_card_number,
-            attribute_card_no,
-            gameplay_mode,
-        )
+    row = None
+    
+    if pool is not None and not _db_pool_failed:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    EXACT_LOOKUP_SQL,
+                    character_card_number,
+                    attribute_card_no,
+                    gameplay_mode,
+                )
+        except Exception as e:
+            print(f"[DB-ERROR] Exact lookup failed: {e}. Falling back to RAM cache.")
+            row = None
 
+    # --- FALLBACK LOGIC ---
     if row is None:
+        cache_key = f"{gameplay_mode}:{character_card_number}:{attribute_card_no}"
+        fallback_data = KNOWLEDGE_BASE_CACHE.get(cache_key)
+        if fallback_data:
+            # Return immediately from RAM cache
+            await _cache_set(key, fallback_data, settings.REDIS_LOOKUP_TTL_SECONDS)
+            return fallback_data
         return None
 
     payload = _record_to_dict(row)

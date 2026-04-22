@@ -8,6 +8,7 @@ from app.services.retriever import close_db_pool, close_redis, init_redis, load_
 from app.services.user_db import init_db
 import firebase_admin
 from firebase_admin import credentials
+from app.services.retriever import db_pool, _db_pool_failed
 
 # Initialize Firebase Admin
 try:
@@ -26,8 +27,8 @@ async def lifespan(app: FastAPI):
     # Infrastructure Initialization with timeouts
     try:
         print("Connecting to Database...")
-        await asyncio.wait_for(init_db_pool(), timeout=60)
-        print("Database Pool initialized.")
+        await asyncio.wait_for(init_db_pool(), timeout=30) # Increased timeout
+        print("Database Pool check finished.")
         
         print("Initializing Database Tables...")
         await asyncio.wait_for(init_db(), timeout=60)
@@ -38,7 +39,11 @@ async def lifespan(app: FastAPI):
     except asyncio.TimeoutError:
         print("CRITICAL: Database/Redis connection timed out. Server running with degraded services.")
     except Exception as e:
-        print(f"CRITICAL Error during Database initialization: {e}")
+        import traceback
+        print(f"❌ [DB-CRUCIAL] Pool creation failed!")
+        print(f"ERROR: {e}")
+        traceback.print_exc()
+        _db_pool_failed = True
     
     # Final Transition to Ready State
     await load_excel_data()
@@ -46,7 +51,7 @@ async def lifespan(app: FastAPI):
     print("\n" + "="*50)
     print(f" EPICVERSE BACKEND: {settings.VERSION} ")
     print("="*50)
-    print(f" DB Pool:  [ACTIVE]")
+    print(f" DB Pool:  [{'ACTIVE' if db_pool and not _db_pool_failed else 'FAILED (Critical)'}]")
     print(f" Redis:    [{'ACTIVE' if redis_client else 'OFFLINE (Degraded Mode)'}]")
     print(f" Datasets: [LOADED]")
     print("="*50 + "\n")

@@ -101,14 +101,8 @@ async def init_db():
         # Initialized Tables Successfully
         pass
 
-        result = await conn.fetch("SELECT uid, email, display_name, profile_picture FROM users LIMIT 20")
-        print(f"\n[DB DEBUG] Found {len(result)} users in PostgreSQL:")
-        for row in result:
-             email = row['email'] if 'email' in row else 'N/A'
-             name = row['display_name'] if 'display_name' in row else 'N/A'
-             has_photo = "YES" if row['profile_picture'] else "NO"
-             print(f" - UID: {row['uid']}, Email: {email}, Name: {name}, Photo: {has_photo}")
-        print("-" * 30 + "\n")
+        # Initialized Tables Successfully
+        pass
     await ensure_card_search_schema()
 
 async def save_user(user: UserRecord):
@@ -134,20 +128,34 @@ async def save_user(user: UserRecord):
 
 async def verify_session(uid: str, session_id: str) -> bool:
     """
-    Checks session validity. 
-    POLICY UPDATE: If a user connect with a new session_id, we now AUTO-UPDATE 
-    the database to 'claim' the device, rather than rejecting the user.
+    Claims the session for this device. 'New Device Wins' policy.
     """
     try:
         pool = await get_db_pool()
         if not pool: return True
         async with pool.acquire() as conn:
-            # Update the last_session_id to the incoming one (The 'New Device Wins' policy)
+            # Claim the session
             await conn.execute('UPDATE users SET last_session_id = $1 WHERE uid = $2', session_id, uid)
             return True
     except Exception as e:
         print(f"Session Sync Error: {e}")
         return True
+
+async def is_session_active(uid: str, session_id: str) -> bool:
+    """
+    Checks if this device is still the 'authorized' one. 
+    If False, it means another device has logged in and 'kicked' this one.
+    """
+    try:
+        pool = await get_db_pool()
+        if not pool: return True
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT last_session_id FROM users WHERE uid = $1', uid)
+            if row and row['last_session_id'] and row['last_session_id'] != session_id:
+                return False # Another device took over
+            return True
+    except Exception:
+        return True # Fail open on DB issues
 
 
 
@@ -221,7 +229,7 @@ async def validate_invite_code(code: str) -> dict:
 async def consume_invite_code(code: str) -> bool:
     """Deletes an invite code after it is successfully used (except master dev code)."""
     try:
-        if code == "EPIC-DEV-2026":
+        if code == "EPIC-DEV-MASTER":
             return True
         pool = await get_db_pool()
         if not pool: return False
