@@ -1,7 +1,8 @@
 class UserModel {
   final String id;
   final String displayName;
-  final String email;
+  final String? email;
+  final String? phoneNumber;
   final String primaryLanguage;
   final List<String> preferredLanguages;
   final String activeArc;
@@ -14,9 +15,10 @@ class UserModel {
   UserModel({
     required this.id,
     required this.displayName,
-    required this.email,
-    required this.primaryLanguage,
-    required this.preferredLanguages,
+    this.email,
+    this.phoneNumber,
+    this.primaryLanguage = 'English',
+    this.preferredLanguages = const ['English'],
     this.activeArc = 'Origin-Arc',
     this.level = 1,
     this.profilePicture,
@@ -28,7 +30,8 @@ class UserModel {
     return UserModel(
       id: json['uid'] ?? json['id'] ?? '',
       displayName: json['display_name'] ?? json['displayName'] ?? json['name'] ?? 'User',
-      email: json['email'] ?? '',
+      email: json['email'],
+      phoneNumber: json['phone_number'] ?? json['phoneNumber'],
       primaryLanguage: json['primary_language'] ?? json['primaryLanguage'] ?? 'English',
       preferredLanguages: json['preferred_languages'] != null 
           ? List<String>.from(json['preferred_languages'])
@@ -48,6 +51,7 @@ class UserModel {
       'uid': id,
       'display_name': displayName,
       'email': email,
+      'phone_number': phoneNumber,
       'primary_language': primaryLanguage,
       'preferred_languages': preferredLanguages,
       'active_arc': activeArc,
@@ -61,6 +65,7 @@ class UserModel {
   UserModel copyWith({
     String? displayName,
     String? email,
+    String? phoneNumber,
     String? primaryLanguage,
     List<String>? preferredLanguages,
     String? activeArc,
@@ -71,6 +76,7 @@ class UserModel {
       id: id,
       displayName: displayName ?? this.displayName,
       email: email ?? this.email,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
       primaryLanguage: primaryLanguage ?? this.primaryLanguage,
       preferredLanguages: preferredLanguages ?? this.preferredLanguages,
       activeArc: activeArc ?? this.activeArc,

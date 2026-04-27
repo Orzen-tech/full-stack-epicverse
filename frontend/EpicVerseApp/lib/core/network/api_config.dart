@@ -1,5 +1,5 @@
 class ApiConfig {
-  static const String baseUrl = 'https://sari-frowzy-frizzly.ngrok-free.dev';
+  static const String baseUrl = 'https://epicverse-backend-721191424605.us-central1.run.app';
   
   static String get wsUrl {
     String cleanUrl = baseUrl;
@@ -14,6 +14,6 @@ class ApiConfig {
   static String get apiUrl => '$baseUrl/api/v1';
 
   static Map<String, String> get headers => {
-    'ngrok-skip-browser-warning': 'true',
+    'Content-Type': 'application/json',
   };
 }

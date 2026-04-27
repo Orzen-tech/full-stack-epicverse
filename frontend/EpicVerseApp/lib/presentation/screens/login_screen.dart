@@ -92,19 +92,25 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         
         // Trigger OTP via Backend
         try {
-           final formData = FormData.fromMap({'email': firebaseUser.email});
+           final formData = FormData.fromMap({'identifier': firebaseUser.email});
            await _dio.post('${ApiConfig.apiUrl}/auth/send-otp', data: formData);
         } catch (e) {
            debugPrint("OTP Send failed: $e");
+           if (mounted) {
+             ScaffoldMessenger.of(context).showSnackBar(
+               const SnackBar(content: Text("Failed to send verification code. Please try again."), backgroundColor: Colors.redAccent),
+             );
+           }
+           return; // Stop flow if OTP fails
         }
 
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
             builder: (otpContext) => OtpVerificationScreen(
-              email: firebaseUser.email!,
+              email: loggedInUser.email,
               onVerified: () {
-                 if (otpContext.mounted) {
-                   Navigator.of(otpContext).pushAndRemoveUntil(
+                 if (mounted) {
+                   Navigator.of(context).pushAndRemoveUntil(
                      MaterialPageRoute(builder: (_) => const CreateProfileScreen()),
                      (route) => false,
                    );

@@ -46,6 +46,7 @@ build_latest.log
 **/.claude/
 **/*.swp
 **/*.swo
+.history/
 
 # Project specific ignores
 backend/google-credentials.json
