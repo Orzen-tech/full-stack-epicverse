@@ -23,15 +23,22 @@ async def validate_invite(code: str):
     return result
 
 @router.post("/auth/send-otp")
-async def send_otp(email: str = Form(...)):
-    """Generates a 6-digit OTP, saves it to DB, and sends via SendGrid with Rate Limiting."""
+async def send_otp(identifier: str = Form(None), email: str = Form(None)):
+    """Generates a 6-digit OTP, saves it to DB, and sends via Email (or logs if Phone)."""
+    identifier = identifier or email
+    if not identifier:
+        raise HTTPException(status_code=422, detail="identifier or email is required")
+    
     import random
     from app.services.user_db import save_otp
     from app.services.email_service import send_otp_email
     from app.services.memory_store import session_store
     
-    # 1. Rate Limit Check (Security Shield)
-    limit_check = await session_store.check_otp_rate_limit(email)
+    # identifier could be email or phone
+    is_email = "@" in identifier
+
+    # 1. Rate Limit Check
+    limit_check = await session_store.check_otp_rate_limit(identifier)
     if not limit_check["allowed"]:
         raise HTTPException(
             status_code=429, 
@@ -40,29 +47,31 @@ async def send_otp(email: str = Form(...)):
 
     otp = str(random.randint(100000, 999999))
     
-    db_success = await save_otp(email, otp)
+    db_success = await save_otp(identifier, otp)
     if not db_success:
         raise HTTPException(status_code=500, detail="Database error while saving OTP")
         
-    email_success = await send_otp_email(email, otp)
-    
-    if not email_success:
-        print(f"⚠️  [OTP-FAILOVER] Email failed, but OTP {otp} is saved for {email}. USE THIS CODE MANUALLY.")
-        return {
-            "status": "partial", 
-            "message": f"OTP generated: {otp} (Email delivery failed. Checking terminal logs.)",
-            "otp": otp # Returning OTP for easier testing if email fails
-        }
+    if is_email:
+        email_success = await send_otp_email(identifier, otp)
+        if not email_success:
+            print(f"⚠️ [OTP-FAILOVER] Email failed for {identifier}")
+            raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    else:
+        # Placeholder for SMS Service (e.g. Twilio/Firebase)
+        print(f"📱 [OTP-SMS-LOG] OTP queued for {identifier}")
+        return {"status": "success", "message": "OTP sent via SMS"}
         
     return {"status": "success", "message": "OTP sent successfully"}
 
 
 @router.post("/auth/verify-otp")
-async def verify_otp_route(email: str = Form(...), otp: str = Form(...)):
-        
-    # 2. Database Verification
+async def verify_otp_route(identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
+    identifier = identifier or email
+    if not identifier:
+        raise HTTPException(status_code=422, detail="identifier or email is required")
+    
     from app.services.user_db import verify_otp
-    is_valid = await verify_otp(email, otp)
+    is_valid = await verify_otp(identifier, otp)
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
     return {"status": "success", "message": "OTP verified"}
@@ -71,43 +80,36 @@ async def verify_otp_route(email: str = Form(...), otp: str = Form(...)):
 @router.post("/sync-user")
 async def sync_user(user: UserRecord):
     """Saves user info to the SQL database after verifying invite code."""
-    print(f"[SYNC] Received data for {user.uid}: Name={user.display_name}, Photo={'set' if user.profile_picture else 'None'}")
+    print(f"[SYNC] Received data for {user.uid}: Name={user.display_name}, Phone={user.phone_number}")
     from app.services.user_db import validate_invite_code, consume_invite_code, save_user, get_user
     
-    # Check if user already exists in our database
+    # Check if user already exists
     existing_user = await get_user(user.uid)
     
     if not existing_user:
-        # 1. Verification Step (Required ONLY for new users)
+        # New Registration
         if not user.invite_code:
             raise HTTPException(status_code=400, detail="Invite code is required for registration")
         
-        is_valid = await validate_invite_code(user.invite_code)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail="Invalid or expired invite code")
+        val_res = await validate_invite_code(user.invite_code)
+        if not val_res["valid"]:
+            raise HTTPException(status_code=400, detail=val_res["message"])
         
-        # 2. Setup New User
         await save_user(user)
         await consume_invite_code(user.invite_code)
-        return {"status": "success", "message": "New user registered and invite consumed"}
+        return {"status": "success", "message": "New user registered"}
     else:
-        # Existing user: Merge fields to avoid overwriting with None
-        # Priority: Incoming Value > Existing Value
-        merged_display_name = user.display_name if user.display_name else existing_user.get('display_name')
-        merged_profile_picture = user.profile_picture if user.profile_picture else existing_user.get('profile_picture')
-        merged_email = user.email if user.email else existing_user.get('email')
-        merged_primary_language = user.primary_language if user.primary_language else existing_user.get('primary_language')
-        
-        # Create a clean record for saving
+        # Merge Existing User
         from copy import copy
         updated_user = copy(user)
-        updated_user.display_name = merged_display_name
-        updated_user.profile_picture = merged_profile_picture
-        updated_user.email = merged_email
-        updated_user.primary_language = merged_primary_language
+        updated_user.display_name = user.display_name or existing_user.get('display_name')
+        updated_user.profile_picture = user.profile_picture or existing_user.get('profile_picture')
+        updated_user.email = user.email or existing_user.get('email')
+        updated_user.phone_number = user.phone_number or existing_user.get('phone_number')
+        updated_user.primary_language = user.primary_language or existing_user.get('primary_language')
         
         await save_user(updated_user)
-        return {"status": "success", "message": "User profile updated and merged"}
+        return {"status": "success", "message": "User profile updated"}
 
 @router.get("/user/{firebase_id}")
 async def fetch_user(firebase_id: str):
@@ -177,4 +179,43 @@ async def websocket_realtime(websocket: WebSocket):
 
     # 3. Initialize and Run Service
     service = RealtimeService(websocket, game_mode, user_uid, current_session_id)
-    await service.run()
+    try:
+        await service.run()
+    finally:
+        # Clean up stale session tracking entry so reconnects aren't blocked
+        if user_uid in active_sessions and active_sessions[user_uid].get("session_id") == current_session_id:
+            del active_sessions[user_uid]
+
+@router.get("/db-health")
+async def db_health():
+    """Detailed health check for the PostgreSQL database."""
+    from app.services.retriever import init_db_pool, db_pool, _db_pool_failed
+    import asyncpg
+    
+    status = {
+        "pool_initialized": db_pool is not None,
+        "pool_failed_previously": _db_pool_failed,
+        "connection_test": "pending"
+    }
+    
+    try:
+        pool = await init_db_pool()
+        if not pool:
+            status["connection_test"] = "failed - could not create pool"
+            return status
+            
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+            status["connection_test"] = "success"
+            
+            # Check table counts
+            users_count = await conn.fetchval("SELECT count(*) FROM users")
+            combos_count = await conn.fetchval("SELECT count(*) FROM card_combos")
+            status["tables"] = {
+                "users": users_count,
+                "card_combos": combos_count
+            }
+    except Exception as e:
+        status["connection_test"] = f"failed - {str(e)}"
+    
+    return status

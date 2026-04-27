@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini" # Using gpt-4o-mini as proxy for 4.1 mini
     EMBEDDING_MODEL: str = "text-embedding-3-small"
-    REALTIME_MODEL: str = "gpt-4o-realtime-preview"
+    REALTIME_MODEL: str = "gpt-4o-realtime-preview-2024-12-17"
 
     # Email Service (SendGrid)
     SENDGRID_API_KEY: str = ""

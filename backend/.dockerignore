@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+.git
+.gitignore
+*.log
+*.csv
+*.xlsx
+tmp/
+test_results.txt
+google-credentials.json
+GoogleService-Info.plist

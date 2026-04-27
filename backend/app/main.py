@@ -24,35 +24,53 @@ async def lifespan(app: FastAPI):
     import asyncio
     from app.services.retriever import init_db_pool
     
-    # Infrastructure Initialization with timeouts
-    try:
-        print("Connecting to Database...")
-        await asyncio.wait_for(init_db_pool(), timeout=30) # Increased timeout
-        print("Database Pool check finished.")
-        
-        print("Initializing Database Tables...")
-        await asyncio.wait_for(init_db(), timeout=60)
-        print("Database Tables initialized.")
+    # 1. Database Initialization (Backgrounded to prevent Cloud Run startup timeouts)
+    async def run_db_init():
+        import app.services.retriever as retriever
+        try:
+            print("Connecting to Database in background...")
+            await retriever.init_db_pool()
+            if retriever.db_pool:
+                print("Database Pool ready. Initializing Tables...")
+                await asyncio.wait_for(init_db(), timeout=30)
+                print("Database Tables initialized.")
+            else:
+                print("⚠️ [DB] Pool not ready. Will retry on next request.")
+        except Exception as e:
+            print(f"❌ [DB-CRUCIAL] Background Database Initialization Failed: {e}")
+            retriever._db_pool_failed = True
 
-        print("Connecting to Redis...")
-        await asyncio.wait_for(init_redis(), timeout=15)
-    except asyncio.TimeoutError:
-        print("CRITICAL: Database/Redis connection timed out. Server running with degraded services.")
-    except Exception as e:
-        import traceback
-        print(f"❌ [DB-CRUCIAL] Pool creation failed!")
-        print(f"ERROR: {e}")
-        traceback.print_exc()
-        _db_pool_failed = True
+    asyncio.create_task(run_db_init())
+
+    # 2. Redis Initialization (Non-Critical, Backgrounded)
+    async def run_redis_init():
+        try:
+            print("Connecting to Redis in background...")
+            await asyncio.wait_for(init_redis(), timeout=15)
+        except Exception as e:
+            print(f"⚠️ [INFRA] Redis Offline: Disabling Semantic Cache. ({e})")
     
-    # Final Transition to Ready State
-    await load_excel_data()
+    asyncio.create_task(run_redis_init())
+    
+    # Final Transition to Ready State (Backgrounded)
+    import app.services.retriever as retriever
+    async def run_data_load():
+        try:
+            print("Loading Excel datasets in background...")
+            await retriever.load_excel_data()
+            print("==================================================")
+            print(" EPICVERSE BACKEND READY")
+            print("==================================================")
+        except Exception as e:
+            print(f"❌ [DATA] Failed to load Excel data: {e}")
+
+    asyncio.create_task(run_data_load())
     
     print("\n" + "="*50)
     print(f" EPICVERSE BACKEND: {settings.VERSION} ")
     print("="*50)
-    print(f" DB Pool:  [{'ACTIVE' if db_pool and not _db_pool_failed else 'FAILED (Critical)'}]")
-    print(f" Redis:    [{'ACTIVE' if redis_client else 'OFFLINE (Degraded Mode)'}]")
+    print(f" DB Pool:  [{'ACTIVE' if retriever.db_pool and not retriever._db_pool_failed else 'FAILED (Critical)'}]")
+    print(f" Redis:    [{'ACTIVE' if retriever.redis_client else 'OFFLINE (Degraded Mode)'}]")
     print(f" Datasets: [LOADED]")
     print("="*50 + "\n")
     
@@ -69,11 +87,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "https://epicverse-backend-721191424605.us-central1.run.app").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
@@ -81,8 +105,16 @@ app.add_middleware(
 app.include_router(routes.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
-def root():
-    return {"message": "Welcome to the Game Guide AI Voice Agent Backend"}
+async def root():
+    from app.services.retriever import db_pool, redis_client, _db_pool_failed
+    return {
+        "message": "EpicVerse Backend API",
+        "version": settings.VERSION,
+        "status": {
+            "database": "CONNECTED" if db_pool else ("FAILED" if _db_pool_failed else "INITIALIZING"),
+            "redis": "CONNECTED" if redis_client else "OFFLINE"
+        }
+    }
 
 @app.get("/modes")
 async def list_modes():

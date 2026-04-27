@@ -4,6 +4,7 @@ import base64
 import websockets
 import random
 import re
+import numpy as np
 from fastapi import WebSocketDisconnect
 from app.core.config import settings
 from app.services.retriever import query_postgres_database
@@ -40,7 +41,8 @@ MODE_FAILURE_MSGS = [
 ]
 
 
-OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+OPENAI_REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"
+OPENAI_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_REALTIME_MODEL}"
 
 class RealtimeService:
     def __init__(self, client_ws, game_mode="Mode 1", user_uid="guest", session_id="none"):
@@ -59,34 +61,43 @@ class RealtimeService:
         clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
         try:
             print(f"[AUTH] UID: {self.user_uid} | Requesting connection for Journey: {clean_name}")
-            
+
             # 1. Restore 'Zero-Amnesia' Context from Redis & Postgres
             from app.services.user_db import get_user
             user_profile = await get_user(self.user_uid)
             session_data = await session_store.get_session_data(self.user_uid)
-            
+
             self.last_numbers = session_data.get("last_numbers", [])
             if user_profile:
                 self.primary_language = user_profile.get("primary_language", "en")
-            
+
             # 2. Establish OpenAI Handshake
             headers = {
                 "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1"
+                "OpenAI-Beta": "realtime=v1",
             }
-            
-            print(f"[REALTIME] Connecting to OpenAI for {self.user_uid}...")
+
+            print(f"[REALTIME] Connecting to OpenAI ({OPENAI_REALTIME_MODEL}) for {self.user_uid}...")
             try:
                 self.openai_ws = await asyncio.wait_for(
-                    websockets.connect(OPENAI_URL, extra_headers=headers),
+                    websockets.connect(
+                        OPENAI_URL,
+                        extra_headers=headers,
+                        compression=None,
+                        ping_interval=None,
+                    ),
                     timeout=15.0
                 )
-            except websockets.exceptions.InvalidStatusCode as e:
+            except websockets.exceptions.InvalidStatus as e:
+                # websockets 12.0+: InvalidStatusCode was removed, use InvalidStatus
+                status_code = e.response.status_code
                 print(f"!!! [CONCURRENCY ERROR] OpenAI REJECTED connection for {self.user_uid}")
-                print(f"!!! Status Code: {e.status_code}")
-                if e.status_code == 429:
+                print(f"!!! Status Code: {status_code}")
+                if status_code == 429:
                     print("!!! REASON: Rate Limit or Concurrent Session Limit reached on your OpenAI Tier.")
-                raise Exception(f"OpenAI connection rejected (Code: {e.status_code})")
+                elif status_code == 401:
+                    print("!!! REASON: Invalid or missing OpenAI API Key.")
+                raise Exception(f"OpenAI connection rejected (Code: {status_code})")
             except asyncio.TimeoutError:
                 print(f"!!! [CONCURRENCY ERROR] OpenAI Handshake TIMED OUT for {self.user_uid}")
                 raise Exception("OpenAI handshake timed out (Check backend net speed)")
@@ -119,12 +130,17 @@ class RealtimeService:
     async def _setup_session(self):
         """Configures tools and system prompt with Hierarchical Truth rules."""
         clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
-        
+
+        # OpenAI Realtime API correct session.update format.
+        # All audio config fields are FLAT (not nested). Voice, modalities,
+        # input_audio_format, output_audio_format are top-level session properties.
+        # input_audio_transcription enables Whisper-based STT on the server side.
+        # turn_detection with server_vad handles speech boundary detection automatically.
         session_update = {
             "type": "session.update",
             "session": {
-                "modalities": ["audio", "text"],
-                "instructions": f"""Role: Robotic Scribe. 
+                "modalities": ["text", "audio"],
+                "instructions": f"""Role: Robotic Scribe.
 Rule 1: CALL 'query_postgres_database' for every number pair combo check.
 Rule 2: Turn 1 (Fact Check) -> ONLY speak the text in 'MANDATORY_SPEAK_THIS' (translated to user's language). No extra words.
 Rule 3: Turn 2 (Why/How) -> ONLY speak the 'revised_scholar_reason' raw text. NO modification. NO intro like "The reason is..." or "Here is why...". Speak the raw content immediately.
@@ -134,37 +150,36 @@ Rule 6: NO CONVERSATIONAL FILLER. No "Sure!", "Okay!", "I understand", "Actually
 Rule 7: SCOPE LOCK. ONLY respond to questions related to the EpicVerse game, its mechanics, or the Ramayana scriptures. If asked about unrelated topics (e.g., general news, math, music, or other apps), say: "I am the Guardian of the EpicVerse scriptures. I can only speak of the Ramayana journey. Let us return to the cards."
 Journey: {clean_name}.
 Primary Language Hint: {self.primary_language}""",
+                "voice": "alloy",
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": {
+                    "model": "whisper-1"
+                },
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 600
+                },
                 "tools": [
                     {
-                    "type": "function",
-                    "name": "query_postgres_database",
-                    "description": "Truth check for card combo IDs (1-120).",
-                    "parameters": {
+                        "type": "function",
+                        "name": "query_postgres_database",
+                        "description": "Truth check for card combo IDs (1-120).",
+                        "parameters": {
                             "type": "object",
                             "properties": {
-                                 "card1": {"type": "string"},
-                                 "card2": {"type": "string"}
+                                "card1": {"type": "string"},
+                                "card2": {"type": "string"}
                             },
                             "required": ["card1", "card2"]
                         }
                     }
                 ],
-                 "tool_choice": "auto",
-                 "turn_detection": {
-                     "type": "server_vad",
-                     "threshold": 0.5,
-                     "prefix_padding_ms": 300,
-                     "silence_duration_ms": 650
-                 },
-                 "output_audio_format": "pcm16",
-                 "input_audio_transcription": {
-                     "model": "whisper-1"
-                 }
+                "tool_choice": "auto"
             }
         }
-        # Force 16kHz for mobile low-latency compatibility
-        session_update["session"]["input_audio_format"] = "pcm16"
-        # session_update["session"]["input_audio_sample_rate"] = 16000 # Default is often 24k, we force 16k
         await self.openai_ws.send(json.dumps(session_update))
 
     # Backend-only control messages that must NOT be forwarded to OpenAI
@@ -192,7 +207,23 @@ Primary Language Hint: {self.primary_language}""",
                             return
 
                         print(f"[REALTIME] RELAYING AUDIO: {len(message['bytes'])} bytes (Chunk {self._relay_count})")
-                    audio_b64 = base64.b64encode(message["bytes"]).decode("utf-8")
+
+                    # Resample from 16kHz (Flutter) → 24kHz (OpenAI minimum requirement).
+                    # Flutter sends raw PCM16 at 16kHz; OpenAI rejects anything below 24kHz.
+                    raw_audio = message["bytes"]
+                    samples = np.frombuffer(raw_audio, dtype=np.int16)
+                    if len(samples) > 0:
+                        orig_len = len(samples)
+                        new_len = int(orig_len * 3 / 2)  # 16000 * 1.5 = 24000
+                        resampled = np.interp(
+                            np.linspace(0, orig_len - 1, new_len),
+                            np.arange(orig_len),
+                            samples.astype(np.float64)
+                        ).astype(np.int16)
+                        audio_b64 = base64.b64encode(resampled.tobytes()).decode("utf-8")
+                    else:
+                        audio_b64 = base64.b64encode(raw_audio).decode("utf-8")
+
                     await self.openai_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": audio_b64
@@ -246,54 +277,52 @@ Primary Language Hint: {self.primary_language}""",
         try:
             async for raw_message in self.openai_ws:
                 event = json.loads(raw_message)
+                event_type = event["type"]
 
-                # 1. Audio Streaming Delta — send as binary bytes
-                if event["type"] == "response.audio.delta":
+                # 1. Audio delta — send as binary bytes, do not also relay as text
+                if event_type == "response.audio.delta":
                     audio_bytes = base64.b64decode(event["delta"])
-                    if self._relay_count % 10 == 0:
-                        print(f"[TTS DEBUG] Streaming Audio: {len(audio_bytes)} bytes")
                     try:
                         await self.client_ws.send_bytes(audio_bytes)
                     except Exception:
                         pass
 
-                # 2. JSON Event Relay (skip raw audio buffer echoes)
-                elif event["type"] != "input_audio_buffer.append":
-                    # LOGGING: Print non-audio events to catch errors
-                    if event["type"] == "input_audio_buffer.speech_started":
+                # 2. OpenAI error events — log only, NEVER forward to Flutter.
+                #    Forwarding causes Flutter to close the WebSocket with 1002.
+                elif event_type == "error":
+                    print(f"[REALTIME] CRITICAL OPENAI ERROR: {json.dumps(event.get('error', {}), indent=2)}")
+
+                # 3. Skip raw audio buffer echoes (no useful info for client)
+                elif event_type == "input_audio_buffer.append":
+                    pass
+
+                # 4. All other events — apply specific logging then relay to Flutter
+                else:
+                    if event_type == "input_audio_buffer.speech_started":
                         print("\n[STT INPUT] >>> User started speaking...")
-                    elif event["type"] == "input_audio_buffer.speech_stopped":
+                    elif event_type == "input_audio_buffer.speech_stopped":
                         print("\n[STT INPUT] <<< User stopped speaking. Transcribing...")
-                    
-                    if event["type"] == "error":
-                        print(f"[REALTIME] CRITICAL OPENAI ERROR: {json.dumps(event.get('error', {}), indent=2)}")
-                    
+                    elif event_type == "response.audio_transcript.delta":
+                        self._current_transcript += event.get("delta", "")
+                        print(f"\r[AI]: {self._current_transcript}", end="", flush=True)
+                    elif event_type == "response.audio_transcript.done":
+                        print(f"\n[AI FINAL]: {self._current_transcript}")
+                        self._current_transcript = ""
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        transcript = event.get("transcript", "")
+                        print(f"\n[STT DEBUG] User said: '{transcript}'")
+                        nums = re.findall(r'\d+', transcript)
+                        if len(nums) >= 2:
+                            print(f"[FAST-PATH] Detected {nums[0]} & {nums[1]}. Triggering Pre-Fetch...")
+                            asyncio.create_task(query_postgres_database(self.game_mode, nums[0], nums[1]))
+
                     try:
                         await self.client_ws.send_text(raw_message)
                     except Exception:
-                        pass  # Client disconnected, continue for tool calls
+                        pass  # Client disconnected; continue so tool calls can still complete
 
-                # 3. Transcript Logging
-                elif event["type"] == "response.audio_transcript.delta":
-                    self._current_transcript += event["delta"]
-                    # Print delta to terminal for real-time visibility
-                    print(f"\r[AI]: {self._current_transcript}", end="", flush=True)
-
-                elif event["type"] == "response.audio_transcript.done":
-                    print(f"\n[AI FINAL]: {self._current_transcript}")
-                    self._current_transcript = "" # Reset for next turn
-
-                # 4. FAST-PATH: Intercept User Transcript for Pre-Fetch
-                elif event["type"] == "conversation.item.input_audio_transcription.completed":
-                    transcript = event.get("transcript", "")
-                    print(f"\n[STT DEBUG] User said: '{transcript}'")
-                    nums = re.findall(r'\d+', transcript)
-                    if len(nums) >= 2:
-                        print(f"[FAST-PATH] Detected {nums[0]} & {nums[1]}. Triggering Pre-Fetch...")
-                        asyncio.create_task(query_postgres_database(self.game_mode, nums[0], nums[1]))
-
-                # 5. Intercept Tool Call — executes DB query and feeds result back
-                if event["type"] == "response.done":
+                # 5. Tool call interception — always runs on response.done regardless of branch above
+                if event_type == "response.done":
                     output_items = event.get("response", {}).get("output", [])
                     for item in output_items:
                         if item.get("type") == "function_call":
@@ -324,9 +353,10 @@ Primary Language Hint: {self.primary_language}""",
             status = data.get("status", "Invalid")
             
             # Select Random Preferred Message based on status
-            # Important: Database uses 'Valid but Excluded', code was only checking 'Exclude'
             if status == "Valid":
                 msg_list = VALID_MSGS
+            elif status == "Invalid":
+                msg_list = INVALID_MSGS
             elif "Excluded" in status or status == "Exclude":
                 msg_list = EXCLUDE_MSGS
             else:
@@ -356,7 +386,7 @@ Primary Language Hint: {self.primary_language}""",
             # ENHANCED TERMINAL LOG FOR TOOL RESULT
             print(f"\n[MATRIX RESULT]: Mode='{self.game_mode}' | Cards={num1}&{num2} | Status='{status}' | Sent_Msg='{random_msg}'")
             if status == "Valid":
-                print(f"[MATRIX DATA]: {data.get('final_segment')[:100]}...")
+                print(f"[MATRIX DATA]: {str(data.get('final_segment') or '')[:100]}...")
         except Exception as e:
             print(f"[REALTIME] Tool Enrichment Error: {e}")
             output_str = raw_result

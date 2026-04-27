@@ -10,8 +10,9 @@ load_dotenv()
 class UserRecord(BaseModel):
     uid: str = Field(..., alias="firebase_id")
     email: str | None = None
+    phone_number: str | None = None
     display_name: str | None = Field(None, alias="display_name")
-    primary_language: str | None = Field(None, alias="primary_language")
+    primary_language: str | None = Field("English", alias="primary_language")
     invite_code: str | None = Field(None, alias="invite_code")
     profile_picture: str | None = Field(None, alias="profile_picture")
     session_id: str | None = Field(None, alias="session_id")
@@ -35,6 +36,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 uid TEXT PRIMARY KEY,
                 email TEXT,
+                phone_number TEXT,
                 display_name TEXT,
                 primary_language TEXT,
                 invite_code TEXT,
@@ -47,6 +49,8 @@ async def init_db():
         
         # Ensure columns exist for existing tables (migration)
         try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_session_id TEXT")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_mode TEXT DEFAULT 'Mode 1'")
@@ -84,25 +88,14 @@ async def init_db():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_invite_code ON invite_codes(code)')
 
         # 5. OTPs Table (Production Auth - Email & Phone Hybrid)
-        # We DROP first to ensure the schema is exactly correct and fix the 500 error
-        await conn.execute('DROP TABLE IF EXISTS user_otps')
         await conn.execute('''
-            CREATE TABLE user_otps (
+            CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY, -- Can be email or phone
                 otp TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Initialized Tables Successfully
-        pass
-
-        
-        # Initialized Tables Successfully
-        pass
-
-        # Initialized Tables Successfully
-        pass
     await ensure_card_search_schema()
 
 async def save_user(user: UserRecord):
@@ -110,18 +103,19 @@ async def save_user(user: UserRecord):
         pool = await get_db_pool()
         if not pool: return False
         async with pool.acquire() as conn:
-            print(f"[DB] Saving user {user.uid}: Name={user.display_name}, Email={user.email}, Photo={'YES' if user.profile_picture else 'NO'}")
+            print(f"[DB] Saving user {user.uid}: Name={user.display_name}, Phone={user.phone_number}, Email={user.email}")
             await conn.execute('''
-                INSERT INTO users (uid, email, display_name, primary_language, invite_code, profile_picture, last_session_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO users (uid, email, phone_number, display_name, primary_language, invite_code, profile_picture, last_session_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (uid) DO UPDATE SET
                     email = COALESCE(EXCLUDED.email, users.email),
+                    phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
                     display_name = COALESCE(EXCLUDED.display_name, users.display_name),
                     primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
                     invite_code = COALESCE(EXCLUDED.invite_code, users.invite_code),
                     profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture),
                     last_session_id = COALESCE(EXCLUDED.last_session_id, users.last_session_id)
-            ''', user.uid, user.email, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.session_id)
+            ''', user.uid, user.email, user.phone_number, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.session_id)
     except Exception as e:
         print(f"CRITICAL: Could not save user {user.uid} to DB: {e}")
     return True
@@ -210,6 +204,14 @@ async def save_chat_history(uid: str, session_id: str, role: str, message: str):
 
 async def validate_invite_code(code: str) -> dict:
     """Checks if an invite code is valid, not expired, and has uses remaining."""
+    if not code:
+        return {"valid": False, "message": "Invite code is required"}
+        
+    code = code.replace(" ", "").upper()
+    master_code = os.getenv("DEV_MASTER_INVITE_CODE")
+    if master_code and code == master_code:
+        return {"valid": True, "message": "Master Developer Access Granted"}
+
     try:
         pool = await get_db_pool()
         if not pool: return {"valid": False, "message": "Database offline"}
@@ -229,7 +231,10 @@ async def validate_invite_code(code: str) -> dict:
 async def consume_invite_code(code: str) -> bool:
     """Deletes an invite code after it is successfully used (except master dev code)."""
     try:
-        if code == "EPIC-DEV-MASTER":
+        if not code: return False
+        code = code.replace(" ", "").upper()
+        master_code = os.getenv("DEV_MASTER_INVITE_CODE")
+        if master_code and code == master_code:
             return True
         pool = await get_db_pool()
         if not pool: return False
@@ -250,11 +255,11 @@ async def verify_otp(identifier: str, otp: str) -> bool:
         if not pool: return False
         async with pool.acquire() as conn:
             row = await conn.fetchrow('''
-                SELECT * FROM user_otps 
-                WHERE identifier = $1 AND otp = $2 
+                SELECT * FROM user_otps
+                WHERE identifier = $1 AND otp = $2
                 AND created_at > (NOW() - INTERVAL '10 minutes')
                 ORDER BY created_at DESC LIMIT 1
-            ''', identifier, otp)
+            ''', identifier.lower(), otp)  # .lower() matches how save_otp stores it
             if row:
                 await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier)
                 return True

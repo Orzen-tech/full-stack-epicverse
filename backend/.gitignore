@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Firebase/Google Cloud Keys
+google-credentials.json
+GoogleService-Info.plist
+*.p12
+*.pem
+
+# Logs
+*.log
+test_results.txt
+test_results_v2.txt
+audit_results.json
+audit_results.txt
+db_status_check.txt
+excel_audit.log
+
+# Databases & Local Data
+data/*.csv
+data/*.xlsx
+*.csv
+*.xlsx
+EpicVerse_Invites.xlsx
+EpicVerse_New_Invites.xlsx
+EpicVerse_Invite_Codes_Batch_1.txt
+
+# Deployment configs with secrets
+cloudbuild.yaml
+
+# OS-specific files
+.DS_Store
+Thumbs.db

@@ -102,21 +102,33 @@ async def init_db_pool() -> asyncpg.Pool | None:
     if _db_pool_failed:
         return None
     if db_pool is None:
-        try:
-            db_pool = await asyncpg.create_pool(
-                settings.ASYNC_DATABASE_URL,
-                min_size=1,   # start with 1 connection so timeout=10 is per-pool not per-connection*20
-                max_size=settings.DB_POOL_MAX_SIZE,
-                max_inactive_connection_lifetime=300,
-                command_timeout=settings.DB_COMMAND_TIMEOUT_SECONDS,
-                timeout=10,   # fail fast if DB is unreachable
-            )
-        except Exception as e:
-            import traceback
-            print(f"❌ [DB] Pool creation failed: {e}")
-            traceback.print_exc()
-            _db_pool_failed = True
-            db_pool = None
+        for attempt in range(1, 4):
+            try:
+                dsn = settings.ASYNC_DATABASE_URL
+                # Log safe DSN (hide password)
+                safe_dsn = dsn.split('@')[0].split(':')[:-1] + ['****'] + [dsn.split('@')[1]] if '@' in dsn else dsn
+                print(f"[DB] Attempt {attempt} to connect with DSN: ...@{''.join(safe_dsn[-1] if isinstance(safe_dsn, list) else safe_dsn)}")
+                
+                db_pool = await asyncpg.create_pool(
+                    dsn,
+                    min_size=1,
+                    max_size=settings.DB_POOL_MAX_SIZE,
+                    max_inactive_connection_lifetime=300,
+                    command_timeout=settings.DB_COMMAND_TIMEOUT_SECONDS,
+                    timeout=15
+                )
+                print(f"✅ [DB] Connected successfully on attempt {attempt}.")
+                return db_pool
+            except Exception as e:
+                if attempt < 3:
+                    print(f"⚠️ [DB] Connection attempt {attempt} failed: {e}. Retrying in 2s...")
+                    await asyncio.sleep(2)
+                else:
+                    import traceback
+                    print(f"❌ [DB] Pool creation failed after {attempt} attempts: {e}")
+                    traceback.print_exc()
+                    _db_pool_failed = True
+                    db_pool = None
     return db_pool
 
 
@@ -168,7 +180,7 @@ async def load_excel_data() -> None:
     import pandas as pd
     import os
 
-    data_dir = "e:/kriyora/EpicVerse/backend/data"
+    data_dir = os.path.join(os.getcwd(), "data")
     KANDA_MAP = {
         1: "OriginArc (Balakanda)",
         2: "CrownShift (AyodhyaKanda)", 
@@ -435,6 +447,8 @@ async def semantic_search_segments(
 
     vector = "[" + ",".join(str(value) for value in embedding) + "]"
     pool = await init_db_pool()
+    if pool is None:
+        return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             SEMANTIC_SEARCH_SQL,
