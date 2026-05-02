@@ -15,12 +15,17 @@ allprojects {
 // so the Flutter tool can locate the produced APK / AAB. Without this, every
 // Flutter build emits "Gradle build failed to produce an .apk file" even though
 // the APK is sitting under android/app/build/outputs/apk/.
-val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
-rootProject.layout.buildDirectory.value(newBuildDir)
+val androidRootDir = rootDir.canonicalFile
+val flutterProjectDir = androidRootDir.parentFile
+val flutterBuildDir = File(flutterProjectDir, "build")
+
+rootProject.buildDir = flutterBuildDir
 
 subprojects {
-    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
-    project.layout.buildDirectory.value(newSubprojectBuildDir)
+    val projectDirCanonical = project.projectDir.canonicalFile
+    if (projectDirCanonical.toPath().startsWith(androidRootDir.toPath())) {
+        project.buildDir = File(flutterBuildDir, project.name)
+    }
 }
 
 subprojects {

@@ -1,5 +1,7 @@
 class ApiConfig {
-  static const String baseUrl = 'https://epicverse-backend-721191424605.us-central1.run.app';
+  // Cloud Run backend only lives in asia-south1 after pruning europe-west1/us-central1.
+  static const String baseUrl =
+      'https://epicverse-backend-721191424605.asia-south1.run.app';
   
   static String get wsUrl {
     String cleanUrl = baseUrl;
