@@ -18,4 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Cloud Run sets the PORT env variable dynamically. Uvicorn binds to it.
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}
+# `exec` replaces the shell with uvicorn so PID 1 receives SIGTERM directly,
+# enabling FastAPI lifespan shutdown (DB pool close, WebSocket drain) instead
+# of being SIGKILLed after Cloud Run's 10s grace period.
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

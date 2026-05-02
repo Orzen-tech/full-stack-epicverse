@@ -70,16 +70,23 @@ class WebSocketService {
     _reconnectTimer?.cancel();
 
     final listenFlag = isListening ?? false;
-    // Updated query params to include uid and session_id for backend verification
-    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag&token=$idToken';
-    
+    // Token is sent via the Authorization handshake header (NOT in the URL),
+    // so it does not leak into Cloud Run / load balancer / proxy access logs.
+    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag';
+
     Uri wsUri = Uri.parse('${ApiConfig.wsUrl}?$queryParams');
     if (hostOrUrl != null && hostOrUrl.isNotEmpty) {
       wsUri = Uri.parse('${hostOrUrl.startsWith('ws') ? hostOrUrl : 'ws://$hostOrUrl'}/api/v1/ws/realtime?$queryParams');
     }
-    
+
     try {
-      _channel = IOWebSocketChannel.connect(wsUri, headers: ApiConfig.headers);
+      _channel = IOWebSocketChannel.connect(
+        wsUri,
+        headers: {
+          ...ApiConfig.headers,
+          'Authorization': 'Bearer $idToken',
+        },
+      );
       
       _channel!.stream.listen(
         (message) {
