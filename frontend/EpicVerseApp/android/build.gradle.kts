@@ -11,6 +11,18 @@ allprojects {
     }
 }
 
+// Redirect Gradle build outputs from android/app/build to <flutter-root>/build/app
+// so the Flutter tool can locate the produced APK / AAB. Without this, every
+// Flutter build emits "Gradle build failed to produce an .apk file" even though
+// the APK is sitting under android/app/build/outputs/apk/.
+val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
+subprojects {
+    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
+    project.layout.buildDirectory.value(newSubprojectBuildDir)
+}
+
 subprojects {
     afterEvaluate {
         val rootDrive = rootProject.projectDir.absolutePath.substringBefore(":")
