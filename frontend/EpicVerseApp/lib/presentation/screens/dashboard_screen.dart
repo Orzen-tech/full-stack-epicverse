@@ -1,23 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/app_colors.dart';
-import '../../core/constants/app_assets.dart';
-import '../widgets/glass_card.dart';
 import '../widgets/network_background.dart';
-import 'dart:io';
-import 'package:image_picker/image_picker.dart';
 import '../../providers/user_provider.dart';
-import 'package:dio/dio.dart';
-import 'companion_ready_screen.dart';
-import 'welcome_screen.dart';
-import 'login_screen.dart';
 import 'mode_selection_screen.dart';
-import '../../core/network/api_config.dart';
-import '../widgets/epicverse_logo.dart';
 import 'dart:convert';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:math' as math;
+import 'settings_screen.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
@@ -201,50 +189,30 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
 
   Widget _buildAppBar(BuildContext context, WidgetRef ref, String name) {
     final user = ref.watch(userProvider);
-    final picker = ImagePicker();
 
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: () => _showImageSourceActionSheet(context, ref, picker),
-            child: Hero(
-              tag: 'user_avatar',
-              child: Stack(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.1),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white.withOpacity(0.4), width: 1.5),
-                      image: user?.profilePicture != null 
-                        ? DecorationImage(
-                            image: MemoryImage(base64Decode(user!.profilePicture!)),
-                            fit: BoxFit.cover,
-                          ) 
-                        : null,
-                    ),
-                    child: user?.profilePicture == null 
-                      ? const Icon(Icons.person_outline_rounded, color: Colors.white, size: 26)
-                      : null,
-                  ),
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: Container(
-                      padding: const EdgeInsets.all(3),
-                      decoration: const BoxDecoration(
-                        color: AppColors.primaryGold,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.camera_alt_rounded, size: 9, color: Colors.black),
-                    ),
-                  ),
-                ],
+          Hero(
+            tag: 'user_avatar',
+            child: Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.1),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white.withOpacity(0.4), width: 1.5),
+                image: user?.profilePicture != null
+                  ? DecorationImage(
+                      image: MemoryImage(base64Decode(user!.profilePicture!)),
+                      fit: BoxFit.cover,
+                    )
+                  : null,
               ),
+              child: user?.profilePicture == null
+                ? const Icon(Icons.person_outline_rounded, color: Colors.white, size: 26)
+                : null,
             ),
           ),
           const SizedBox(width: 16),
@@ -257,153 +225,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
           ),
           const Spacer(),
           IconButton(
-            onPressed: () => _showEditProfileDialog(context, ref),
-            icon: const Icon(Icons.edit_note_rounded, color: AppColors.textPrimary),
-            tooltip: 'Edit Profile',
-          ),
-          IconButton(
-            onPressed: () async {
-              final prefs = await SharedPreferences.getInstance();
-              await prefs.remove('isLoggedIn');
-              await FirebaseAuth.instance.signOut();
-              if (!context.mounted) return;
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
-                (route) => false,
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
               );
             },
-            icon: const Icon(AppIcons.exit, color: AppColors.textPrimary),
-            tooltip: 'Logout',
+            icon: const Icon(Icons.settings_rounded, color: AppColors.textPrimary),
+            tooltip: 'Settings',
           ),
         ],
       ),
     );
   }
 
-  void _showEditProfileDialog(BuildContext context, WidgetRef ref) {
-    final user = ref.read(userProvider);
-    if (user == null) return;
-    final controller = TextEditingController(text: user.displayName);
-    
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.surfaceElevated,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Edit Name', style: TextStyle(color: AppColors.textPrimary)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: AppColors.textPrimary),
-          decoration: const InputDecoration(
-            hintText: 'Enter your name',
-            hintStyle: TextStyle(color: AppColors.textMuted),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.primaryGold)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accentGold)),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          TextButton(
-            onPressed: () async {
-              final newName = controller.text.trim();
-              if (newName.isNotEmpty) {
-                // 1. Update UI and Firebase Auth (Primary state)
-                final updatedUser = user.copyWith(displayName: newName);
-                ref.read(userProvider.notifier).setUser(updatedUser);
-                
-                try {
-                  // Synchronize name with Firebase if possible
-                  await FirebaseAuth.instance.currentUser?.updateDisplayName(newName);
-
-                  // 2. Synchronize with SQL Database (Persistent state)
-                  final dio = Dio();
-                  await dio.post(
-                    '${ApiConfig.apiUrl}/sync-user',
-                    data: {
-                      "uid": updatedUser.id,
-                      "display_name": updatedUser.displayName,
-                      "email": updatedUser.email,
-                      "primary_language": updatedUser.primaryLanguage,
-                      "profile_picture": updatedUser.profilePicture,
-                    },
-                    options: Options(headers: ApiConfig.headers), // Critical for ngrok
-                  );
-                } catch (e) {
-                  debugPrint("Error syncing profile updates: $e");
-                }
-              }
-              if (mounted) Navigator.pop(context);
-            },
-            child: const Text('Save', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showImageSourceActionSheet(BuildContext context, WidgetRef ref, ImagePicker picker) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.surfaceElevated,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.camera_alt_rounded, color: AppColors.primaryGold),
-                title: const Text('Take Photo', style: TextStyle(color: AppColors.textPrimary)),
-                onTap: () async {
-                  Navigator.pop(context);
-                  final XFile? image = await picker.pickImage(source: ImageSource.camera, imageQuality: 50);
-                  if (image != null) await _updateProfile(ref, image.path);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_library_rounded, color: AppColors.primaryGold),
-                title: const Text('Choose from Gallery', style: TextStyle(color: AppColors.textPrimary)),
-                onTap: () async {
-                  Navigator.pop(context);
-                  final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
-                  if (image != null) await _updateProfile(ref, image.path);
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _updateProfile(WidgetRef ref, String path) async {
-    final user = ref.read(userProvider);
-    if (user != null) {
-      try {
-        final bytes = await File(path).readAsBytes();
-        final base64Image = base64Encode(bytes);
-        final updatedUser = user.copyWith(profilePicture: base64Image);
-        ref.read(userProvider.notifier).setUser(updatedUser);
-        final dio = Dio();
-        await dio.post(
-          '${ApiConfig.apiUrl}/sync-user',
-          data: {
-            "uid": updatedUser.id,
-            "display_name": updatedUser.displayName,
-            "email": updatedUser.email,
-            "primary_language": updatedUser.primaryLanguage,
-            "profile_picture": updatedUser.profilePicture, 
-          },
-          options: Options(headers: ApiConfig.headers),
-        );
-      } catch (e) {
-        debugPrint("Error updating profile image: $e");
-      }
-    }
-  }
 }

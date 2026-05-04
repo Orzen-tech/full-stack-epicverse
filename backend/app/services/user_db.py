@@ -34,6 +34,10 @@ async def init_db():
         ''')
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_id TEXT")
+        # Soft-delete support: a non-null timestamp means the account is
+        # scheduled for permanent deletion 30 days later. A subsequent
+        # authenticated sign-in auto-clears this column (grace period).
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY,
@@ -83,10 +87,82 @@ async def save_user(user: UserRecord):
 async def get_user(firebase_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Auto-cancel a pending deletion: if the user returns within the
+        # 30-day grace window, clear `deletion_requested_at` so the scheduled
+        # purge will skip them. This is the "sign back in → account restored"
+        # behaviour surfaced in the Settings UI.
         row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
+        if row and row.get('deletion_requested_at') is not None:
+            await conn.execute(
+                'UPDATE users SET deletion_requested_at = NULL WHERE uid = $1',
+                firebase_id,
+            )
+            print(f"[USER_DB] Auto-cancelled pending deletion for uid={firebase_id}", flush=True)
+            row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
         if row:
             return dict(row)
     return None
+
+
+async def request_user_deletion(uid: str) -> bool:
+    """Marks a user as pending deletion. Actual purge happens 30 days later
+    via `purge_expired_deletions()` unless the user signs in and triggers
+    auto-cancel in `get_user()` first.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                'UPDATE users SET deletion_requested_at = NOW() WHERE uid = $1',
+                uid,
+            )
+            print(f"[USER_DB] Deletion requested uid={uid} result={result}", flush=True)
+            return True
+    except Exception as e:
+        print(f"[USER_DB] request_user_deletion error: {e}")
+        return False
+
+
+async def cancel_user_deletion(uid: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET deletion_requested_at = NULL WHERE uid = $1',
+                uid,
+            )
+            return True
+    except Exception as e:
+        print(f"[USER_DB] cancel_user_deletion error: {e}")
+        return False
+
+
+async def purge_expired_deletions() -> list[str]:
+    """Hard-deletes users whose `deletion_requested_at` is older than 30 days.
+    Returns the list of uids that were purged (caller is responsible for
+    deleting them from Firebase Auth).
+    """
+    purged: list[str] = []
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT uid FROM users WHERE deletion_requested_at IS NOT NULL "
+                "AND deletion_requested_at < NOW() - INTERVAL '30 days'"
+            )
+            for r in rows:
+                uid = r['uid']
+                try:
+                    await conn.execute('DELETE FROM chat_history WHERE uid = $1', uid)
+                except Exception:
+                    pass
+                await conn.execute('DELETE FROM users WHERE uid = $1', uid)
+                purged.append(uid)
+        if purged:
+            print(f"[USER_DB] Purged {len(purged)} expired accounts: {purged}", flush=True)
+    except Exception as e:
+        print(f"[USER_DB] purge_expired_deletions error: {e}")
+    return purged
 
 
 async def save_otp(identifier: str, otp: str) -> bool:

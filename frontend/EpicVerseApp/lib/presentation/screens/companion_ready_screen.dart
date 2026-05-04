@@ -101,10 +101,20 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           final data = jsonDecode(message);
           
           if (data['type'] == 'response.done') {
+            debugPrint('[EpicVerse][AI] response.done → LLM finished speaking');
             _stopTalking(); 
           } else if (data['type'] == 'error') {
+            debugPrint('[EpicVerse][AI] error event: ${data['message'] ?? data}');
             _stopTalking();
             _handleSystemError(data);
+          } else if (data['type'] == 'response.audio_transcript.delta' || data['type'] == 'transcript') {
+            debugPrint('[EpicVerse][AI] transcript delta: ${data['delta'] ?? data['text']}');
+          } else if (data['type'] == 'input_audio_buffer.speech_started') {
+            debugPrint('[EpicVerse][STT] speech started detected by backend');
+          } else if (data['type'] == 'input_audio_buffer.speech_stopped') {
+            debugPrint('[EpicVerse][STT] speech stopped detected by backend');
+          } else if (data['type'] == 'conversation.item.input_audio_transcription.completed') {
+            debugPrint('[EpicVerse][STT] heard: ${data['transcript']}');
           }
           _handleIncomingMessage(message);
         } else if (message is Uint8List) {
@@ -161,6 +171,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // --- Animation Handlers (Production-Ready) ---
   void _startTalking() {
     if (!mounted || _isTalking) return;
+    debugPrint('[EpicVerse][AI] AI started talking');
     _waveController.duration = const Duration(milliseconds: 800); // Fast!
     _waveController.repeat();
     setState(() {
@@ -171,6 +182,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   void _stopTalking() {
     if (!mounted || !_isTalking) return;
+    debugPrint('[EpicVerse][AI] AI stopped talking');
     _waveController.duration = const Duration(milliseconds: 4000); // Slow idle
     _waveController.repeat();
     setState(() {
@@ -356,6 +368,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   }
 
   Future<void> _startVoiceTurn([int timeoutSeconds = 5]) async {
+    debugPrint('[EpicVerse][MIC] Mic tapped → _startVoiceTurn(timeout=${timeoutSeconds}s)');
     // 1. Establish Lazy Handshake if not already connected
     if (!_isConnected || !webSocketService.isConnected) {
       if (mounted) setState(() => _statusText = "Authenticating...");
@@ -375,7 +388,9 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     // 2. Guarantee backend enters voice mode 
     webSocketService.sendMessage(jsonEncode({"type": "stop_wakeword"}));
     
-    if (await _audioRecorder.hasPermission() && mounted) {
+    final hasPerm = await _audioRecorder.hasPermission();
+    debugPrint('[EpicVerse][MIC] hasPermission=$hasPerm');
+    if (hasPerm && mounted) {
       setState(() {
         _isRecording = true;
         _isListeningWakeWord = false;
@@ -395,6 +410,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         bitRate: 384000, // 24 * 1000 * 16 / 1
       ));
       
+      debugPrint('[EpicVerse][MIC] Recorder started 24kHz PCM16 mono');
       _micSubscription = stream.listen((data) {
         // [AUDIT] Binary relay certified
         webSocketService.sendMessage(data);
@@ -414,6 +430,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   Future<void> _stopRecording() async {
     if (!_isRecording) return;
+    debugPrint('[EpicVerse][MIC] _stopRecording');
     
     // Stop recording first to flush the stream
     _recordingTimer?.cancel();
@@ -428,6 +445,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       _isRecording = false;
     });
     
+    debugPrint('[EpicVerse][MIC] Sent {"type":"end"} → awaiting LLM');
     webSocketService.sendMessage('{"type": "end"}');
     
     // Optional: Keep connection alive until AI finishes speaking for smoother UX

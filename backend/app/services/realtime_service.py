@@ -138,42 +138,35 @@ def _detect_language(text: str) -> str:
 
 _BACKEND_ONLY_TYPES = {"stop_wakeword", "start_wakeword", "ping", "end"}
 
-SYSTEM_INSTRUCTIONS = """You are a rule-based response engine for a card combo validation game. Follow these rules strictly without deviation.
+SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card combo validation game. You have two response modes only.
 
-QUESTION TYPE DETECTION:
-- FIRST question (combo check): user asks about an x and y combo → treat as a VALIDATION query.
-- SECOND question (follow-up): user asks "why", "how", or requests an explanation → treat as a REASONING query.
+━━━ MODE 1 — COMBO CHECK (user asks if X and Y is a combo) ━━━
+1. Extract the two card numbers from what the user said.
+2. ALWAYS call query_database_for_combo — no exceptions, every single time, even if you think you already know the answer from a previous turn.
+3. Read the "avatar_response" field from the tool result.
+4. Speak ONLY that exact text. Word for word. Nothing added. Nothing removed.
+   - No greeting. No explanation. No punctuation changes. Just the avatar_response value.
 
-VALIDATION QUERY RULES (first question):
-1. Extract the two card numbers from the user's voice input.
-2. Use the gameplay mode from the session context.
-3. Always call query_database_for_combo to look up the combo.
-4. When the tool result contains "avatar_response": output EXACTLY that text. Nothing more, nothing less.
-   - No extra words. No punctuation added. No rephrasing. No greeting. Just the avatar_response value.
-5. If the tool returns an error or no match: output EXACTLY the avatar_response text from the result.
+━━━ MODE 2 — REASON (user asks "why" or "how" after a combo check) ━━━
+1. Do NOT call the tool again.
+2. Find the "revised_scholar_reason" field from the MOST RECENT tool result in the conversation.
+3. Detect the language the user just spoke in.
+4. If the user spoke in English: output the revised_scholar_reason exactly as stored. No changes.
+5. If the user spoke in another language: translate the revised_scholar_reason into that language. Output only the translation. Nothing else.
+6. Do not summarize, shorten, add context, or add any extra sentences.
 
-REASONING QUERY RULES (second question — "why" / "how"):
-1. Do NOT call the tool again. Use the result from the previous turn.
-2. Output ONLY the raw text from the "revised_scholar_reason" field.
-3. Translate it into the user's current language if needed.
-4. Do NOT modify, summarize, add greetings, or append anything. Output must be exactly the stored reason text.
-
-LANGUAGE RULE:
-- Detect the language of the CURRENT user query.
-- Always respond in that exact language.
-- Translate revised_scholar_reason into the user's language for reasoning queries.
+━━━ LANGUAGE RULE ━━━
+- Always detect the language of the CURRENT user message.
+- Respond in that exact language only.
 - Never switch languages unless the user switches first.
 
-SCOPE RESTRICTION:
-- Only respond to game-related questions (combo checks, card numbers, game reasons).
-- If the question is not related to the game, output nothing (empty response).
-
-STRICT ENFORCEMENT:
-- No explanations beyond the rules above.
-- No additional sentences before or after the required output.
-- No formatting changes.
-- No assumptions beyond the provided data.
-- Never invent answers. Only return information from the database."""
+━━━ CRITICAL — NO HALLUCINATION ━━━
+- NEVER answer a combo check from memory, prior context, or conversation history.
+- NEVER skip calling query_database_for_combo for any combo question, even if the same combo was asked before.
+- NEVER generate your own explanation or description. Only speak what the database returns.
+- NEVER add greetings, qualifiers, or extra sentences.
+- If the question is unrelated to the game, say nothing.
+- Every combo check = one fresh tool call. No exceptions."""
 
 
 class _SafeJsonEncoder(json.JSONEncoder):
@@ -346,24 +339,30 @@ class RealtimeSession:
             result = await query_postgres_database(target_mode, char, karma)
             elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
 
+            # query_postgres_database returns a JSON string — parse to dict
+            # so we can inspect final_status and inject avatar_response
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except Exception:
+                    pass
+
             if isinstance(result, dict):
                 is_error = "error" in result
+                status = result.get("final_status") or result.get("status", "")
                 if is_error:
                     _log("DB NO MATCH", self.uid,
-                         f"combo NOT found | query took {elapsed_ms}ms | {result['error']}")
+                         f"combo NOT found | query took {elapsed_ms}ms | {result.get('error')}")
                 else:
-                    status    = result.get("final_status", "?")
-                    char_name = result.get("character", "?")
-                    attr_name = result.get("attribute", "?")
                     reason_preview = str(result.get("revised_scholar_reason", ""))[:80]
                     _log("DB MATCH FOUND", self.uid,
-                         f"status={status} | char={char_name} | attr={attr_name} | took={elapsed_ms}ms")
+                         f"status={status} | took={elapsed_ms}ms")
                     _log("DB REASON",     self.uid,
                          f"\"{reason_preview}{'...' if len(reason_preview) == 80 else ''}\"")
 
-                # Inject the pre-defined random response so LLM speaks it exactly
+                # Inject avatar_response so LLM speaks it exactly (not its own words)
                 avatar_msg = _pick_combo_message(
-                    result.get("final_status") if not is_error else None,
+                    status if not is_error else None,
                     is_error=is_error,
                 )
                 result["avatar_response"] = avatar_msg
@@ -463,7 +462,23 @@ class RealtimeSession:
                                  f"user closed mic | chunks={self._audio_chunks_sent} "
                                  f"bytes={round(self._audio_bytes_sent/1024,1)}KB")
                             _log("AUDIO STREAM END", self.uid,
-                                 "mic closed — VAD will commit remaining buffer")
+                                 "mic closed — appending silence to trigger VAD commit")
+                            # server_vad needs 600ms of silence to auto-commit the
+                            # buffer. When the mic closes, audio stops and VAD never
+                            # fires, leaving the buffer stuck. Appending silence here
+                            # gives VAD the silence window it needs.
+                            if self._audio_appended_since_commit:
+                                silence_16k = bytes(int(16000 * 0.75 * 2))  # 750ms PCM16 @ 16kHz
+                                silence_24k = self._resample_16k_to_24k(silence_16k)
+                                try:
+                                    await self.openai_ws.send(json.dumps({
+                                        "type":  "input_audio_buffer.append",
+                                        "audio": base64.b64encode(silence_24k).decode(),
+                                    }))
+                                    _log("SILENCE PADDING", self.uid,
+                                         "750ms silence appended → VAD will detect end-of-speech")
+                                except Exception as _e:
+                                    _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
                             self._mic_streaming   = False
                             self._audio_chunks_sent = 0
                             self._audio_bytes_sent  = 0

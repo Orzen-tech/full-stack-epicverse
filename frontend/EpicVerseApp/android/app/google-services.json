@@ -1,26 +1,43 @@
 {
   "project_info": {
-    "project_number": "528735951861",
-    "project_id": "epicverse-13267",
-    "storage_bucket": "epicverse-13267.firebasestorage.app"
+    "project_number": "721191424605",
+    "project_id": "perfect-age-491106-p3",
+    "storage_bucket": "perfect-age-491106-p3.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:528735951861:android:be6633bae3849e58dfdebc",
+        "mobilesdk_app_id": "1:721191424605:android:df232fe9c0d5aa80f933b4",
         "android_client_info": {
           "package_name": "com.mltiverse.mltiverse_app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "721191424605-4756prhg0ngkn6u8cgemb7o70tu6q9b7.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "AIzaSyBaznkDU36SRG9voRU88zfMCiWujXd1R0E"
+          "current_key": "AIzaSyBXqG9iWk0ria1PpAkjPxbEvsjIlVCVl4A"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "721191424605-4756prhg0ngkn6u8cgemb7o70tu6q9b7.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "721191424605-qufg2gorf7729fvs12dld231p047ri3m.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.mltiverse.mltiverse_app"
+              }
+            }
+          ]
         }
       }
     }

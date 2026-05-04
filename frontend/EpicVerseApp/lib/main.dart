@@ -1,28 +1,26 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'core/theme/app_theme.dart';
-import 'presentation/screens/welcome_screen.dart';
-import 'presentation/screens/dashboard_screen.dart';
 import 'core/network/websocket_service.dart';
-
 import 'presentation/screens/splash_screen.dart';
+import 'presentation/screens/welcome_screen.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Initialize Firebase with Error Details
+
   try {
     await Firebase.initializeApp();
     print("✅ [FIREBASE] Successfully initialized!");
   } catch (e) {
     print("❌ [FIREBASE-ERROR] Failed to initialize: $e");
-    print("💡 [TIP] For iOS, ensure GoogleService-Info.plist is added to Xcode and 'Target Membership' is checked.");
   }
-  
-  // Start server connection
+
   try {
     webSocketService.connect();
   } catch (e) {
@@ -36,8 +34,36 @@ Future<void> main() async {
   );
 }
 
-class EpicVerseApp extends StatelessWidget {
+class EpicVerseApp extends StatefulWidget {
   const EpicVerseApp({super.key});
+
+  @override
+  State<EpicVerseApp> createState() => _EpicVerseAppState();
+}
+
+class _EpicVerseAppState extends State<EpicVerseApp> {
+  StreamSubscription<void>? _kickedSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _kickedSub = webSocketService.sessionKicked.listen((_) async {
+      debugPrint('[EpicVerse][APP] Session kicked — signing out and returning to login');
+      await FirebaseAuth.instance.signOut();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+      navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+        (_) => false,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _kickedSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -45,6 +71,7 @@ class EpicVerseApp extends StatelessWidget {
       title: 'EpicVerse',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.epicTheme,
+      navigatorKey: navigatorKey,
       home: const SplashScreen(),
     );
   }
