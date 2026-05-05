@@ -88,7 +88,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
         children: [
           Positioned.fill(
             child: Image.asset(
-              'assets/images/welcome_bg.png',
+              'assets/images/welcome_bg.webp',
               fit: BoxFit.cover,
             ),
           ),
@@ -109,7 +109,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
                         child: Transform.scale(
                           scale: _scaleAnimation.value,
                           child: Image.asset(
-                            'assets/images/epicverse_full_logo.png',
+                            'assets/images/epicverse_full_logo.webp',
                             width: 450, // Premium horizontal balance
                             fit: BoxFit.contain,
                           ),

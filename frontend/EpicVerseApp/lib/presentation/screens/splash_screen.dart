@@ -168,7 +168,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                     child: Hero(
                       tag: 'app_logo',
                       child: Image.asset(
-                        'assets/images/epicverse_full_logo.png',
+                        'assets/images/epicverse_full_logo.webp',
                         width: 380, // Optimized for horizontal widescreen logo
                         fit: BoxFit.contain,
                       ),
@@ -181,7 +181,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                   child: RotationTransition(
                     turns: _spinController,
                     child: Image.asset(
-                      'assets/images/loading_image.png',
+                      'assets/images/loading_image.webp',
                       width: 64,
                       height: 64,
                       fit: BoxFit.contain,

@@ -25,7 +25,7 @@ class NetworkBackground extends StatelessWidget {
         Opacity(
           opacity: 0.15,
           child: Image.asset(
-            'assets/images/network_bg.png',
+            'assets/images/network_bg.webp',
             fit: BoxFit.cover,
             width: double.infinity,
             height: double.infinity,
