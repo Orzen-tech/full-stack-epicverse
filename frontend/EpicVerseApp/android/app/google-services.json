@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:721191424605:android:df232fe9c0d5aa80f933b4",
+        "mobilesdk_app_id": "1:721191424605:android:3e358a4dd8154c06f933b4",
         "android_client_info": {
-          "package_name": "com.mltiverse.mltiverse_app"
+          "package_name": "com.kriyora.epicverse"
         }
       },
       "oauth_client": [
@@ -34,7 +34,7 @@
               "client_id": "721191424605-qufg2gorf7729fvs12dld231p047ri3m.apps.googleusercontent.com",
               "client_type": 2,
               "ios_info": {
-                "bundle_id": "com.mltiverse.mltiverse_app"
+                "bundle_id": "Kriyora.EpicVerse"
               }
             }
           ]

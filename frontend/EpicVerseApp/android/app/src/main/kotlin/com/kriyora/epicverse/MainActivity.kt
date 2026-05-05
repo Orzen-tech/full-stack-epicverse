@@ -1,4 +1,4 @@
-package com.mltiverse.mltiverse_app
+package com.kriyora.epicverse
 
 import io.flutter.embedding.android.FlutterActivity
 

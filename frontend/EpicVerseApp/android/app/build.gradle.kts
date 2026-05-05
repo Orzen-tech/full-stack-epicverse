@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mltiverse.mltiverse_app"
+    namespace = "com.kriyora.epicverse"
     compileSdk = 35 // Stick to 35 for stability with AGP 8.6.0
     
     // Build tools will be automatically selected based on compileSdk if omitted
@@ -25,7 +25,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.mltiverse.mltiverse_app"
+        applicationId = "com.kriyora.epicverse"
         minSdk = 26
         targetSdk = 35 // Match compileSdk
         versionCode = flutter.versionCode
