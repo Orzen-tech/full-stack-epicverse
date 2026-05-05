@@ -41,10 +41,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
 
+    debugPrint('[EpicVerse][LOGIN] Sign-In tapped email=${_emailController.text.trim()}');
     setState(() => _isLoading = true);
 
     try {
       // 1. Sign in with Firebase (Primary Identity Check)
+      debugPrint('[EpicVerse][LOGIN] Firebase signInWithEmailAndPassword...');
       final UserCredential credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
@@ -52,6 +54,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
       final firebaseUser = credential.user;
       if (firebaseUser == null) throw Exception("Login failed");
+      debugPrint('[EpicVerse][LOGIN] Firebase auth OK uid=${firebaseUser.uid}');
 
       // 2. Optimistic UI with Session Tracking
       final sessionId = await SessionManager.getSessionId();
@@ -72,10 +75,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // 4. Check if Backend Profile Exists (Production Ready Sign-In Step)
       bool profileExists = false;
       try {
+        debugPrint('[EpicVerse][LOGIN] GET /user/${firebaseUser.uid}');
         final res = await _dio.get(
           '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
-          options: Options(headers: ApiConfig.headers),
+          options: Options(headers: await ApiConfig.authHeaders()),
         );
+        debugPrint('[EpicVerse][LOGIN] /user response status=${res.statusCode}');
         if (res.statusCode == 200) {
           profileExists = true;
           // Update local state with rich backend data immediately
@@ -92,8 +97,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         
         // Trigger OTP via Backend
         try {
+           debugPrint('[EpicVerse][LOGIN] Profile missing → POST /auth/send-otp (bearer)');
+           final idToken = await firebaseUser.getIdToken();
            final formData = FormData.fromMap({'identifier': firebaseUser.email});
-           await _dio.post('${ApiConfig.apiUrl}/auth/send-otp', data: formData);
+           final otpRes = await _dio.post(
+             '${ApiConfig.apiUrl}/auth/send-otp',
+             data: formData,
+             options: Options(headers: {...ApiConfig.headers, 'Authorization': 'Bearer $idToken'}),
+           );
+           debugPrint('[EpicVerse][LOGIN] /auth/send-otp status=${otpRes.statusCode}');
         } catch (e) {
            debugPrint("OTP Send failed: $e");
            if (mounted) {
@@ -104,17 +116,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
            return; // Stop flow if OTP fails
         }
 
-        Navigator.of(context).pushReplacement(
+        // Capture NavigatorState before pushReplacement — LoginScreen will be
+        // disposed, but this NavigatorState remains valid for onVerified.
+        final navigator = Navigator.of(context);
+        navigator.pushReplacement(
           MaterialPageRoute(
-            builder: (otpContext) => OtpVerificationScreen(
+            builder: (_) => OtpVerificationScreen(
               email: loggedInUser.email,
               onVerified: () {
-                 if (mounted) {
-                   Navigator.of(context).pushAndRemoveUntil(
-                     MaterialPageRoute(builder: (_) => const CreateProfileScreen()),
-                     (route) => false,
-                   );
-                 }
+                debugPrint('[EpicVerse][LOGIN] OTP verified → CreateProfile');
+                navigator.pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const CreateProfileScreen()),
+                  (route) => false,
+                );
               },
             )
           ),
@@ -124,6 +138,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
       // 6. Resume Journey: Already has profile, skip directly to Dashboard
       if (!mounted) return;
+      debugPrint('[EpicVerse][LOGIN] Profile exists → Dashboard');
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
@@ -133,11 +148,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _syncUserInBackground(firebaseUser.uid, loggedInUser);
 
     } on FirebaseAuthException catch (e) {
+      debugPrint('[EpicVerse][LOGIN] FirebaseAuthException code=${e.code} msg=${e.message}');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(e.message ?? 'Login failed'), backgroundColor: Colors.redAccent),
       );
     } catch (e) {
+      debugPrint('[EpicVerse][LOGIN] Login error: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(e.toString()), backgroundColor: Colors.redAccent),
@@ -152,7 +169,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     try {
       final response = await _dio.get(
         '${ApiConfig.apiUrl}/user/$uid',
-        options: Options(headers: ApiConfig.headers),
+        options: Options(headers: await ApiConfig.authHeaders()),
       );
       
       if (response.statusCode == 200) {
@@ -165,6 +182,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       }
     } catch (e) {
       // If user doesn't exist in backend, trigger initial sync
+      final syncHeaders = await ApiConfig.authHeaders();
       _dio.post(
         '${ApiConfig.apiUrl}/sync-user',
         data: {
@@ -175,7 +193,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           "profile_picture": null,
           "session_id": fallback.sessionId,
         },
-        options: Options(headers: ApiConfig.headers),
+        options: Options(headers: syncHeaders),
       ).catchError((e) {
         debugPrint("Background sync failed: $e");
         return Response(requestOptions: RequestOptions(path: ''), statusCode: 500);

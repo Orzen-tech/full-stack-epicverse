@@ -1,450 +1,883 @@
-import json
 import asyncio
 import base64
+import datetime as _dt
+import json
+import time
+from typing import Optional
+
 import websockets
-import random
-import re
-import numpy as np
-from fastapi import WebSocketDisconnect
+import websockets.exceptions
+from websockets.legacy.client import connect as ws_connect
+from fastapi import WebSocket
+
 from app.core.config import settings
 from app.services.retriever import query_postgres_database
-from app.services.user_db import verify_session, is_session_active
-from app.services.memory_store import session_store
 
-# SCHOLARLY PREFERRED MESSAGES (LEGACY AI LOGIC)
-VALID_MSGS = [
-    "Ah... rightly placed. Valid.", "Yes... a true, valid combo.", "Proceed... this is valid.",
-    "You learn well... this is valid.", "Wisely played... valid.", "Accepted... it is valid.",
-    "Good... this holds valid.", "On point... this is valid.", "Good flow... valid.",
-    "That fits... valid.", "Well aligned... valid."
+# URL is built from settings.OPENAI_REALTIME_MODEL (env-overridable) so we
+# don't hard-code a dated snapshot that OpenAI may retire without warning.
+OPENAI_REALTIME_URL = (
+    f"wss://api.openai.com/v1/realtime?model={settings.OPENAI_REALTIME_MODEL}"
+)
+
+# ── Combo response message pools ──────────────────────────────────────────────
+
+import random as _random
+
+_VALID_MSGS = [
+    "Ah... rightly placed. Valid.",
+    "Yes... a true, valid combo.",
+    "Proceed... this is valid.",
+    "You learn well... this is valid.",
+    "Wisely played... valid.",
+    "Accepted... it is valid.",
+    "Good... this holds valid.",
+    "On point... this is valid.",
+    "Good flow... valid.",
+    "That fits... valid.",
+    "Well aligned... valid.",
 ]
-INVALID_MSGS = [
-    "Hmm... invalid combo.", "Not quite... invalid combo.", "Almost... invalid combo.",
-    "That slipped... invalid combo.", "Off track... invalid combo.", "Doesn't align... invalid combo.",
-    "Try again... invalid combo.", "Close, but... invalid combo.", "That didn't land... invalid combo.",
-    "Bit off... invalid combo.", "Doesn't quite work... invalid combo."
+
+_INVALID_MSGS = [
+    "Hmm... invalid combo.",
+    "Not quite... invalid combo.",
+    "Almost... invalid combo.",
+    "That slipped... invalid combo.",
+    "Off track... invalid combo.",
+    "Doesn't align... invalid combo.",
+    "Try again... invalid combo.",
+    "Close, but... invalid combo.",
+    "That didn't land... invalid combo.",
+    "Bit off... invalid combo.",
+    "Doesn't quite work... invalid combo.",
 ]
-EXCLUDE_MSGS = [
-    "Close! Valid, but excluded yet.", "Almost there... valid, but excluded.",
-    "Good one... valid, but excluded.", "Nearly there! Valid, but excluded.",
-    "On track... valid, but excluded.", "So near... valid, but excluded.",
-    "You're close... valid, but excluded.", "Almost right... valid, but excluded.",
-    "Getting there... valid, but excluded.", "Not quite... valid, but excluded.",
-    "Close enough... valid, but excluded."
+
+_EXCLUDE_MSGS = [
+    "Close! Valid, but excluded yet.",
+    "Almost there... valid, but excluded.",
+    "Good one... valid, but excluded.",
+    "Nearly there! Valid, but excluded.",
+    "On track... valid, but excluded.",
+    "So near... valid, but excluded.",
+    "You're close... valid, but excluded.",
+    "Almost right... valid, but excluded.",
+    "Getting there... valid, but excluded.",
+    "Not quite... valid, but excluded.",
+    "Close enough... valid, but excluded.",
 ]
-MODE_FAILURE_MSGS = [
+
+_MODE_FAILURE_MSGS = [
     "Wrong mode. This character has no part in this chapter. Big card, wrong room.",
     "This character is not part of this mode's story. Not their chapter, not their moment.",
     "This character sat this mode out entirely. No role, no lines, no score.",
     "Not their era. The plot moved on without them for this one.",
-    "Lore-accurate no-show. This character simply doesn't exist in this mode."
+    "Lore-accurate no-show. This character simply doesn't exist in this mode.",
 ]
 
 
-OPENAI_REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"
-OPENAI_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_REALTIME_MODEL}"
+def _pick_combo_message(final_status: str | None, is_error: bool) -> str:
+    if is_error:
+        return _random.choice(_MODE_FAILURE_MSGS)
+    s = (final_status or "").strip()
+    if s == "Valid":
+        return _random.choice(_VALID_MSGS)
+    if s == "Valid but Excluded":
+        return _random.choice(_EXCLUDE_MSGS)
+    if s == "Invalid":
+        return _random.choice(_INVALID_MSGS)
+    # Fallback for unexpected values — treat as invalid
+    return _random.choice(_INVALID_MSGS)
 
-class RealtimeService:
-    def __init__(self, client_ws, game_mode="Mode 1", user_uid="guest", session_id="none"):
-        self.client_ws = client_ws
-        self.game_mode = game_mode
-        self.user_uid = user_uid
+# Maps Flutter display names (lowercased) → exact gameplay_mode values in DB
+_MODE_MAP: dict[str, str] = {
+    "originarc (balakanda)":      "OriginArc (Balakanda)",
+    "crownshift (ayodhyakanda)":  "CrownShift (AyodhyaKanda)",
+    "wildrun (aranyakanda)":      "WildRun (AranyaKanda)",
+    "glowline (kishkindhakanda)": "GlowLine (KishkindhaKanda)",
+    "lankaleap (sundarakanda)":   "lankaLeap (SundaraKanda)",
+    "warroom (yuddhakanda)":      "WarRoom (YuddhaKanda)",
+    "afterlight (uttarakanda)":   "AfterLight (UttaraKanda)",
+}
+
+
+def _resolve_db_mode(mode: str) -> str:
+    stripped = mode.strip()
+    return _MODE_MAP.get(stripped.lower(), stripped)
+
+
+# ── Structured logger ─────────────────────────────────────────────────────────
+#  Format: [HH:MM:SS.mmm] [STEP              ] uid=XXXXXXXX → detail
+
+def _log(step: str, uid: str, data: str = "") -> None:
+    ts  = _dt.datetime.utcnow().strftime("%H:%M:%S.%f")[:-3]
+    tag = f"[{step:<22}]"
+    suffix = f" → {data}" if data else ""
+    print(f"[{ts}] {tag} uid={uid[-8:]}{suffix}", flush=True)
+
+
+# Separator printed once per session for readability
+def _log_sep(_uid: str, label: str = "") -> None:
+    bar = "─" * 55
+    print(f"  {bar} {label}", flush=True)
+
+
+# ── Language detector ─────────────────────────────────────────────────────────
+
+def _detect_language(text: str) -> str:
+    for ch in text:
+        cp = ord(ch)
+        if 0x0B80 <= cp <= 0x0BFF: return "Tamil"
+        if 0x0D00 <= cp <= 0x0D7F: return "Malayalam"
+        if 0x0900 <= cp <= 0x097F: return "Hindi"
+        if 0x0600 <= cp <= 0x06FF: return "Arabic"
+        if 0x4E00 <= cp <= 0x9FFF: return "Chinese"
+        if 0x3040 <= cp <= 0x30FF: return "Japanese"
+    return "English"
+
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_BACKEND_ONLY_TYPES = {"stop_wakeword", "start_wakeword", "ping", "end"}
+
+SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card combo validation game. You have two response modes only.
+
+━━━ MODE 1 — COMBO CHECK (user asks if X and Y is a combo) ━━━
+1. Extract the two card numbers from what the user said.
+2. ALWAYS call query_database_for_combo — no exceptions, every single time, even if you think you already know the answer from a previous turn.
+3. Read the "avatar_response" field from the tool result.
+4. Speak ONLY that exact text. Word for word. Nothing added. Nothing removed.
+   - No greeting. No explanation. No punctuation changes. Just the avatar_response value.
+
+━━━ MODE 2 — REASON (user asks "why" or "how" after a combo check) ━━━
+1. Do NOT call the tool again.
+2. Find the "revised_scholar_reason" field from the MOST RECENT tool result in the conversation.
+3. Detect the language the user just spoke in.
+4. If the user spoke in English: output the revised_scholar_reason exactly as stored. No changes.
+5. If the user spoke in another language: translate the revised_scholar_reason into that language. Output only the translation. Nothing else.
+6. Do not summarize, shorten, add context, or add any extra sentences.
+
+━━━ LANGUAGE RULE ━━━
+- Always detect the language of the CURRENT user message.
+- Respond in that exact language only.
+- Never switch languages unless the user switches first.
+
+━━━ CRITICAL — NO HALLUCINATION ━━━
+- NEVER answer a combo check from memory, prior context, or conversation history.
+- NEVER skip calling query_database_for_combo for any combo question, even if the same combo was asked before.
+- NEVER generate your own explanation or description. Only speak what the database returns.
+- NEVER add greetings, qualifiers, or extra sentences.
+- If the question is unrelated to the game, say nothing.
+- Every combo check = one fresh tool call. No exceptions."""
+
+
+class _SafeJsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (_dt.datetime, _dt.date)):
+            return obj.isoformat()
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
+        return str(obj)
+
+
+_ACTIVE_SESSIONS: dict[str, "RealtimeSession"] = {}
+
+
+# ── Session ───────────────────────────────────────────────────────────────────
+
+class RealtimeSession:
+    def __init__(self, client_ws: WebSocket, uid: str, mode: str, session_id: str):
+        self.client_ws  = client_ws
+        self.uid        = uid
+        self.mode       = mode
+        self.db_mode    = _resolve_db_mode(mode)
         self.session_id = session_id
-        self.openai_ws = None
-        self.last_numbers = [] # PERSISTENT MEMORY FOR 'WHY?' QUESTIONS
-        self.primary_language = "en" # Default
-        self._relay_count = 0 # Diagnostic Counter
-        self._current_transcript = "" # Accumulator for terminal logging
+        self.openai_ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._active    = True
 
-    async def connect(self):
-        """Unified Connection: Restores session context and establishes OpenAI WebSocket."""
-        clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
+        # ── State tracking ────────────────────────────────────────────────────
+        self._mic_streaming             = False   # True once first audio chunk arrives
+        self._tts_streaming             = False   # True while audio is flowing to client
+        self._audio_chunks_sent         = 0       # total chunks this turn
+        self._audio_bytes_sent          = 0       # total bytes this turn
+        self._audio_appended_since_commit = False # guard against empty commits
+        self._turn_count                = 0       # conversation turns
+        self._response_start_ts: Optional[float] = None  # latency tracking
+        self._db_query_start_ts: Optional[float] = None
+        self._tts_chunk_count           = 0       # audio chunks streamed to client
+        self._partial_transcript        = ""      # accumulated STT partial
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OpenAI connection
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _connect_to_openai(self) -> bool:
+        _log("OPENAI CONNECTING", self.uid,
+             f"model={settings.OPENAI_REALTIME_MODEL} timeout=15s")
+        t0 = time.monotonic()
+        extra_headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY.strip()}",
+            "OpenAI-Beta":   "realtime=v1",
+        }
         try:
-            print(f"[AUTH] UID: {self.user_uid} | Requesting connection for Journey: {clean_name}")
-
-            # 1. Restore 'Zero-Amnesia' Context from Redis & Postgres
-            from app.services.user_db import get_user
-            user_profile = await get_user(self.user_uid)
-            session_data = await session_store.get_session_data(self.user_uid)
-
-            self.last_numbers = session_data.get("last_numbers", [])
-            if user_profile:
-                self.primary_language = user_profile.get("primary_language", "en")
-
-            # 2. Establish OpenAI Handshake
-            headers = {
-                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1",
-            }
-
-            print(f"[REALTIME] Connecting to OpenAI ({OPENAI_REALTIME_MODEL}) for {self.user_uid}...")
-            try:
-                self.openai_ws = await asyncio.wait_for(
-                    websockets.connect(
-                        OPENAI_URL,
-                        extra_headers=headers,
-                        compression=None,
-                        ping_interval=None,
-                    ),
-                    timeout=15.0
-                )
-            except websockets.exceptions.InvalidStatus as e:
-                # websockets 12.0+: InvalidStatusCode was removed, use InvalidStatus
-                status_code = e.response.status_code
-                print(f"!!! [CONCURRENCY ERROR] OpenAI REJECTED connection for {self.user_uid}")
-                print(f"!!! Status Code: {status_code}")
-                if status_code == 429:
-                    print("!!! REASON: Rate Limit or Concurrent Session Limit reached on your OpenAI Tier.")
-                elif status_code == 401:
-                    print("!!! REASON: Invalid or missing OpenAI API Key.")
-                raise Exception(f"OpenAI connection rejected (Code: {status_code})")
-            except asyncio.TimeoutError:
-                print(f"!!! [CONCURRENCY ERROR] OpenAI Handshake TIMED OUT for {self.user_uid}")
-                raise Exception("OpenAI handshake timed out (Check backend net speed)")
-            
-            # 3. Configure Scholarly Instruction Set
-            await self._setup_session()
-            
-            # 4. Notify Client of Success
-            await self.client_ws.send_text(json.dumps({
-                "type": "connection_success",
-                "status": "Connected",
-                "message": "Unified Bridge Active",
-                "mode": clean_name
-            }))
-            
-            print(f"[REALTIME] Unified Connection Established for {self.user_uid}. Memory: {self.last_numbers}")
+            self.openai_ws = await asyncio.wait_for(
+                ws_connect(
+                    OPENAI_REALTIME_URL,
+                    extra_headers=extra_headers,
+                    compression=None,
+                    ping_interval=None,
+                ),
+                timeout=15.0,
+            )
+            elapsed = round((time.monotonic() - t0) * 1000)
+            _log("OPENAI CONNECTED", self.uid,
+                 f"websocket handshake OK in {elapsed}ms")
+            return True
+        except asyncio.TimeoutError:
+            _log("OPENAI ERROR", self.uid, "connection timed out after 15s")
+            return False
+        except websockets.exceptions.InvalidStatusCode as e:
+            _log("OPENAI ERROR", self.uid, f"HTTP {e.status_code} — check API key")
+            return False
         except Exception as e:
-            print(f"[REALTIME] Connection FAILED for {self.user_uid}: {e}")
-            # Send error back to phone before closing
-            try:
-                await self.client_ws.send_text(json.dumps({
-                    "type": "error",
-                    "code": "CONNECTION_FAILED",
-                    "message": str(e)
-                }))
-            except:
-                pass
-            raise
+            _log("OPENAI ERROR", self.uid, f"{type(e).__name__}: {e}")
+            return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Session setup
+    # ─────────────────────────────────────────────────────────────────────────
 
     async def _setup_session(self):
-        """Configures tools and system prompt with Hierarchical Truth rules."""
-        clean_name = re.sub(r'(?i)Mode\s*\d+\s*-?\s*', '', self.game_mode).strip()
-
-        # OpenAI Realtime API correct session.update format.
-        # All audio config fields are FLAT (not nested). Voice, modalities,
-        # input_audio_format, output_audio_format are top-level session properties.
-        # input_audio_transcription enables Whisper-based STT on the server side.
-        # turn_detection with server_vad handles speech boundary detection automatically.
-        session_update = {
+        _log("SESSION SETUP", self.uid,
+             f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
+             f"stt=whisper-1 | silence=600ms | threshold=0.5")
+        payload = {
             "type": "session.update",
             "session": {
                 "modalities": ["text", "audio"],
-                "instructions": f"""Role: Robotic Scribe.
-Rule 1: CALL 'query_postgres_database' for every number pair combo check.
-Rule 2: Turn 1 (Fact Check) -> ONLY speak the text in 'MANDATORY_SPEAK_THIS' (translated to user's language). No extra words.
-Rule 3: Turn 2 (Why/How) -> ONLY speak the 'revised_scholar_reason' raw text. NO modification. NO intro like "The reason is..." or "Here is why...". Speak the raw content immediately.
-Rule 4: NO FLOWERY LANGUAGE. Never say: "tapestry", "celestial", "mystery", "harmony", "divine", "weaving", "unfold", "journey".
-Rule 5: ABSOLUTE LANGUAGE MIRRORING. Detect user language and respond EXCLUSIVELY in that language. THIS IS A HARD CONSTRAINT.
-Rule 6: NO CONVERSATIONAL FILLER. No "Sure!", "Okay!", "I understand", "Actually", or small talk.
-Rule 7: SCOPE LOCK. ONLY respond to questions related to the EpicVerse game, its mechanics, or the Ramayana scriptures. If asked about unrelated topics (e.g., general news, math, music, or other apps), say: "I am the Guardian of the EpicVerse scriptures. I can only speak of the Ramayana journey. Let us return to the cards."
-Journey: {clean_name}.
-Primary Language Hint: {self.primary_language}""",
+                "instructions": (
+                    SYSTEM_INSTRUCTIONS
+                    + f"\n\nCURRENT SESSION MODE: {self.db_mode}\n"
+                      f"You MUST always pass exactly '{self.db_mode}' as the mode parameter "
+                      f"when calling query_database_for_combo. Do not translate, shorten, or modify this value."
+                ),
                 "voice": "alloy",
-                "input_audio_format": "pcm16",
+                "input_audio_format":  "pcm16",
                 "output_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "whisper-1"
-                },
+                "input_audio_transcription": {"model": "whisper-1"},
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 600
+                    "type":                "server_vad",
+                    "threshold":           0.5,
+                    "prefix_padding_ms":   300,
+                    "silence_duration_ms": 600,
                 },
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "query_postgres_database",
-                        "description": "Truth check for card combo IDs (1-120).",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "card1": {"type": "string"},
-                                "card2": {"type": "string"}
-                            },
-                            "required": ["card1", "card2"]
-                        }
-                    }
-                ],
-                "tool_choice": "auto"
-            }
+                "tools": [{
+                    "type":        "function",
+                    "name":        "query_database_for_combo",
+                    "description": "Queries the card_combos table for combo status and reason.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "mode":      {"type": "string", "description": "Gameplay mode e.g. 'OriginArc (Balakanda)'"},
+                            "character": {"type": "string", "description": "Character name or card number"},
+                            "karma":     {"type": "string", "description": "Virtue/karma name or card number"},
+                        },
+                        "required": ["mode", "character", "karma"],
+                    },
+                }],
+                "tool_choice": "auto",
+            },
         }
-        await self.openai_ws.send(json.dumps(session_update))
+        await self.openai_ws.send(json.dumps(payload))
+        _log("SESSION CONFIGURED", self.uid,
+             f"session.update sent — waiting for OpenAI confirmation")
 
-    # Backend-only control messages that must NOT be forwarded to OpenAI
-    _BACKEND_ONLY_TYPES = {"stop_wakeword", "start_wakeword", "ping"}
+    # ─────────────────────────────────────────────────────────────────────────
+    # Audio resampling
+    # ─────────────────────────────────────────────────────────────────────────
 
-    async def relay_client_to_openai(self):
-        """Relays audio/text bytes from Flutter app to OpenAI."""
+    @staticmethod
+    def _resample_16k_to_24k(pcm16_bytes: bytes) -> bytes:
         try:
-            while True:
-                message = await self.client_ws.receive()
-                if "type" in message and message["type"] == "websocket.disconnect":
-                    break
-                if "bytes" in message:
-                    self._relay_count += 1
-                    if self._relay_count % 20 == 0:
-                        # SECURITY: Check if this session has been 'Kicked' by a new device
-                        if not await is_session_active(self.user_uid, self.session_id):
-                            print(f"[AUTH] SESSION KICKED for {self.user_uid}. Another device logged in.")
-                            await self.client_ws.send_text(json.dumps({
-                                "type": "error",
-                                "code": "SESSION_EXPIRED",
-                                "message": "Logged in on another device."
-                            }))
-                            await self.client_ws.close()
-                            return
+            import numpy as np
+            samples = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32)
+            if len(samples) == 0:
+                return pcm16_bytes
+            new_len  = int(len(samples) * 24000 / 16000)
+            resampled = np.interp(
+                np.linspace(0, len(samples) - 1, new_len),
+                np.arange(len(samples)),
+                samples,
+            ).astype(np.int16)
+            return resampled.tobytes()
+        except Exception:
+            return pcm16_bytes
 
-                        print(f"[REALTIME] RELAYING AUDIO: {len(message['bytes'])} bytes (Chunk {self._relay_count})")
+    # ─────────────────────────────────────────────────────────────────────────
+    # Tool call → DB query
+    # ─────────────────────────────────────────────────────────────────────────
 
-                    # Resample from 16kHz (Flutter) → 24kHz (OpenAI minimum requirement).
-                    # Flutter sends raw PCM16 at 16kHz; OpenAI rejects anything below 24kHz.
-                    raw_audio = message["bytes"]
-                    samples = np.frombuffer(raw_audio, dtype=np.int16)
-                    if len(samples) > 0:
-                        orig_len = len(samples)
-                        new_len = int(orig_len * 3 / 2)  # 16000 * 1.5 = 24000
-                        resampled = np.interp(
-                            np.linspace(0, orig_len - 1, new_len),
-                            np.arange(orig_len),
-                            samples.astype(np.float64)
-                        ).astype(np.int16)
-                        audio_b64 = base64.b64encode(resampled.tobytes()).decode("utf-8")
-                    else:
-                        audio_b64 = base64.b64encode(raw_audio).decode("utf-8")
+    async def _handle_tool_call(self, call_id: str, name: str, arguments: dict):
+        if name != "query_database_for_combo":
+            _log("TOOL UNKNOWN", self.uid, f"unknown tool '{name}' — ignoring")
+            return
 
-                    await self.openai_ws.send(json.dumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": audio_b64
-                    }))
-                elif "text" in message:
-                    client_msg = message["text"]
-                    try:
-                        data = json.loads(client_msg)
-                        msg_type = data.get("type", "")
+        ai_mode    = arguments.get("mode", "")
+        target_mode = _resolve_db_mode(ai_mode) if ai_mode else self.db_mode
+        char        = arguments.get("character", "?")
+        karma       = arguments.get("karma", "?")
 
-                        if msg_type == "end":
-                            if self._relay_count > 2: # Only commit if we actually sent some audio chunks
-                                print(f"[REALTIME] FORCE RESPONSE: Client signaled 'end' after {self._relay_count} chunks.")
-                                await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                                await self.openai_ws.send(json.dumps({"type": "response.create"}))
-                            else:
-                                print("[REALTIME] IGNORED 'end': Buffer too small (< 2 chunks).")
+        _log_sep(self.uid, "DATABASE LOOKUP")
+        _log("TOOL CALL RECEIVED",  self.uid,
+             f"fn={name} | call_id={call_id[:12]}")
+        _log("TOOL ARGS",           self.uid,
+             f"mode='{target_mode}' | char='{char}' | karma='{karma}'")
+        _log("DB QUERY START",      self.uid,
+             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND karma='{karma}'")
 
-                        elif msg_type in self._BACKEND_ONLY_TYPES:
-                            # BUG FIX: These are backend control signals only.
-                            # Sending them to OpenAI caused it to close with 1005.
-                            print(f"[REALTIME] Backend-only msg received: '{msg_type}' (not relayed to OpenAI)")
+        self._db_query_start_ts = time.monotonic()
+        output_str = ""
+        try:
+            result = await query_postgres_database(target_mode, char, karma)
+            elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
 
-                        elif msg_type == "text_query":
-                            # Convert text query to a proper OpenAI conversation item
-                            text = data.get("text", "")
-                            if text:
-                                await self.openai_ws.send(json.dumps({
-                                    "type": "conversation.item.create",
-                                    "item": {
-                                        "type": "message",
-                                        "role": "user",
-                                        "content": [{"type": "input_text", "text": text}]
-                                    }
-                                }))
-                                await self.openai_ws.send(json.dumps({"type": "response.create"}))
+            # query_postgres_database returns a JSON string — parse to dict
+            # so we can inspect final_status and inject avatar_response
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except Exception:
+                    pass
 
-                        else:
-                            # Only relay valid OpenAI-compatible messages
-                            await self.openai_ws.send(client_msg)
+            if isinstance(result, dict):
+                is_error = "error" in result
+                status = result.get("final_status") or result.get("status", "")
+                if is_error:
+                    _log("DB NO MATCH", self.uid,
+                         f"combo NOT found | query took {elapsed_ms}ms | {result.get('error')}")
+                else:
+                    reason_preview = str(result.get("revised_scholar_reason", ""))[:80]
+                    _log("DB MATCH FOUND", self.uid,
+                         f"status={status} | took={elapsed_ms}ms")
+                    _log("DB REASON",     self.uid,
+                         f"\"{reason_preview}{'...' if len(reason_preview) == 80 else ''}\"")
 
-                    except json.JSONDecodeError:
-                        pass  # Drop malformed non-JSON messages silently
-        except WebSocketDisconnect:
-            print(f"[REALTIME] Client Disconnected: {self.user_uid}")
+                # Inject avatar_response so LLM speaks it exactly (not its own words)
+                avatar_msg = _pick_combo_message(
+                    status if not is_error else None,
+                    is_error=is_error,
+                )
+                result["avatar_response"] = avatar_msg
+                _log("AVATAR RESPONSE", self.uid, f"\"{avatar_msg}\"")
+
+            output_str = (
+                json.dumps(result, cls=_SafeJsonEncoder)
+                if isinstance(result, (dict, list)) else str(result)
+            )
+            _log("DB RESULT SENT",   self.uid,
+                 f"result payload {len(output_str)}B → sending to LLM")
         except Exception as e:
-            print(f"[REALTIME] Relay Client Error: {e}")
+            elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
+            _log("DB ERROR", self.uid,
+                 f"{type(e).__name__}: {e} | took={elapsed_ms}ms")
+            output_str = json.dumps({"error": str(e)})
 
-    async def relay_openai_to_client(self):
-        """Relays audio/text back and triggers Tool Calling for scripture truth."""
         try:
-            async for raw_message in self.openai_ws:
-                event = json.loads(raw_message)
-                event_type = event["type"]
+            await self.openai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {
+                    "type":    "function_call_output",
+                    "call_id": call_id,
+                    "output":  output_str,
+                },
+            }))
+            _log("TOOL RESULT SENT",  self.uid,
+                 "function_call_output delivered to OpenAI")
+            await self.openai_ws.send(json.dumps({"type": "response.create"}))
+            _log("LLM GENERATE REQ",  self.uid,
+                 "response.create sent — LLM will now formulate answer")
+            self._response_start_ts = time.monotonic()
+        except Exception as e:
+            _log("TOOL SEND ERROR",   self.uid,
+                 f"failed to deliver tool result: {e}")
 
-                # 1. Audio delta — send as binary bytes, do not also relay as text
-                if event_type == "response.audio.delta":
-                    audio_bytes = base64.b64decode(event["delta"])
+    # ─────────────────────────────────────────────────────────────────────────
+    # Client → OpenAI relay
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _relay_from_client(self):
+        try:
+            while self._active:
+                message = await self.client_ws.receive()
+
+                # ── Disconnect ─────────────────────────────────────────────
+                if message.get("type") == "websocket.disconnect":
+                    _log("CLIENT DISCONNECT", self.uid,
+                         f"websocket closed | total_chunks={self._audio_chunks_sent} "
+                         f"total_bytes={self._audio_bytes_sent} turns={self._turn_count}")
+                    break
+
+                # ── Audio bytes (mic stream) ────────────────────────────────
+                if "bytes" in message:
+                    raw = message["bytes"]
+
+                    if not self._mic_streaming:
+                        self._mic_streaming = True
+                        self._turn_count   += 1
+                        _log_sep(self.uid, f"TURN {self._turn_count}")
+                        _log("MIC BUTTON ON",    self.uid,
+                             "user opened mic — audio stream started")
+                        _log("AUDIO CAPTURING",  self.uid,
+                             "Flutter sending PCM16 16kHz mono chunks")
+
+                    resampled = self._resample_16k_to_24k(raw)
+                    self._audio_chunks_sent         += 1
+                    self._audio_bytes_sent          += len(raw)
+                    self._audio_appended_since_commit = True
+
+                    # Log throughput every 50 chunks (~4 seconds of audio)
+                    if self._audio_chunks_sent % 50 == 0:
+                        kb = round(self._audio_bytes_sent / 1024, 1)
+                        _log("AUDIO STREAMING",  self.uid,
+                             f"chunks={self._audio_chunks_sent} bytes={kb}KB → resampled 16k→24k → forwarded to OpenAI")
+
+                    await self.openai_ws.send(
+                        json.dumps({
+                            "type":  "input_audio_buffer.append",
+                            "audio": base64.b64encode(resampled).decode(),
+                        })
+                    )
+
+                # ── Text/JSON messages ──────────────────────────────────────
+                elif "text" in message:
                     try:
-                        await self.client_ws.send_bytes(audio_bytes)
+                        data = json.loads(message["text"])
+                    except Exception:
+                        continue
+
+                    msg_type = data.get("type", "")
+
+                    # ── Backend-only control messages ──────────────────────
+                    if msg_type in _BACKEND_ONLY_TYPES:
+                        if msg_type == "end":
+                            _log("MIC BUTTON OFF", self.uid,
+                                 f"user closed mic | chunks={self._audio_chunks_sent} "
+                                 f"bytes={round(self._audio_bytes_sent/1024,1)}KB")
+                            _log("AUDIO STREAM END", self.uid,
+                                 "mic closed — appending silence to trigger VAD commit")
+                            # server_vad needs 600ms of silence to auto-commit the
+                            # buffer. When the mic closes, audio stops and VAD never
+                            # fires, leaving the buffer stuck. Appending silence here
+                            # gives VAD the silence window it needs.
+                            if self._audio_appended_since_commit:
+                                silence_16k = bytes(int(16000 * 0.75 * 2))  # 750ms PCM16 @ 16kHz
+                                silence_24k = self._resample_16k_to_24k(silence_16k)
+                                try:
+                                    await self.openai_ws.send(json.dumps({
+                                        "type":  "input_audio_buffer.append",
+                                        "audio": base64.b64encode(silence_24k).decode(),
+                                    }))
+                                    _log("SILENCE PADDING", self.uid,
+                                         "750ms silence appended → VAD will detect end-of-speech")
+                                except Exception as _e:
+                                    _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
+                            self._mic_streaming   = False
+                            self._audio_chunks_sent = 0
+                            self._audio_bytes_sent  = 0
+                        elif msg_type == "start_wakeword":
+                            _log("WAKEWORD LISTEN", self.uid, "wake-word detection started")
+                        elif msg_type == "stop_wakeword":
+                            _log("WAKEWORD STOP",   self.uid, "wake-word detection stopped")
+                        elif msg_type == "ping":
+                            _log("PING",            self.uid, "keepalive ping received")
+                        continue
+
+                    # ── Guard empty commits ────────────────────────────────
+                    if msg_type == "input_audio_buffer.commit":
+                        if not self._audio_appended_since_commit:
+                            _log("COMMIT BLOCKED",  self.uid,
+                                 "buffer empty — skipping commit (prevents OpenAI error)")
+                            continue
+                        self._audio_appended_since_commit = False
+                        _log("AUDIO COMMITTED",  self.uid,
+                             "input_audio_buffer.commit forwarded to OpenAI")
+
+                    elif msg_type == "session.update":
+                        new_mode = data.get("session", {}).get("instructions", "")[:60]
+                        _log("MODE CHANGE",      self.uid,
+                             f"client sent session.update | preview={new_mode}")
+
+                    elif msg_type == "conversation.item.create":
+                        _log("CLIENT MSG",       self.uid,
+                             f"conversation item created by client")
+
+                    await self.openai_ws.send(message["text"])
+
+        except Exception as e:
+            _log("CLIENT RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
+        finally:
+            self._active = False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OpenAI → Client relay
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _relay_from_openai(self):
+        try:
+            async for raw in self.openai_ws:
+                if not self._active:
+                    break
+
+                # Raw bytes (shouldn't happen with text protocol, but guard)
+                if isinstance(raw, bytes):
+                    await self.client_ws.send_bytes(raw)
+                    continue
+
+                try:
+                    event = json.loads(raw)
+                except Exception:
+                    continue
+
+                etype = event.get("type", "")
+
+                # ══ SESSION ══════════════════════════════════════════════════
+
+                if etype == "session.created":
+                    sid = event.get("session", {}).get("id", "?")
+                    _log("OPENAI SESSION OK",    self.uid,
+                         f"OpenAI session created | session_id={sid[:16]}")
+
+                elif etype == "session.updated":
+                    _log("OPENAI SESSION UPD",   self.uid,
+                         "session.update confirmed by OpenAI")
+                    # don't forward — internal
+                    continue
+
+                # ══ AUDIO INPUT ═══════════════════════════════════════════════
+
+                elif etype == "input_audio_buffer.speech_started":
+                    offset_ms = event.get("audio_start_ms", "?")
+                    _log("VAD SPEECH START",     self.uid,
+                         f"voice activity detected | audio_offset={offset_ms}ms")
+
+                elif etype == "input_audio_buffer.speech_stopped":
+                    offset_ms = event.get("audio_end_ms", "?")
+                    _log("VAD SPEECH END",       self.uid,
+                         f"silence detected | audio_end={offset_ms}ms → committing buffer")
+
+                elif etype == "input_audio_buffer.committed":
+                    item_id = event.get("item_id", "?")
+                    _log("BUFFER COMMITTED",     self.uid,
+                         f"audio buffer committed | item_id={item_id[:12]} → sending to Whisper STT")
+                    continue  # don't forward to client
+
+                elif etype == "input_audio_buffer.cleared":
+                    _log("BUFFER CLEARED",       self.uid, "audio buffer cleared by OpenAI")
+                    continue
+
+                # ══ STT ════════════════════════════════════════════════════════
+
+                elif etype == "conversation.item.created":
+                    item      = event.get("item", {})
+                    item_type = item.get("type", "?")
+                    item_id   = item.get("id", "?")
+                    role      = item.get("role", "?")
+                    _log("CONV ITEM CREATED",    self.uid,
+                         f"type={item_type} | role={role} | id={item_id[:12]}")
+
+                elif etype == "conversation.item.input_audio_transcription.delta":
+                    delta = event.get("delta", "")
+                    self._partial_transcript += delta
+                    # Log partial every ~20 chars to show live progress
+                    if len(self._partial_transcript) % 20 < len(delta):
+                        _log("STT PARTIAL",      self.uid,
+                             f"[live] \"{self._partial_transcript[-40:]}\"")
+
+                elif etype == "conversation.item.input_audio_transcription.completed":
+                    transcript = event.get("transcript", "").strip()
+                    self._partial_transcript = ""
+                    if transcript:
+                        lang = _detect_language(transcript)
+                        _log_sep(self.uid, "USER SPOKE")
+                        _log("STT COMPLETE",     self.uid,
+                             f"[{lang}] \"{transcript}\"")
+                        _log("STT SEND TO LLM",  self.uid,
+                             f"transcript forwarded to LLM context | len={len(transcript)}chars")
+                        self._response_start_ts = time.monotonic()
+
+                elif etype == "conversation.item.input_audio_transcription.failed":
+                    err = event.get("error", {})
+                    _log("STT FAILED",           self.uid,
+                         f"Whisper error: {err.get('message','unknown')}")
+
+                # ══ LLM RESPONSE ══════════════════════════════════════════════
+
+                elif etype == "response.created":
+                    resp_id = event.get("response", {}).get("id", "?")
+                    _log_sep(self.uid, "LLM PROCESSING")
+                    _log("LLM THINKING",         self.uid,
+                         f"response started | response_id={resp_id[:16]}")
+
+                elif etype == "response.output_item.added":
+                    item      = event.get("item", {})
+                    item_type = item.get("type", "?")
+                    item_id   = item.get("id", "?")
+                    if item_type == "function_call":
+                        fn = item.get("name", "?")
+                        _log("LLM TOOL DECISION", self.uid,
+                             f"LLM decided to call tool '{fn}' | item_id={item_id[:12]}")
+                    elif item_type == "message":
+                        _log("LLM COMPOSING",    self.uid,
+                             f"LLM composing message response | item_id={item_id[:12]}")
+
+                elif etype == "response.output_item.done":
+                    item      = event.get("item", {})
+                    item_type = item.get("type", "?")
+                    _log("LLM OUTPUT DONE",      self.uid,
+                         f"output item finished | type={item_type}")
+
+                elif etype == "response.content_part.added":
+                    part_type = event.get("part", {}).get("type", "?")
+                    _log("LLM CONTENT PART",     self.uid,
+                         f"content part started | type={part_type}")
+
+                elif etype == "response.content_part.done":
+                    part_type = event.get("part", {}).get("type", "?")
+                    _log("LLM PART DONE",        self.uid,
+                         f"content part complete | type={part_type}")
+
+                # ══ TOOL CALL ══════════════════════════════════════════════════
+
+                elif etype == "response.function_call_arguments.delta":
+                    # Skip — high-frequency streaming of partial JSON args
+                    continue
+
+                elif etype == "response.function_call_arguments.done":
+                    call_id = event.get("call_id", "")
+                    name    = event.get("name", "")
+                    raw_args = event.get("arguments", "{}")
+                    _log("TOOL ARGS READY",      self.uid,
+                         f"fn='{name}' | raw_args={raw_args[:80]}")
+                    try:
+                        args = json.loads(raw_args)
+                    except Exception:
+                        args = {}
+                    await self._handle_tool_call(call_id, name, args)
+                    continue
+
+                # ══ AI TRANSCRIPT ══════════════════════════════════════════════
+
+                elif etype == "response.audio_transcript.delta":
+                    # Partial AI text — skip to avoid log spam
+                    pass
+
+                elif etype == "response.audio_transcript.done":
+                    transcript = event.get("transcript", "").strip()
+                    if transcript:
+                        lang = _detect_language(transcript)
+                        elapsed = ""
+                        if self._response_start_ts:
+                            elapsed = f" | latency={round((time.monotonic()-self._response_start_ts)*1000)}ms"
+                        _log_sep(self.uid, "AI SPEAKING")
+                        _log("AI RESPONSE TEXT",     self.uid,
+                             f"[{lang}] \"{transcript[:140]}\"{elapsed}")
+
+                # ══ TTS AUDIO ══════════════════════════════════════════════════
+
+                elif etype == "response.audio.delta":
+                    audio_b64 = event.get("delta", "")
+                    if audio_b64:
+                        if not self._tts_streaming:
+                            self._tts_streaming  = True
+                            self._tts_chunk_count = 0
+                            _log("TTS AUDIO START",  self.uid,
+                                 "OpenAI audio stream → forwarding PCM24k to Flutter")
+                        self._tts_chunk_count += 1
+                        try:
+                            await self.client_ws.send_bytes(base64.b64decode(audio_b64))
+                        except Exception:
+                            pass
+                    continue  # don't forward JSON event
+
+                elif etype == "response.audio.done":
+                    if self._tts_streaming:
+                        self._tts_streaming = False
+                        _log("TTS AUDIO DONE",   self.uid,
+                             f"audio stream complete | chunks_streamed={self._tts_chunk_count}")
+
+                elif etype == "response.text.delta":
+                    pass  # text-only delta — skip
+
+                elif etype == "response.text.done":
+                    text = event.get("text", "").strip()
+                    if text:
+                        _log("LLM TEXT DONE",    self.uid,
+                             f"\"{text[:120]}\"")
+
+                # ══ RESPONSE COMPLETE ══════════════════════════════════════════
+
+                elif etype == "response.done":
+                    resp    = event.get("response", {})
+                    usage   = resp.get("usage", {})
+                    status  = resp.get("status", "?")
+                    _log("RESPONSE COMPLETE",    self.uid,
+                         f"status={status} | "
+                         f"tokens_in={usage.get('input_tokens','?')} "
+                         f"tokens_out={usage.get('output_tokens','?')} "
+                         f"total={usage.get('total_tokens','?')}")
+                    _log_sep(self.uid, "TURN COMPLETE")
+
+                elif etype == "rate_limits.updated":
+                    limits = event.get("rate_limits", [])
+                    parts  = [f"{r['name']}={r['remaining']}/{r['limit']}" for r in limits]
+                    _log("RATE LIMITS",          self.uid,
+                         " | ".join(parts))
+                    continue  # don't forward
+
+                # ══ ERRORS ═════════════════════════════════════════════════════
+
+                elif etype == "error":
+                    err = event.get("error", {})
+                    _log("OPENAI ERROR",         self.uid,
+                         f"code={err.get('code','?')} | msg={err.get('message','?')}")
+
+                # Forward all remaining events to client
+                await self.client_ws.send_text(raw)
+
+        except Exception as e:
+            _log("OPENAI RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
+        finally:
+            self._active = False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cross-instance session watchdog
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _session_watchdog(self, poll_interval: float = 30.0):
+        """Poll the DB; self-close if another instance superseded this session.
+
+        Overhead: one indexed SELECT on `users` every `poll_interval` seconds
+        per active session (~1 query every 30s). Negligible on db-custom-1-3840.
+        Anonymous sessions are skipped because they have no DB row.
+        """
+        if self.uid == "anonymous":
+            return
+        from app.services.user_db import get_session_id
+        try:
+            while self._active:
+                await asyncio.sleep(poll_interval)
+                if not self._active:
+                    break
+                try:
+                    stored = await get_session_id(self.uid)
+                except Exception as e:
+                    _log("WATCHDOG DB ERR", self.uid, f"{type(e).__name__}: {e}")
+                    continue
+                if stored and stored != self.session_id:
+                    _log("SESSION SUPERSEDED", self.uid,
+                         f"another device took over | db={str(stored)[:12]} mine={self.session_id[:12]} — closing")
+                    self._active = False
+                    try:
+                        await self.client_ws.send_text(
+                            json.dumps({"type": "SESSION_KICKED"})
+                        )
                     except Exception:
                         pass
-
-                # 2. OpenAI error events — log only, NEVER forward to Flutter.
-                #    Forwarding causes Flutter to close the WebSocket with 1002.
-                elif event_type == "error":
-                    print(f"[REALTIME] CRITICAL OPENAI ERROR: {json.dumps(event.get('error', {}), indent=2)}")
-
-                # 3. Skip raw audio buffer echoes (no useful info for client)
-                elif event_type == "input_audio_buffer.append":
-                    pass
-
-                # 4. All other events — apply specific logging then relay to Flutter
-                else:
-                    if event_type == "input_audio_buffer.speech_started":
-                        print("\n[STT INPUT] >>> User started speaking...")
-                    elif event_type == "input_audio_buffer.speech_stopped":
-                        print("\n[STT INPUT] <<< User stopped speaking. Transcribing...")
-                    elif event_type == "response.audio_transcript.delta":
-                        self._current_transcript += event.get("delta", "")
-                        print(f"\r[AI]: {self._current_transcript}", end="", flush=True)
-                    elif event_type == "response.audio_transcript.done":
-                        print(f"\n[AI FINAL]: {self._current_transcript}")
-                        self._current_transcript = ""
-                    elif event_type == "conversation.item.input_audio_transcription.completed":
-                        transcript = event.get("transcript", "")
-                        print(f"\n[STT DEBUG] User said: '{transcript}'")
-                        nums = re.findall(r'\d+', transcript)
-                        if len(nums) >= 2:
-                            print(f"[FAST-PATH] Detected {nums[0]} & {nums[1]}. Triggering Pre-Fetch...")
-                            asyncio.create_task(query_postgres_database(self.game_mode, nums[0], nums[1]))
-
                     try:
-                        await self.client_ws.send_text(raw_message)
+                        await self.client_ws.close(code=1008)
                     except Exception:
-                        pass  # Client disconnected; continue so tool calls can still complete
-
-                # 5. Tool call interception — always runs on response.done regardless of branch above
-                if event_type == "response.done":
-                    output_items = event.get("response", {}).get("output", [])
-                    for item in output_items:
-                        if item.get("type") == "function_call":
-                            await self._handle_tool_call(item)
-
-        except WebSocketDisconnect:
-            print(f"[REALTIME] WebSocket Disconnect during OpenAI relay: {self.user_uid}")
-        except Exception as e:
-            print(f"[REALTIME] Relay OpenAI Error: {e}")
-
-    async def _handle_tool_call(self, tool_call):
-        """Executes Truth Check and update Redis session context."""
-        call_id = tool_call["call_id"]
-        args = json.loads(tool_call["arguments"])
-        
-        # Capture and Persist numbers for 'Why?' logic
-        num1 = "".join(filter(str.isdigit, str(args.get('card1', ''))))
-        num2 = "".join(filter(str.isdigit, str(args.get('card2', ''))))
-        if num1 and num2:
-            self.last_numbers = [num1, num2]
-            await session_store.update_last_numbers(self.user_uid, self.last_numbers)
-
-        print(f"[REALTIME] TOOL SYNC: Querying Truth Matrix for {num1} & {num2}")
-        raw_result = await query_postgres_database(self.game_mode, num1, num2)
-        
-        try:
-            data = json.loads(raw_result)
-            status = data.get("status", "Invalid")
-            
-            # Select Random Preferred Message based on status
-            if status == "Valid":
-                msg_list = VALID_MSGS
-            elif status == "Invalid":
-                msg_list = INVALID_MSGS
-            elif "Excluded" in status or status == "Exclude":
-                msg_list = EXCLUDE_MSGS
-            else:
-                msg_list = MODE_FAILURE_MSGS
-            
-            random_msg = random.choice(msg_list)
-            
-            # Explicitly stream text to client for immediate UI/Test feedback
-            try:
-                await self.client_ws.send_text(json.dumps({
-                    "type": "response.audio_transcript.delta",
-                    "delta": f"{random_msg} "
-                }))
-            except:
-                pass
-            
-            # Enrichment for AI Brain - Hard Forced keys
-            enriched_result = {
-                "status": status,
-                "MANDATORY_SPEAK_THIS": random_msg,
-                "scripture_logic": data.get("final_segment"),
-                "revised_scholar_reason": data.get("revised_scholar_reason"),
-                "CONSTRAINTS": "You are a SCRIBE. READ MANDATORY_SPEAK_THIS word-for-word. DO NOT INTERPRET."
-            }
-            output_str = json.dumps(enriched_result)
-            
-            # ENHANCED TERMINAL LOG FOR TOOL RESULT
-            print(f"\n[MATRIX RESULT]: Mode='{self.game_mode}' | Cards={num1}&{num2} | Status='{status}' | Sent_Msg='{random_msg}'")
-            if status == "Valid":
-                print(f"[MATRIX DATA]: {str(data.get('final_segment') or '')[:100]}...")
-        except Exception as e:
-            print(f"[REALTIME] Tool Enrichment Error: {e}")
-            output_str = raw_result
-
-        # Relay Output to AI Brain
-        await self.openai_ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output_str
-            }
-        }))
-        await self.openai_ws.send(json.dumps({"type": "response.create"}))
-
-    async def cleanup(self):
-        if self.openai_ws:
-            try:
-                await self.openai_ws.close()
-            except Exception:
-                pass
-        print(f"[REALTIME] Session Cleaned Up for: {self.user_uid}")
-
-    async def run(self):
-        """Two-Phase Bridge: client relay finishes first, then OpenAI drains fully."""
-        await self.connect()
-        t1 = asyncio.create_task(self.relay_client_to_openai())
-        t2 = asyncio.create_task(self.relay_openai_to_client())
-
-        # Phase 1: Wait for client relay to finish (client sends 'end' then disconnects)
-        await asyncio.wait([t1], return_when=asyncio.FIRST_COMPLETED)
-        print(f"[REALTIME] Client relay ended for {self.user_uid}. Waiting for AI response...")
-
-        # Phase 2: BUG FIX — Keep the OpenAI relay alive after client disconnects.
-        # FIRST_COMPLETED was cancelling t2 mid-tool-call, so OpenAI never got
-        # the function result and closed the connection with 1005.
-        # Now we give OpenAI up to 45 seconds to finish the response.
-        try:
-            await asyncio.wait_for(asyncio.shield(t2), timeout=45.0)
-            # AI Finished Speaking
-            print(f"[REALTIME] AI response finished for {self.user_uid}")
-        except asyncio.TimeoutError:
-            print(f"[REALTIME] AI response timeout (45s) for {self.user_uid}")
-        except Exception:
+                        pass
+                    break
+        except asyncio.CancelledError:
             pass
 
-        # Cleanup both tasks
-        for task in [t1, t2]:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+    # ─────────────────────────────────────────────────────────────────────────
+    # Session lifecycle
+    # ─────────────────────────────────────────────────────────────────────────
 
-        if self.openai_ws:
+    async def run(self):
+        login_status = "LOGGED IN" if self.uid != "anonymous" else "ANONYMOUS"
+
+        _log_sep(self.uid, "SESSION START")
+        _log("WS CONNECT",          self.uid,
+             f"user={login_status} | mode='{self.mode}' → db='{self.db_mode}'")
+        _log("SESSION ID",          self.uid,
+             f"session={self.session_id}")
+        _log("ACTIVE SESSIONS",     self.uid,
+             f"total_sessions_before={len(_ACTIVE_SESSIONS)}")
+
+        # Persist session to DB
+        if self.uid != "anonymous":
             try:
-                await self.openai_ws.close()
+                from app.services.user_db import update_session_id
+                await update_session_id(self.uid, self.session_id)
+                _log("SESSION PERSISTED",   self.uid, "session_id saved to DB")
+            except Exception as e:
+                _log("SESSION PERSIST ERR", self.uid, f"{e}")
+
+        # Kick previous session on same uid
+        existing = _ACTIVE_SESSIONS.get(self.uid)
+        if existing and existing is not self:
+            _log("SESSION KICK",     self.uid,
+                 "duplicate uid detected — killing previous session")
+            existing._active = False
+            try:
+                await existing.client_ws.send_text(
+                    json.dumps({"type": "SESSION_KICKED"})
+                )
             except Exception:
                 pass
-        print(f"[REALTIME] Session Cleaned Up for: {self.user_uid}")
+
+        _ACTIVE_SESSIONS[self.uid] = self
+        _log("SESSION REGISTERED",  self.uid,
+             f"registered in active sessions | total={len(_ACTIVE_SESSIONS)}")
+
+        # Connect to OpenAI
+        connected = await self._connect_to_openai()
+        if not connected:
+            _log("SESSION ABORT",   self.uid,
+                 "OpenAI connection failed — aborting session")
+            await self.client_ws.send_text(json.dumps({
+                "type":    "error",
+                "message": "Failed to connect to AI service. Please try again.",
+            }))
+            _ACTIVE_SESSIONS.pop(self.uid, None)
+            return
+
+        # Configure OpenAI session
+        await self._setup_session()
+
+        # Notify client
+        await self.client_ws.send_text(
+            json.dumps({"type": "connection_success", "message": "Connected to EpicVerse AI"})
+        )
+        _log("CLIENT NOTIFIED",     self.uid, "connection_success sent to Flutter app")
+        _log("SESSION LIVE",        self.uid,
+             f"ready — waiting for mic input | mode='{self.db_mode}'")
+        _log_sep(self.uid, "WAITING FOR USER")
+
+        # Run both relays concurrently with a cross-instance session watchdog.
+        # The watchdog is what makes duplicate-device kick work across Cloud
+        # Run instances: if a newer session for this uid lands on a different
+        # instance, our in-memory `_ACTIVE_SESSIONS` dict won't see it, but
+        # the watchdog will detect the DB mismatch and self-close.
+        try:
+            await asyncio.gather(
+                self._relay_from_client(),
+                self._relay_from_openai(),
+                self._session_watchdog(),
+            )
+        except Exception as e:
+            _log("SESSION ERROR",   self.uid, f"{type(e).__name__}: {e}")
+        finally:
+            self._active = False
+            if self.openai_ws:
+                try:
+                    await self.openai_ws.close()
+                    _log("OPENAI WS CLOSED", self.uid, "OpenAI websocket closed cleanly")
+                except Exception:
+                    pass
+            if _ACTIVE_SESSIONS.get(self.uid) is self:
+                _ACTIVE_SESSIONS.pop(self.uid, None)
+            _log_sep(self.uid, "SESSION END")
+            _log("SESSION CLOSED",  self.uid,
+                 f"all relays stopped | total_turns={self._turn_count} "
+                 f"remaining_sessions={len(_ACTIVE_SESSIONS)}")

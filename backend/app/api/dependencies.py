@@ -13,6 +13,4 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
         return decoded_token
     except Exception as e:
         print(f"Firebase token error: {str(e)}")
-        # Allow testing bypass loosely, but typically this throws:
-        # raise HTTPException(status_code=401, detail="Invalid Firebase Auth token")
-        return {"uid": "test_local_user"}
+        raise HTTPException(status_code=401, detail="Invalid Firebase Auth token")

@@ -1,278 +1,173 @@
-import os
-import asyncpg
-from datetime import datetime
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-from app.services.retriever import ensure_card_search_schema, init_db_pool
+from pydantic import BaseModel
+from app.services.db_pool import get_pool
 
-load_dotenv()
 
 class UserRecord(BaseModel):
-    uid: str = Field(..., alias="firebase_id")
+    firebase_id: str | None = None
+    uid: str | None = None
+    display_name: str | None = None
     email: str | None = None
-    phone_number: str | None = None
-    display_name: str | None = Field(None, alias="display_name")
-    primary_language: str | None = Field("English", alias="primary_language")
-    invite_code: str | None = Field(None, alias="invite_code")
-    profile_picture: str | None = Field(None, alias="profile_picture")
-    session_id: str | None = Field(None, alias="session_id")
+    primary_language: str | None = "English"
+    profile_picture: str | None = None
+    invite_code: str | None = None
+    session_id: str | None = None
 
     class Config:
-        populate_by_name = True
         extra = "ignore"
 
-async def get_db_pool():
-    """Returns the shared DB pool."""
-    return await init_db_pool()
+    def get_uid(self) -> str | None:
+        return self.firebase_id or self.uid
+
 
 async def init_db():
-    pool = await get_db_pool()
-    if not pool:
-        print("[DB] Cannot initialize: Pool not ready.")
-        return
+    pool = await get_pool()
     async with pool.acquire() as conn:
-        # 1. Users Table (primary key is uid)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 uid TEXT PRIMARY KEY,
-                email TEXT,
-                phone_number TEXT,
                 display_name TEXT,
+                email TEXT,
                 primary_language TEXT,
-                invite_code TEXT,
                 profile_picture TEXT,
-                current_mode TEXT DEFAULT 'Mode 1',
-                last_session_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        # Ensure columns exist for existing tables (migration)
-        try:
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_session_id TEXT")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_mode TEXT DEFAULT 'Mode 1'")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass
-        
-        # 2. Chat History Table
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id SERIAL PRIMARY KEY,
-                uid TEXT REFERENCES users(uid),
-                session_id TEXT,
-                message TEXT,
-                role TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # 3. Invite Codes Table (Gatekeeper)
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS invite_codes (
-                code TEXT PRIMARY KEY,
-                max_uses INT DEFAULT 1,
-                current_uses INT DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # 4. High-Performance Indexes for 100+ User Concurrency
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_uid ON chat_history(uid)')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_history(created_at)')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_invite_code ON invite_codes(code)')
-
-        # 5. OTPs Table (Production Auth - Email & Phone Hybrid)
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_id TEXT")
+        # Soft-delete support: a non-null timestamp means the account is
+        # scheduled for permanent deletion 30 days later. A subsequent
+        # authenticated sign-in auto-clears this column (grace period).
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_otps (
-                identifier TEXT PRIMARY KEY, -- Can be email or phone
+                identifier TEXT PRIMARY KEY,
                 otp TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-    await ensure_card_search_schema()
+        # Schema must match the columns read by validate_invite_code() and
+        # mark_invite_code_used() below. Production rows already have these
+        # columns; this DDL only fires on a fresh DB (e.g. staging / DR).
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                code TEXT PRIMARY KEY,
+                current_uses INT NOT NULL DEFAULT 0,
+                max_uses INT NOT NULL DEFAULT 1,
+                expires_at TIMESTAMP NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # Belt-and-braces: if an older deploy left the legacy columns, make
+        # sure the new ones exist too. IF NOT EXISTS makes these idempotent.
+        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS current_uses INT NOT NULL DEFAULT 0")
+        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS max_uses INT NOT NULL DEFAULT 1")
+        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL")
+        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
 
 async def save_user(user: UserRecord):
-    try:
-        pool = await get_db_pool()
-        if not pool: return False
-        async with pool.acquire() as conn:
-            print(f"[DB] Saving user {user.uid}: Name={user.display_name}, Phone={user.phone_number}, Email={user.email}")
-            await conn.execute('''
-                INSERT INTO users (uid, email, phone_number, display_name, primary_language, invite_code, profile_picture, last_session_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (uid) DO UPDATE SET
-                    email = COALESCE(EXCLUDED.email, users.email),
-                    phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
-                    display_name = COALESCE(EXCLUDED.display_name, users.display_name),
-                    primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
-                    invite_code = COALESCE(EXCLUDED.invite_code, users.invite_code),
-                    profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture),
-                    last_session_id = COALESCE(EXCLUDED.last_session_id, users.last_session_id)
-            ''', user.uid, user.email, user.phone_number, user.display_name, user.primary_language, user.invite_code, user.profile_picture, user.session_id)
-    except Exception as e:
-        print(f"CRITICAL: Could not save user {user.uid} to DB: {e}")
+    uid = user.get_uid()
+    if not uid:
+        raise ValueError("UserRecord must have firebase_id or uid")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users (uid, display_name, email, primary_language, profile_picture)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (uid)
+            DO UPDATE SET
+                display_name = COALESCE(EXCLUDED.display_name, users.display_name),
+                email = COALESCE(EXCLUDED.email, users.email),
+                primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
+                profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture)
+        ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture)
     return True
 
-async def verify_session(uid: str, session_id: str) -> bool:
-    """
-    Claims the session for this device. 'New Device Wins' policy.
-    """
-    try:
-        pool = await get_db_pool()
-        if not pool: return True
-        async with pool.acquire() as conn:
-            # Claim the session
-            await conn.execute('UPDATE users SET last_session_id = $1 WHERE uid = $2', session_id, uid)
-            return True
-    except Exception as e:
-        print(f"Session Sync Error: {e}")
-        return True
 
-async def is_session_active(uid: str, session_id: str) -> bool:
-    """
-    Checks if this device is still the 'authorized' one. 
-    If False, it means another device has logged in and 'kicked' this one.
-    """
-    try:
-        pool = await get_db_pool()
-        if not pool: return True
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT last_session_id FROM users WHERE uid = $1', uid)
-            if row and row['last_session_id'] and row['last_session_id'] != session_id:
-                return False # Another device took over
-            return True
-    except Exception:
-        return True # Fail open on DB issues
-
-
-
-from firebase_admin import auth
-
-async def get_user(uid: str):
-    # Tier 1: Try PostgreSQL (High Speed Path)
-    try:
-        pool = await get_db_pool()
-        if pool:
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', uid)
-                if row:
-                    return dict(row)
-    except Exception as e:
-        print(f"PostgreSQL Profile Fetch Error: {e}")
+async def get_user(firebase_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Auto-cancel a pending deletion: if the user returns within the
+        # 30-day grace window, clear `deletion_requested_at` so the scheduled
+        # purge will skip them. This is the "sign back in → account restored"
+        # behaviour surfaced in the Settings UI.
+        row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
+        if row and row.get('deletion_requested_at') is not None:
+            await conn.execute(
+                'UPDATE users SET deletion_requested_at = NULL WHERE uid = $1',
+                firebase_id,
+            )
+            print(f"[USER_DB] Auto-cancelled pending deletion for uid={firebase_id}", flush=True)
+            row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
+        if row:
+            return dict(row)
     return None
 
-async def get_chat_history(uid: str, limit: int = 10):
-    """Fetches chat history for a specific user (UID) with DB-offline safety."""
-    try:
-        pool = await get_db_pool()
-        if not pool: return []
-        async with pool.acquire() as conn:
-            rows = await conn.fetch('''
-                SELECT role, message FROM chat_history 
-                WHERE uid = $1 
-                ORDER BY created_at DESC LIMIT $2
-            ''', uid, limit)
-            return [{"role": r['role'], "content": r['message']} for r in reversed(rows)]
-    except Exception as e:
-        print(f"Warning: Could not fetch history for {uid} (DB Offline)")
-        return []
 
-async def save_chat_history(uid: str, session_id: str, role: str, message: str):
-    """Saves chat history for a specific user (UID) with DB-offline safety."""
+async def request_user_deletion(uid: str) -> bool:
+    """Marks a user as pending deletion. Actual purge happens 30 days later
+    via `purge_expired_deletions()` unless the user signs in and triggers
+    auto-cancel in `get_user()` first.
+    """
     try:
-        pool = await get_db_pool()
-        if not pool: return False
+        pool = await get_pool()
         async with pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO users (uid) VALUES ($1)
-                ON CONFLICT (uid) DO NOTHING
-            ''', uid)
-            await conn.execute('''
-                INSERT INTO chat_history (uid, session_id, role, message)
-                VALUES ($1, $2, $3, $4)
-            ''', uid, session_id, role, message)
-    except Exception as e:
-        print(f"Warning: Could not save history for {uid} (DB Offline)")
-    return True
-
-async def validate_invite_code(code: str) -> dict:
-    """Checks if an invite code is valid, not expired, and has uses remaining."""
-    if not code:
-        return {"valid": False, "message": "Invite code is required"}
-        
-    code = code.replace(" ", "").upper()
-    master_code = os.getenv("DEV_MASTER_INVITE_CODE")
-    if master_code and code == master_code:
-        return {"valid": True, "message": "Master Developer Access Granted"}
-
-    try:
-        pool = await get_db_pool()
-        if not pool: return {"valid": False, "message": "Database offline"}
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT * FROM invite_codes WHERE code = $1', code)
-            if not row:
-                return {"valid": False, "message": "Invalid code"}
-            if row['current_uses'] >= row['max_uses']:
-                return {"valid": False, "message": "Code has reached maximum usage"}
-            if row['expires_at'] and row['expires_at'] < datetime.now():
-                return {"valid": False, "message": "Code has expired"}
-            return {"valid": True, "message": "Code is valid"}
-    except Exception as e:
-        print(f"Invite Validation Error: {e}")
-        return {"valid": False, "message": f"Validation error: {e}"}
-
-async def consume_invite_code(code: str) -> bool:
-    """Deletes an invite code after it is successfully used (except master dev code)."""
-    try:
-        if not code: return False
-        code = code.replace(" ", "").upper()
-        master_code = os.getenv("DEV_MASTER_INVITE_CODE")
-        if master_code and code == master_code:
-            return True
-        pool = await get_db_pool()
-        if not pool: return False
-        async with pool.acquire() as conn:
-            await conn.execute('DELETE FROM invite_codes WHERE code = $1', code)
+            result = await conn.execute(
+                'UPDATE users SET deletion_requested_at = NOW() WHERE uid = $1',
+                uid,
+            )
+            print(f"[USER_DB] Deletion requested uid={uid} result={result}", flush=True)
             return True
     except Exception as e:
-        print(f"Invite Deletion Error: {e}")
+        print(f"[USER_DB] request_user_deletion error: {e}")
         return False
 
-# --- Production OTP Handlers ---
 
-async def verify_otp(identifier: str, otp: str) -> bool:
-    """Verifies a 6-digit OTP and handles the master bypass code."""
-
+async def cancel_user_deletion(uid: str) -> bool:
     try:
-        pool = await get_db_pool()
-        if not pool: return False
+        pool = await get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow('''
-                SELECT * FROM user_otps
-                WHERE identifier = $1 AND otp = $2
-                AND created_at > (NOW() - INTERVAL '10 minutes')
-                ORDER BY created_at DESC LIMIT 1
-            ''', identifier.lower(), otp)  # .lower() matches how save_otp stores it
-            if row:
-                await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier)
-                return True
-            return False
+            await conn.execute(
+                'UPDATE users SET deletion_requested_at = NULL WHERE uid = $1',
+                uid,
+            )
+            return True
     except Exception as e:
-        print(f"OTP Verification Error: {e}")
+        print(f"[USER_DB] cancel_user_deletion error: {e}")
         return False
+
+
+async def purge_expired_deletions() -> list[str]:
+    """Hard-deletes users whose `deletion_requested_at` is older than 30 days.
+    Returns the list of uids that were purged (caller is responsible for
+    deleting them from Firebase Auth).
+    """
+    purged: list[str] = []
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT uid FROM users WHERE deletion_requested_at IS NOT NULL "
+                "AND deletion_requested_at < NOW() - INTERVAL '30 days'"
+            )
+            for r in rows:
+                uid = r['uid']
+                try:
+                    await conn.execute('DELETE FROM chat_history WHERE uid = $1', uid)
+                except Exception:
+                    pass
+                await conn.execute('DELETE FROM users WHERE uid = $1', uid)
+                purged.append(uid)
+        if purged:
+            print(f"[USER_DB] Purged {len(purged)} expired accounts: {purged}", flush=True)
+    except Exception as e:
+        print(f"[USER_DB] purge_expired_deletions error: {e}")
+    return purged
+
 
 async def save_otp(identifier: str, otp: str) -> bool:
-    """Saves or updates a 6-digit OTP for a specific identifier."""
     try:
-        pool = await get_db_pool()
-        if not pool: return False
+        pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO user_otps (identifier, otp, created_at)
@@ -284,4 +179,121 @@ async def save_otp(identifier: str, otp: str) -> bool:
             return True
     except Exception as e:
         print(f"[DB] OTP Save Error: {e}")
+        return False
+
+
+async def verify_otp(identifier: str, otp: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM user_otps
+                WHERE identifier = $1 AND otp = $2
+                AND created_at > (NOW() - INTERVAL '1 minute')
+            ''', identifier.lower(), otp)
+            if row:
+                await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
+                return True
+            return False
+    except Exception as e:
+        print(f"OTP Verification Error: {e}")
+        return False
+
+
+async def update_session_id(uid: str, session_id: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET session_id = $1 WHERE uid = $2",
+                session_id, uid
+            )
+            return True
+    except Exception as e:
+        print(f"[DB] update_session_id error: {e}")
+        return False
+
+
+async def get_session_id(uid: str) -> str | None:
+    """Returns the currently-authoritative session_id for uid, or None.
+
+    Used by the realtime session watchdog to detect cross-instance session
+    supersession: if this value differs from the running session's own id,
+    another device has taken over and the running session should self-close.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT session_id FROM users WHERE uid = $1", uid
+            )
+            return row["session_id"] if row else None
+    except Exception as e:
+        print(f"[DB] get_session_id error: {e}")
+        return None
+
+
+async def verify_session(uid: str, session_id: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT session_id FROM users WHERE uid = $1", uid
+            )
+            if row is None:
+                return False
+            stored = row.get("session_id")
+            return stored is None or stored == session_id
+    except Exception as e:
+        print(f"[DB] verify_session error: {e}")
+        return True
+
+
+async def is_session_active(uid: str, session_id: str) -> bool:
+    return await verify_session(uid, session_id)
+
+
+async def validate_invite_code(code: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT 1 FROM invite_codes
+                   WHERE UPPER(code) = UPPER($1)
+                   AND current_uses < max_uses
+                   AND (expires_at IS NULL OR expires_at > NOW())""",
+                code,
+            )
+            return row is not None
+    except Exception as e:
+        print(f"[DB] validate_invite_code error: {e}")
+        return False
+
+
+async def mark_invite_code_used(code: str, uid: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE invite_codes SET current_uses = current_uses + 1 WHERE UPPER(code) = UPPER($1)",
+                code,
+            )
+            return True
+    except Exception as e:
+        print(f"[DB] mark_invite_code_used error: {e}")
+        return False
+
+
+async def delete_user_from_db(uid: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute('DELETE FROM chat_history WHERE uid = $1', uid)
+            except Exception:
+                pass
+            await conn.execute('DELETE FROM users WHERE uid = $1', uid)
+            return True
+    except Exception as e:
+        print(f"CRITICAL: Could not delete user {uid} from DB: {e}")
         return False

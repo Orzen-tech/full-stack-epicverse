@@ -4,100 +4,63 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes
 from app.core.config import settings
-from app.services.retriever import close_db_pool, close_redis, init_redis, load_excel_data, redis_client
+from app.services.retriever import load_excel_data
 from app.services.user_db import init_db
+from app.services.db_pool import get_pool, close_pool
 import firebase_admin
 from firebase_admin import credentials
-from app.services.retriever import db_pool, _db_pool_failed
 
 # Initialize Firebase Admin
 try:
     if not firebase_admin._apps:
         cred = credentials.ApplicationDefault()
-        firebase_admin.initialize_app(cred)
+        firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "")
+        options = {"projectId": firebase_project_id} if firebase_project_id else {}
+        firebase_admin.initialize_app(cred, options)
 except Exception as e:
     print(f"Firebase Init Warning: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Runs on server startup: preloads all Excel game mode files into RAM."""
-    import asyncio
-    from app.services.retriever import init_db_pool
-    
-    # 1. Database Initialization (Backgrounded to prevent Cloud Run startup timeouts)
-    async def run_db_init():
-        import app.services.retriever as retriever
-        try:
-            print("Connecting to Database in background...")
-            await retriever.init_db_pool()
-            if retriever.db_pool:
-                print("Database Pool ready. Initializing Tables...")
-                await asyncio.wait_for(init_db(), timeout=30)
-                print("Database Tables initialized.")
-            else:
-                print("⚠️ [DB] Pool not ready. Will retry on next request.")
-        except Exception as e:
-            print(f"❌ [DB-CRUCIAL] Background Database Initialization Failed: {e}")
-            retriever._db_pool_failed = True
-
-    asyncio.create_task(run_db_init())
-
-    # 2. Redis Initialization (Non-Critical, Backgrounded)
-    async def run_redis_init():
-        try:
-            print("Connecting to Redis in background...")
-            await asyncio.wait_for(init_redis(), timeout=15)
-        except Exception as e:
-            print(f"⚠️ [INFRA] Redis Offline: Disabling Semantic Cache. ({e})")
-    
-    asyncio.create_task(run_redis_init())
-    
-    # Final Transition to Ready State (Backgrounded)
-    import app.services.retriever as retriever
-    async def run_data_load():
-        try:
-            print("Loading Excel datasets in background...")
-            await retriever.load_excel_data()
-            print("==================================================")
-            print(" EPICVERSE BACKEND READY")
-            print("==================================================")
-        except Exception as e:
-            print(f"❌ [DATA] Failed to load Excel data: {e}")
-
-    asyncio.create_task(run_data_load())
-    
-    print("\n" + "="*50)
-    print(f" EPICVERSE BACKEND: {settings.VERSION} ")
-    print("="*50)
-    print(f" DB Pool:  [{'ACTIVE' if retriever.db_pool and not retriever._db_pool_failed else 'FAILED (Critical)'}]")
-    print(f" Redis:    [{'ACTIVE' if retriever.redis_client else 'OFFLINE (Degraded Mode)'}]")
-    print(f" Datasets: [LOADED]")
-    print("="*50 + "\n")
-    
+    print("Server starting up...")
+    try:
+        await get_pool()
+        print("[DB] Connection pool ready.")
+    except Exception as e:
+        print(f"⚠️ [DB] Pool init failed: {e}")
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"⚠️ [DB] init_db failed (non-fatal): {e}")
+    try:
+        await load_excel_data()
+        print("Server ready.")
+    except Exception as e:
+        print(f"⚠️ [DATA] load_excel_data failed: {e}")
     yield
-    
+    await close_pool()
     print("Server shutting down.")
-    await close_redis()
-    await close_db_pool()
+
+_ENV = os.getenv("ENV", "prod").lower()
+_IS_PROD = _ENV not in ("dev", "development", "local")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    lifespan=lifespan
+    # Hide OpenAPI schema, Swagger UI, and ReDoc in production so we don't
+    # hand attackers a machine-readable map of every endpoint. Set ENV=dev in
+    # the environment to re-enable locally.
+    openapi_url=None if _IS_PROD else f"{settings.API_V1_STR}/openapi.json",
+    docs_url=None if _IS_PROD else "/docs",
+    redoc_url=None if _IS_PROD else "/redoc",
+    lifespan=lifespan,
 )
-
-_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "https://epicverse-backend-721191424605.us-central1.run.app").split(",")
-    if origin.strip()
-]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
@@ -105,16 +68,12 @@ app.add_middleware(
 app.include_router(routes.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
-async def root():
-    from app.services.retriever import db_pool, redis_client, _db_pool_failed
-    return {
-        "message": "EpicVerse Backend API",
-        "version": settings.VERSION,
-        "status": {
-            "database": "CONNECTED" if db_pool else ("FAILED" if _db_pool_failed else "INITIALIZING"),
-            "redis": "CONNECTED" if redis_client else "OFFLINE"
-        }
-    }
+def root():
+    return {"message": "Welcome to the Game Guide AI Voice Agent Backend"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/modes")
 async def list_modes():

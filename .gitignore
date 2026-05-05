@@ -48,6 +48,14 @@ build_latest.log
 **/*.swo
 .history/
 
+# Sensitive data — never commit
+backend/users.db
+*.db
+files.zip
+~$*.xlsx
+~$*.xls
+~$*.docx
+
 # Project specific ignores
 backend/google-credentials.json
 **/google-credentials.json

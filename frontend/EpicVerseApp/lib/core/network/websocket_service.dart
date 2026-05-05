@@ -19,6 +19,7 @@ class WebSocketService {
   final _messageController = StreamController<dynamic>.broadcast();
   final _statusController = StreamController<String>.broadcast();
   final _connectionStateController = StreamController<bool>.broadcast();
+  final _sessionKickedController = StreamController<void>.broadcast();
   
   String _currentMode = 'Mode 1';
   bool _isConnecting = false;
@@ -31,8 +32,10 @@ class WebSocketService {
   Stream<dynamic> get messages => _messageController.stream;
   Stream<String> get statusTextStream => _statusController.stream;
   Stream<bool> get connectionState => _connectionStateController.stream;
+  Stream<void> get sessionKicked => _sessionKickedController.stream;
 
   Future<void> connect({String? hostOrUrl, bool? isListening, String? game_mode}) async {
+    debugPrint('[EpicVerse][WS] connect() called mode=${game_mode ?? _currentMode}');
     if (_isConnected) return;
     if (_isConnecting) {
        await (_connectionCompleter?.future ?? Future.value());
@@ -70,22 +73,31 @@ class WebSocketService {
     _reconnectTimer?.cancel();
 
     final listenFlag = isListening ?? false;
-    // Updated query params to include uid and session_id for backend verification
-    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag&token=$idToken';
-    
+    // Token is sent via the Authorization handshake header (NOT in the URL),
+    // so it does not leak into Cloud Run / load balancer / proxy access logs.
+    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag';
+
     Uri wsUri = Uri.parse('${ApiConfig.wsUrl}?$queryParams');
     if (hostOrUrl != null && hostOrUrl.isNotEmpty) {
       wsUri = Uri.parse('${hostOrUrl.startsWith('ws') ? hostOrUrl : 'ws://$hostOrUrl'}/api/v1/ws/realtime?$queryParams');
     }
-    
+
     try {
-      _channel = IOWebSocketChannel.connect(wsUri, headers: ApiConfig.headers);
+      debugPrint('[EpicVerse][WS] Opening channel uri=$wsUri');
+      _channel = IOWebSocketChannel.connect(
+        wsUri,
+        headers: {
+          ...ApiConfig.headers,
+          'Authorization': 'Bearer $idToken',
+        },
+      );
       
       _channel!.stream.listen(
         (message) {
           if (!_isConnected) {
             _isConnected = true;
             _isConnecting = false;
+            debugPrint('[EpicVerse][WS] CONNECTED');
             _statusController.add('Connected');
             _connectionStateController.add(true);
             if (!(_connectionCompleter?.isCompleted ?? true)) {
@@ -94,23 +106,26 @@ class WebSocketService {
           }
 
           if (message is List<int>) {
+             debugPrint('[EpicVerse][WS] AUDIO chunk in bytes=${message.length}');
              _messageController.add(Uint8List.fromList(message));
              return;
           }
 
           try {
             final data = jsonDecode(message);
+            debugPrint('[EpicVerse][WS] MSG in type=${data['type']} status=${data['status']}');
             
-            // Check for Session Kick
-            if (data['type'] == 'error' && (data['code'] == 'SESSION_KICKED' || data['code'] == 'SESSION_INVALID')) {
+            // Check for Session Kick — backend sends {"type": "SESSION_KICKED"}
+            if (data['type'] == 'SESSION_KICKED') {
+               debugPrint('[EpicVerse][WS] SESSION_KICKED — another device took over');
                _handleDisconnect();
                _statusController.add('Logged out: Active elsewhere');
-               _messageController.add(data); // Propagate to UI for dialog
+               _sessionKickedController.add(null);
                return;
             }
 
             if (data['type'] == 'connection_success') {
-               debugPrint("WS: Unified Handshake Confirmed");
+               debugPrint('[EpicVerse][WS] Unified Handshake Confirmed');
                if (!(_connectionCompleter?.isCompleted ?? true)) {
                  _connectionCompleter?.complete();
                }
@@ -159,9 +174,14 @@ class WebSocketService {
 
   void sendMessage(dynamic message) {
     if (_isConnected && _channel != null) {
+      if (message is String) {
+        debugPrint('[EpicVerse][WS] SEND text=${message.length > 80 ? '${message.substring(0, 80)}...' : message}');
+      } else if (message is List<int>) {
+        // Audio frames are spammy; only log occasionally
+      }
       _channel!.sink.add(message);
     } else {
-      debugPrint('Cannot send message: WebSocket not connected');
+      debugPrint('[EpicVerse][WS] Cannot send: not connected');
     }
   }
 
@@ -181,6 +201,7 @@ class WebSocketService {
     _connectionStateController.close();
     _statusController.close();
     _messageController.close();
+    _sessionKickedController.close();
   }
 }
 
