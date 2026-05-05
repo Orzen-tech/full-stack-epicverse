@@ -492,7 +492,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                    // Layer 2: Main Pattern Background (Filigree)
                    Positioned.fill(
                      child: Image.asset(
-                        'assets/images/cute_companion.png',
+                        'assets/images/cute_companion.webp',
                         fit: BoxFit.cover,
                      ),
                    ),
@@ -529,7 +529,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                          children: [
                            // Main EpicVerse Logo (Centered)
                            Image.asset(
-                             'assets/images/epicverse_companion_logo.png',
+                             'assets/images/epicverse_companion_logo.webp',
                              width: 280,
                              fit: BoxFit.contain,
                            ),
@@ -588,7 +588,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                            children: [
                              // Main EpicVerse Logo (Centered)
                              Image.asset(
-                               'assets/images/epicverse_companion_logo.png',
+                               'assets/images/epicverse_companion_logo.webp',
                                width: 280,
                                fit: BoxFit.contain,
                              ),

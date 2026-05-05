@@ -41,7 +41,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           1,
                           'OriginArc (Balakanda)',
-                          'assets/images/mode_1_bg.png',
+                          'assets/images/mode_1_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('OriginArc (Balakanda)');
@@ -58,7 +58,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           2,
                           'CrownShift (AyodhyaKanda)',
-                          'assets/images/mode_2_bg.png',
+                          'assets/images/mode_2_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('CrownShift (AyodhyaKanda)');
@@ -75,7 +75,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           3,
                           'WildRun (AranyaKanda)',
-                          'assets/images/mode_3_bg.png',
+                          'assets/images/mode_3_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('WildRun (AranyaKanda)');
@@ -92,7 +92,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           4,
                           'GlowLine (KishkindhaKanda)',
-                          'assets/images/mode_4_bg.png',
+                          'assets/images/mode_4_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('GlowLine (KishkindhaKanda)');
@@ -109,7 +109,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           5,
                           'lankaLeap (SundaraKanda)',
-                          'assets/images/mode_5_bg.png',
+                          'assets/images/mode_5_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('lankaLeap (SundaraKanda)');
@@ -126,7 +126,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           6,
                           'WarRoom (YuddhaKanda)',
-                          'assets/images/mode_6_bg.png',
+                          'assets/images/mode_6_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('WarRoom (YuddhaKanda)');
@@ -143,7 +143,7 @@ class ModeSelectionScreen extends StatelessWidget {
                           context,
                           7,
                           'AfterLight (UttaraKanda)',
-                          'assets/images/mode_7_bg.png',
+                          'assets/images/mode_7_bg.webp',
                           isUnlocked: true,
                           onTap: () {
                             webSocketService.updateMode('AfterLight (UttaraKanda)');

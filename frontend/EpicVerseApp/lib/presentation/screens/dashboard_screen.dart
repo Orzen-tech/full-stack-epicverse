@@ -161,7 +161,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                 padding: const EdgeInsets.all(25),
                                 child: Center(
                                   child: Image.asset(
-                                    'assets/images/button_png.png',
+                                    'assets/images/button_png.webp',
                                     width: 170,
                                     fit: BoxFit.contain,
                                     errorBuilder: (context, error, stackTrace) {
