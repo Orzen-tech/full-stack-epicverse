@@ -200,7 +200,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         "invite_code": inviteCode,
         "profile_picture": base64Image,
         "session_id": sessionId,
-      }, options: Options(headers: ApiConfig.headers));
+      }, options: Options(headers: await ApiConfig.authHeaders()));
       debugPrint('[EpicVerse][REG] /sync-user status=${syncRes.statusCode}');
 
       ref.read(userProvider.notifier).setUser(model);

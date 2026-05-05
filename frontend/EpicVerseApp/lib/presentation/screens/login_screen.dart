@@ -78,7 +78,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         debugPrint('[EpicVerse][LOGIN] GET /user/${firebaseUser.uid}');
         final res = await _dio.get(
           '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
-          options: Options(headers: ApiConfig.headers),
+          options: Options(headers: await ApiConfig.authHeaders()),
         );
         debugPrint('[EpicVerse][LOGIN] /user response status=${res.statusCode}');
         if (res.statusCode == 200) {
@@ -169,7 +169,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     try {
       final response = await _dio.get(
         '${ApiConfig.apiUrl}/user/$uid',
-        options: Options(headers: ApiConfig.headers),
+        options: Options(headers: await ApiConfig.authHeaders()),
       );
       
       if (response.statusCode == 200) {
@@ -182,6 +182,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       }
     } catch (e) {
       // If user doesn't exist in backend, trigger initial sync
+      final syncHeaders = await ApiConfig.authHeaders();
       _dio.post(
         '${ApiConfig.apiUrl}/sync-user',
         data: {
@@ -192,7 +193,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           "profile_picture": null,
           "session_id": fallback.sessionId,
         },
-        options: Options(headers: ApiConfig.headers),
+        options: Options(headers: syncHeaders),
       ).catchError((e) {
         debugPrint("Background sync failed: $e");
         return Response(requestOptions: RequestOptions(path: ''), statusCode: 500);

@@ -267,7 +267,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       "primary_language": updatedUser.primaryLanguage,
                       "profile_picture": updatedUser.profilePicture,
                     },
-                    options: Options(headers: ApiConfig.headers),
+                    options: Options(headers: await ApiConfig.authHeaders()),
                   );
                 } catch (e) {
                   debugPrint("Error updating name: $e");
@@ -336,7 +336,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           "primary_language": updatedUser.primaryLanguage,
           "profile_picture": updatedUser.profilePicture,
         },
-        options: Options(headers: ApiConfig.headers),
+        options: Options(headers: await ApiConfig.authHeaders()),
       );
     } catch (e) {
       debugPrint("Error updating profile photo: $e");

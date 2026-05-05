@@ -47,10 +47,12 @@ async def validate_invite(code: str):
 
 
 @router.post("/sync-user")
-async def sync_user(user: UserRecord):
+async def sync_user(user: UserRecord, current_user: dict = Depends(get_current_user)):
     """Saves user info to the SQL database and marks invite code as used."""
     if not user.get_uid():
         raise HTTPException(status_code=422, detail="firebase_id or uid is required")
+    if current_user.get("uid") != user.get_uid():
+        raise HTTPException(status_code=403, detail="Forbidden")
     await save_user(user)
     if user.invite_code:
         await mark_invite_code_used(user.invite_code.upper(), user.get_uid())

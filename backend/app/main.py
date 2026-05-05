@@ -71,6 +71,10 @@ app.include_router(routes.router, prefix=settings.API_V1_STR)
 def root():
     return {"message": "Welcome to the Game Guide AI Voice Agent Backend"}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.get("/modes")
 async def list_modes():
     """Returns the list of available game modes from PostgreSQL."""
