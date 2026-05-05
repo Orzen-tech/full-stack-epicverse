@@ -3,7 +3,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
-import 'verification_pending_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import '../../providers/user_provider.dart';
@@ -112,14 +111,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
       }
       
       if (!mounted) return;
-
-      // 4. Verification Guard
-      if (firebaseUser != null && !firebaseUser.emailVerified) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const VerificationPendingScreen()),
-        );
-        return;
-      }
 
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
