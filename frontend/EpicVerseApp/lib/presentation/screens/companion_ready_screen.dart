@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:convert';
-import 'dart:ui' as ui;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
-import 'package:lottie/lottie.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
@@ -533,16 +531,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                              width: 280,
                              fit: BoxFit.contain,
                            ),
-                           // Lottie Mouth Animation (Overlay)
-                           // Only active when AI is talking
-                           Lottie.asset(
-                             'assets/animations/companion_talking.json',
-                             animate: _isTalking,
-                             repeat: true,
-                             width: 250, // Match logo scale
-                             fit: BoxFit.contain,
-                             errorBuilder: (context, error, stackTrace) => const SizedBox(), 
-                           ),
+                           const SizedBox(),
                          ],
                        ),
                      ),
@@ -592,15 +581,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                                width: 280,
                                fit: BoxFit.contain,
                              ),
-                             // Lottie Mouth Animation (Overlay)
-                             Lottie.asset(
-                               'assets/animations/companion_talking.json',
-                               animate: _isTalking,
-                               repeat: true,
-                               width: 250, 
-                               fit: BoxFit.contain,
-                               errorBuilder: (context, error, stackTrace) => const SizedBox(), 
-                             ),
+                             const SizedBox(),
                            ],
                          ),
                        ),

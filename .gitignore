@@ -30,7 +30,6 @@
 **/build/
 
 # Flutter platform directories (auto-generated, not source)
-**/ios/
 **/linux/
 **/macos/
 **/windows/
