@@ -1,5 +1,6 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from collections import defaultdict
 from datetime import datetime, timedelta
 import io
@@ -31,6 +32,7 @@ from app.services.user_db import (
     save_user, UserRecord, get_user, save_otp, verify_otp,
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
+    save_feedback, get_all_feedback,
 )
 from app.api.dependencies import get_current_user
 
@@ -386,6 +388,14 @@ async def cancel_deletion(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to cancel deletion.")
     return {"status": "success", "message": "Pending deletion cancelled."}
+
+
+@router.get("/admin/feedback")
+async def admin_get_feedback(key: str = ""):
+    if key != "kriyora-admin-2026":
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    rows = await get_all_feedback()
+    return {"total": len(rows), "feedback": rows}
 
 
 @router.post("/admin/purge-expired-deletions")
@@ -750,7 +760,7 @@ async def get_terms_of_service():
 AGREEMENT TO OUR LEGAL TERMS
 We are KRIYORA CONCEPTS PRIVATE LIMITED, doing business as EpicVerse ("Company," "we," "us," "our"), a company registered in India at Unit 101 Oxford Towers, HAL Old Airport Rd, H.A.L II Stage, Bangalore North, Bengaluru, Karnataka 560008.
 We operate the mobile application EpicVerse (the "App"), as well as any other related products and services that refer or link to these legal terms (the "Legal Terms") (collectively, the "Services").
-You can contact us by phone at +917090203060, email at tech@kriyora.com, or by mail to Unit 101 Oxford Towers, HAL Old Airport Rd, H.A.L II Stage, Bangalore North, Bengaluru, Karnataka 560008, India.
+You can contact us by phone at +917090203060, email at support@kriyora.com, or by mail to Unit 101 Oxford Towers, HAL Old Airport Rd, H.A.L II Stage, Bangalore North, Bengaluru, Karnataka 560008, India.
 These Legal Terms constitute a legally binding agreement made between you, whether personally or on behalf of an entity ("you"), and KRIYORA CONCEPTS PRIVATE LIMITED, concerning your access to and use of the Services. You agree that by accessing the Services, you have read, understood, and agreed to be bound by all of these Legal Terms. IF YOU DO NOT AGREE WITH ALL OF THESE LEGAL TERMS, THEN YOU ARE EXPRESSLY PROHIBITED FROM USING THE SERVICES AND YOU MUST DISCONTINUE USE IMMEDIATELY.
 We will provide you with prior notice of any scheduled changes to the Services you are using. The modified Legal Terms will become effective upon posting or notifying you by support@kriyora.com, as stated in the email message. By continuing to use the Services after the effective date of any changes, you agree to be bound by the modified terms.
 All users who are minors in the jurisdiction in which they reside (generally under the age of 18) must have the permission of, and be directly supervised by, their parent or guardian to use the Services. If you are a minor, you must have your parent or guardian read and agree to these Legal Terms prior to you using the Services.
@@ -800,7 +810,7 @@ access the Services; and
 download or print a copy of any portion of the Content to which you have properly gained access,
 solely for your personal, non-commercial use.
 Except as set out in this section or elsewhere in our Legal Terms, no part of the Services and no Content or Marks may be copied, reproduced, aggregated, republished, uploaded, posted, publicly displayed, encoded, translated, transmitted, distributed, sold, licensed, or otherwise exploited for any commercial purpose whatsoever, without our express prior written permission.
-If you wish to make any use of the Services, Content, or Marks other than as set out in this section or elsewhere in our Legal Terms, please address your request to: tech@kriyora.com. If we ever grant you the permission to post, reproduce, or publicly display any part of our Services or Content, you must identify us as the owners or licensors of the Services, Content, or Marks and ensure that any copyright or proprietary notice appears or is visible on posting, reproducing, or displaying our Content.
+If you wish to make any use of the Services, Content, or Marks other than as set out in this section or elsewhere in our Legal Terms, please address your request to: support@kriyora.com. If we ever grant you the permission to post, reproduce, or publicly display any part of our Services or Content, you must identify us as the owners or licensors of the Services, Content, or Marks and ensure that any copyright or proprietary notice appears or is visible on posting, reproducing, or displaying our Content.
 We reserve all rights not expressly granted to you in and to the Services, Content, and Marks.
 Any breach of these Intellectual Property Rights will constitute a material breach of our Legal Terms and your right to use our Services will terminate immediately.
 Your submissions and contributions
@@ -940,8 +950,73 @@ KRIYORA CONCEPTS PRIVATE LIMITED
 Unit 101 Oxford Towers, HAL Old Airport Rd, H.A.L II Stage, Bangalore North
 Bengaluru, Karnataka 560008
 India
-Phone: +917090203060
-tech@kriyora.com
+Chat With Us: +917090203060
+Contact via Gmail:support@kriyora.com
 
 This Terms and Conditions was created using Termly's Terms and Conditions Generator"""
     }
+
+
+_FAQ_ITEMS = [
+    {
+        "question": "What is EpicVerse?",
+        "answer": "EpicVerse is an AI-powered voice companion app that lets you have real-time voice conversations with intelligent AI characters across different game modes and universes."
+    },
+    {
+        "question": "How do I start a conversation?",
+        "answer": "Go to the Dashboard, select a mode, tap the companion card, and press the microphone button to start speaking. The AI will respond in real time."
+    },
+    {
+        "question": "What is an invite code and how do I get one?",
+        "answer": "EpicVerse is currently invite-only. You need a valid EPIC-XXXXXX invite code to create an account. The invite code will be given to you along with the EPicVerse kit. If any isssues logging in, please contact us at support@kriyora.com."
+    },
+    {
+        "question": "Is my voice data stored?",
+        "answer": "No. Voice recordings are processed in real time via OpenAI and are not stored permanently on our servers. Only transcribed text interactions may be logged for quality improvements."
+    },
+    {
+        "question": "Which languages are supported?",
+        "answer": "EpicVerse supports multiple languages including English, Hindi, Tamil, Telugu, Kannada, Malayalam, Bengali, and more. The app auto-detects your spoken language."
+    },
+    {
+        "question": "Why does the app need microphone permission?",
+        "answer": "The microphone is required for voice interaction — it is the core feature of EpicVerse. Audio is only recorded while you actively hold the mic button."
+    },
+    {
+        "question": "How do I delete my account?",
+        "answer": "Go to Settings → Delete Account. Your account will be scheduled for deletion in 30 days. If you sign back in within 30 days, the deletion is automatically cancelled and your account is fully restored."
+    },
+    {
+        "question": "Can I change my display name or profile photo?",
+        "answer": "Yes. In Settings, tap the edit icon next to your name to change your display name, or tap your profile photo to update it from your camera or gallery."
+    },
+    {
+        "question": "The voice response is slow — what can I do?",
+        "answer": "Response speed depends on your internet connection and server load. Make sure you have a stable Wi-Fi or mobile data connection. If slowness persists, please send us feedback."
+    },
+    {
+        "question": "How do I contact support?",
+        "answer": "Use the Send Feedback option in Settings, or email us directly at support@kriyora.com. We typically respond within 1-2 business days."
+    },
+]
+
+
+@router.get("/faq")
+async def get_faq():
+    return {"items": _FAQ_ITEMS}
+
+
+class FeedbackRequest(BaseModel):
+    message: str
+
+
+@router.post("/feedback")
+async def submit_feedback(
+    body: FeedbackRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    uid = current_user.get("uid")
+    if not body.message.strip():
+        raise HTTPException(status_code=422, detail="Feedback message cannot be empty")
+    await save_feedback(uid, body.message.strip())
+    return {"status": "success", "message": "Thank you for your feedback!"}

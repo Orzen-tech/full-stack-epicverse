@@ -95,7 +95,7 @@ We use industry-standard encryption and secure authentication. No passwords are 
 We may update this policy. Continued use after changes constitutes acceptance.
 
 9. Contact
-For privacy questions: tech@kriyora.com
+For privacy questions: support@kriyora.com
 
 Last updated: May 2026''';
     } else {
@@ -148,7 +148,7 @@ These Terms are governed by applicable local laws.
 We may update these Terms. Continued use after changes constitutes acceptance.
 
 12. Contact
-For questions: tech@kriyora.com
+For questions: support@kriyora.com
 
 Last updated: May 2026''';
     }

@@ -13,6 +13,8 @@ import '../../core/network/api_config.dart';
 import 'login_screen.dart';
 import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
+import 'faq_screen.dart';
+import 'feedback_screen.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -145,16 +147,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   children: [
                     _buildSettingsOption(
-                      icon: Icons.logout_outlined,
-                      title: 'Logout',
-                      onTap: () => _showLogoutDialog(context),
+                      icon: Icons.help_outline,
+                      title: 'FAQ',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const FAQScreen()),
+                      ),
                     ),
                     const SizedBox(height: 16),
                     _buildSettingsOption(
-                      icon: Icons.delete_outline,
-                      title: 'Delete Account',
-                      onTap: () => _showDeleteAccountDialog(context, user),
-                      isDestructive: true,
+                      icon: Icons.feedback_outlined,
+                      title: 'Send Feedback',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const FeedbackScreen()),
+                      ),
                     ),
                     const SizedBox(height: 24),
                     const Divider(color: Colors.white24),
@@ -185,6 +192,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           ),
                         ),
                       ),
+                    ),
+                    const SizedBox(height: 24),
+                    const Divider(color: Colors.white24),
+                    const SizedBox(height: 24),
+                    _buildSettingsOption(
+                      icon: Icons.logout_outlined,
+                      title: 'Logout',
+                      onTap: () => _showLogoutDialog(context),
+                    ),
+                    const SizedBox(height: 16),
+                    _buildSettingsOption(
+                      icon: Icons.delete_outline,
+                      title: 'Delete Account',
+                      onTap: () => _showDeleteAccountDialog(context, user),
+                      isDestructive: true,
                     ),
                   ],
                 ),

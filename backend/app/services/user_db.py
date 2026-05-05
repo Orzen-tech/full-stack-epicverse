@@ -63,6 +63,14 @@ async def init_db():
         await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS max_uses INT NOT NULL DEFAULT 1")
         await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL")
         await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id SERIAL PRIMARY KEY,
+                uid TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
 
 
 async def save_user(user: UserRecord):
@@ -120,6 +128,32 @@ async def request_user_deletion(uid: str) -> bool:
             return True
     except Exception as e:
         print(f"[USER_DB] request_user_deletion error: {e}")
+        return False
+
+
+async def get_all_feedback() -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT f.id, f.uid, u.display_name, u.email, f.message, f.created_at
+            FROM user_feedback f
+            LEFT JOIN users u ON u.uid = f.uid
+            ORDER BY f.created_at DESC
+        ''')
+        return [dict(r) for r in rows]
+
+
+async def save_feedback(uid: str, message: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'INSERT INTO user_feedback (uid, message) VALUES ($1, $2)',
+                uid, message
+            )
+        return True
+    except Exception as e:
+        print(f"[USER_DB] save_feedback error: {e}")
         return False
 
 
