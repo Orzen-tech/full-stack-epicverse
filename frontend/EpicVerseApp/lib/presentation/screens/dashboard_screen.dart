@@ -170,9 +170,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                     ),
                                   ),
                                 ),
-                                const SizedBox(height: 14),
+                                const SizedBox(height: 6),
                                 SizedBox(
-                                  width: 280,
+                                  width: 300,
                                   height: 52,
                                   child: CustomPaint(
                                     painter: _ArcTextPainter(),
@@ -251,12 +251,12 @@ class _ArcTextPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     const String text = 'TAP EPICVERSE';
-    const double radius = 112.0;
-    const double fontSize = 12.0;
-    const double letterSpacing = 3.5;
+    const double radius = 118.0;
+    const double fontSize = 14.0;
+    const double letterSpacing = 5.5;
 
     final double centerX = size.width / 2;
-    const double centerY = -88.0;
+    const double centerY = -102.0;
 
     final List<String> chars = text.split('');
     final List<double> charWidths = [];
@@ -276,11 +276,12 @@ class _ArcTextPainter extends CustomPainter {
         letterSpacing * (chars.length - 1);
     final double totalAngle = totalWidth / radius;
 
-    double currentAngle = math.pi / 2 - totalAngle / 2;
+    // Start from right side of arc and decrease angle → left-to-right on screen
+    double currentAngle = math.pi / 2 + totalAngle / 2;
 
     for (int i = 0; i < chars.length; i++) {
       final double charWidth = charWidths[i];
-      final double charAngle = currentAngle + charWidth / 2 / radius;
+      final double charAngle = currentAngle - charWidth / 2 / radius;
 
       canvas.save();
 
@@ -306,7 +307,7 @@ class _ArcTextPainter extends CustomPainter {
 
       canvas.restore();
 
-      currentAngle += (charWidth + letterSpacing) / radius;
+      currentAngle -= (charWidth + letterSpacing) / radius;
     }
   }
 
