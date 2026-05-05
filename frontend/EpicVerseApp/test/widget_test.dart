@@ -7,7 +7,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mltiverse_app/main.dart';
+import 'package:epicverse/main.dart';
 
 void main() {
   testWidgets('Welcome screen UI components test', (WidgetTester tester) async {
