@@ -248,7 +248,7 @@ class RealtimeSession:
     async def _setup_session(self):
         _log("SESSION SETUP", self.uid,
              f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
-             f"stt=whisper-1 | silence=600ms | threshold=0.5")
+             f"stt=whisper-1 | silence=400ms | threshold=0.5")
         payload = {
             "type": "session.update",
             "session": {
@@ -266,8 +266,8 @@ class RealtimeSession:
                 "turn_detection": {
                     "type":                "server_vad",
                     "threshold":           0.5,
-                    "prefix_padding_ms":   300,
-                    "silence_duration_ms": 600,
+                    "prefix_padding_ms":   200,
+                    "silence_duration_ms": 400,
                 },
                 "tools": [{
                     "type":        "function",
@@ -468,7 +468,7 @@ class RealtimeSession:
                             # fires, leaving the buffer stuck. Appending silence here
                             # gives VAD the silence window it needs.
                             if self._audio_appended_since_commit:
-                                silence_16k = bytes(int(16000 * 0.75 * 2))  # 750ms PCM16 @ 16kHz
+                                silence_16k = bytes(int(16000 * 0.50 * 2))  # 500ms PCM16 @ 16kHz
                                 silence_24k = self._resample_16k_to_24k(silence_16k)
                                 try:
                                     await self.openai_ws.send(json.dumps({
@@ -476,7 +476,7 @@ class RealtimeSession:
                                         "audio": base64.b64encode(silence_24k).decode(),
                                     }))
                                     _log("SILENCE PADDING", self.uid,
-                                         "750ms silence appended → VAD will detect end-of-speech")
+                                         "500ms silence appended → VAD will detect end-of-speech")
                                 except Exception as _e:
                                     _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
                             self._mic_streaming   = False
