@@ -158,11 +158,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                         height: 220,
                                         decoration: BoxDecoration(
                                           shape: BoxShape.circle,
-                                          gradient: const LinearGradient(
-                                            colors: [Color(0xFF432571), Color(0xFF2C1349)],
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                          ),
+                                          color: const Color(0xFF3C1740),
                                           border: Border.all(
                                             color: AppColors.primaryGold.withValues(alpha: 0.25 + 0.20 * _glowAnimation.value),
                                             width: 3.0,
