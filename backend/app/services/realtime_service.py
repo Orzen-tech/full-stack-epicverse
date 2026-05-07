@@ -348,7 +348,7 @@ class RealtimeSession:
                     pass
 
             if isinstance(result, dict):
-                is_error = "error" in result
+                is_error = "error" in result or result.get("character_not_in_mode") is True
                 status = result.get("final_status") or result.get("status", "")
                 if is_error:
                     _log("DB NO MATCH", self.uid,

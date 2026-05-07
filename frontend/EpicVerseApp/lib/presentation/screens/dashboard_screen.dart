@@ -5,7 +5,6 @@ import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
 import 'mode_selection_screen.dart';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'settings_screen.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -123,6 +122,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                Center(
+                                  child: Image.asset(
+                                    'assets/images/enter_header.webp',
+                                    width: 360,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return const SizedBox.shrink();
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
                                 GestureDetector(
                                   onTap: () {
                                     Navigator.of(context).push(
@@ -168,14 +178,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                         },
                                       ),
                                     ),
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                SizedBox(
-                                  width: 300,
-                                  height: 52,
-                                  child: CustomPaint(
-                                    painter: _ArcTextPainter(),
                                   ),
                                 ),
                               ],
@@ -245,72 +247,4 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
       ),
     );
   }
-}
-
-class _ArcTextPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    const String text = 'TAP EPICVERSE';
-    const double radius = 118.0;
-    const double fontSize = 14.0;
-    const double letterSpacing = 5.5;
-
-    final double centerX = size.width / 2;
-    const double centerY = -102.0;
-
-    final List<String> chars = text.split('');
-    final List<double> charWidths = [];
-
-    for (final ch in chars) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: ch,
-          style: const TextStyle(fontSize: fontSize, fontWeight: FontWeight.w700),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      charWidths.add(tp.width);
-    }
-
-    final double totalWidth = charWidths.fold(0.0, (a, b) => a + b) +
-        letterSpacing * (chars.length - 1);
-    final double totalAngle = totalWidth / radius;
-
-    // Start from right side of arc and decrease angle → left-to-right on screen
-    double currentAngle = math.pi / 2 + totalAngle / 2;
-
-    for (int i = 0; i < chars.length; i++) {
-      final double charWidth = charWidths[i];
-      final double charAngle = currentAngle - charWidth / 2 / radius;
-
-      canvas.save();
-
-      final double x = centerX + radius * math.cos(charAngle);
-      final double y = centerY + radius * math.sin(charAngle);
-
-      canvas.translate(x, y);
-      canvas.rotate(charAngle - math.pi / 2);
-
-      final tp = TextPainter(
-        text: TextSpan(
-          text: chars[i],
-          style: const TextStyle(
-            color: Color(0xFFD4AF37),
-            fontSize: fontSize,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-
-      tp.paint(canvas, Offset(-charWidth / 2, -tp.height / 2));
-
-      canvas.restore();
-
-      currentAngle -= (charWidth + letterSpacing) / radius;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
