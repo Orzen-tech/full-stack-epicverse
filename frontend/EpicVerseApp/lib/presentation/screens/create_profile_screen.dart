@@ -29,6 +29,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _inviteController = TextEditingController();
 
+  bool _obscurePassword = true;
   bool _isInviteValid = false;
   String? _inviteFeedback;
   bool _isLoading = false;
@@ -255,7 +256,21 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                         _buildTextField(_emailController, 'your@email.com', Icons.mail_outline, type: TextInputType.emailAddress),
                         const SizedBox(height: 20),
                         _buildFieldLabel('PASSWORD'),
-                        _buildTextField(_passwordController, '******', Icons.lock_outline, obscure: true),
+                        TextFormField(
+                          controller: _passwordController,
+                          obscureText: _obscurePassword,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: _buildDecoration('******', Icons.lock_outline).copyWith(
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _obscurePassword ? Icons.visibility_off : Icons.visibility,
+                                color: Colors.white54,
+                              ),
+                              onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                            ),
+                          ),
+                          validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+                        ),
                         const SizedBox(height: 20),
                         _buildFieldLabel('INVITE CODE'),
                         _buildTextField(_inviteController, 'XXXXXX', Icons.vpn_key_outlined, prefix: 'EPIC-'),

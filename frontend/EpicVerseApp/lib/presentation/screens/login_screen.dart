@@ -29,6 +29,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _obscurePassword = true;
   final Dio _dio = Dio();
 
   @override
@@ -290,9 +291,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         _buildFieldLabel('PASSWORD'),
                         TextFormField(
                           controller: _passwordController,
-                          obscureText: true,
+                          obscureText: _obscurePassword,
                           style: const TextStyle(color: Colors.white),
-                          decoration: _buildInputDecoration('••••••••', Icons.lock_outline),
+                          decoration: _buildInputDecoration('••••••••', Icons.lock_outline).copyWith(
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _obscurePassword ? Icons.visibility_off : Icons.visibility,
+                                color: AppColors.textMuted,
+                              ),
+                              onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                            ),
+                          ),
                           validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
                         ),
                         
