@@ -27,6 +27,7 @@ WHERE cc.character_card_number = $1
 LIMIT 1
 """
 
+
 SEMANTIC_SEARCH_SQL = """
 SELECT
     cc.id,
@@ -535,11 +536,24 @@ async def semantic_search_database(query: str, limit: int = 3) -> str:
     )
 
 
-async def query_postgres_database(mode: str, character: str, karma: str) -> str:
+# Valid character card numbers per mode — sourced from Excel data files.
+# Any character card NOT in this set for the selected mode triggers the "wrong mode" response.
+VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
+    "Mode 1": {1, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24},
+    "Mode 2": {1, 2, 3, 5, 6, 8, 9, 10, 19, 24},
+    "Mode 3": {1, 2, 3, 5, 11, 12, 15, 23},
+    "Mode 4": {1, 2, 3, 4, 15, 17, 18, 21},
+    "Mode 5": {2, 4, 11, 13, 14, 18, 20, 21},
+    "Mode 6": {1, 3, 4, 11, 13, 14, 18, 20, 21, 22},
+    "Mode 7": {1, 2, 3, 4, 5, 6, 13},
+}
+
+
+async def query_postgres_database(mode: str, character: str, attribute: str) -> str:
     try:
         c_num = int(character)
-        k_num = int(karma)
-        
+        k_num = int(attribute)
+
         # LOGIC RULE: Both numbers are character cards (1 to 24)
         if 1 <= c_num <= 24 and 1 <= k_num <= 24:
             return json.dumps({
@@ -547,7 +561,20 @@ async def query_postgres_database(mode: str, character: str, karma: str) -> str:
                 "final_segment": "Both numbers are character cards, they are not a combo.",
                 "revised_scholar_reason": "In the game rules, a combo must consist of one character card (1-24) and one attribute card (25+). Two character cards cannot form a combination."
             })
-            
+
+        # LOGIC RULE: Character card not present in this mode at all
+        # Normalize so c_num is always the character card (1–24)
+        char_card = c_num if 1 <= c_num <= 24 else k_num
+        mode_key = mode.strip()
+        valid_chars = VALID_CHARACTERS_PER_MODE.get(mode_key)
+        if valid_chars is not None and char_card not in valid_chars:
+            return json.dumps({
+                "status": "Invalid",
+                "character_not_in_mode": True,
+                "final_segment": "Character card not present in this mode.",
+                "revised_scholar_reason": "This character has no role in the selected mode."
+            })
+
         exact = await get_segment_exact(c_num, k_num, mode)
     except (TypeError, ValueError):
         exact = None

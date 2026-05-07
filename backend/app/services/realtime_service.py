@@ -120,6 +120,133 @@ def _log_sep(_uid: str, label: str = "") -> None:
     print(f"  {bar} {label}", flush=True)
 
 
+# ── Multilingual number normalizer ────────────────────────────────────────────
+
+_NUMBER_WORDS: dict[str, int] = {
+    # ── English ──
+    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,
+    "eight":8,"nine":9,"ten":10,"eleven":11,"twelve":12,"thirteen":13,
+    "fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,
+    "nineteen":19,"twenty":20,"twenty one":21,"twenty-one":21,"twentyone":21,
+    "twenty two":22,"twenty-two":22,"twentytwo":22,"twenty three":23,
+    "twenty-three":23,"twentythree":23,"twenty four":24,"twenty-four":24,
+    "twentyfour":24,"twenty five":25,"twenty-five":25,"twentyfive":25,
+    "twenty six":26,"twenty-six":26,"twentysix":26,"twenty seven":27,
+    "twenty-seven":27,"twentyseven":27,"twenty eight":28,"twenty-eight":28,
+    "twentyeight":28,"twenty nine":29,"twenty-nine":29,"twentynine":29,
+    "thirty":30,"thirty one":31,"thirty-one":31,"thirty two":32,"thirty-two":32,
+    "thirty three":33,"thirty-three":33,"thirty four":34,"thirty-four":34,
+    "thirty five":35,"thirty-five":35,"thirty six":36,"thirty-six":36,
+    "thirty seven":37,"thirty-seven":37,"thirty eight":38,"thirty-eight":38,
+    "thirty nine":39,"thirty-nine":39,"forty":40,"forty one":41,"forty-one":41,
+    "forty two":42,"forty-two":42,"forty three":43,"forty-three":43,
+    "forty four":44,"forty-four":44,"forty five":45,"forty-five":45,
+    "forty six":46,"forty-six":46,"forty seven":47,"forty-seven":47,
+    "forty eight":48,"forty-eight":48,"forty nine":49,"forty-nine":49,
+    "fifty":50,
+    # English ordinals
+    "first":1,"second":2,"third":3,"fourth":4,"fifth":5,"sixth":6,"seventh":7,
+    "eighth":8,"ninth":9,"tenth":10,"eleventh":11,"twelfth":12,
+    # ── Tamil ──
+    "ஒன்று":1,"ஒண்ணு":1,"ஒன்னு":1,"ஒன்":1,
+    "இரண்டு":2,"ரெண்டு":2,"இரண்":2,
+    "மூன்று":3,"மூணு":3,"மூன்":3,
+    "நான்கு":4,"நாலு":4,"நான்":4,
+    "ஐந்து":5,"அஞ்சு":5,"ஐந்":5,
+    "ஆறு":6,"ஆற்":6,
+    "ஏழு":7,"ஏழ்":7,
+    "எட்டு":8,"எட்":8,
+    "ஒன்பது":9,"ஒம்பது":9,"ஒன்பத்":9,
+    "பத்து":10,"பத்":10,
+    "பதினொன்று":11,"பதினொண்ணு":11,
+    "பன்னிரண்டு":12,"பன்னெண்டு":12,
+    "பதின்மூன்று":13,"பதிமூணு":13,
+    "பதினான்கு":14,"பதினாலு":14,
+    "பதினைந்து":15,"பதினஞ்சு":15,
+    "பதினாறு":16,"பதினேழு":17,"பதினெட்டு":18,
+    "பத்தொன்பது":19,"பத்தொம்பது":19,
+    "இருபது":20,
+    "இருபத்தொன்று":21,"இருபத்தொண்ணு":21,"இருபத்தொன்னு":21,
+    "இருபத்திரண்டு":22,"இருபத்ரெண்டு":22,
+    "இருபத்திமூன்று":23,"இருபத்திமூணு":23,
+    "இருபத்திநான்கு":24,"இருபத்திநாலு":24,
+    "இருபத்தைந்து":25,"இருபத்தஞ்சு":25,
+    "இருபத்தாறு":26,"இருபத்தேழு":27,"இருபத்தெட்டு":28,
+    "இருபத்தொன்பது":29,"இருபத்தொம்பது":29,
+    "முப்பது":30,
+    "முப்பத்தொன்று":31,"முப்பத்திரண்டு":32,"முப்பத்திமூன்று":33,
+    "முப்பத்திநான்கு":34,"முப்பத்தைந்து":35,"முப்பத்தாறு":36,
+    "முப்பத்தேழு":37,"முப்பத்தெட்டு":38,"முப்பத்தொன்பது":39,
+    "நாற்பது":40,"நாப்பது":40,
+    "ஐம்பது":50,
+    # ── Hindi ──
+    "ek":1,"एक":1,"do":2,"दो":2,"teen":3,"तीन":3,"char":4,"चार":4,
+    "paanch":5,"पाँच":5,"paach":5,"chhah":6,"छह":6,"chha":6,
+    "saat":7,"सात":7,"aath":8,"आठ":8,"nau":9,"नौ":9,"das":10,"दस":10,
+    "gyarah":11,"ग्यारह":11,"barah":12,"बारह":12,"terah":13,"तेरह":13,
+    "chaudah":14,"चौदह":14,"pandrah":15,"पंद्रह":15,"solah":16,"सोलह":16,
+    "satrah":17,"सत्रह":17,"atharah":18,"अठारह":18,"unnees":19,"उन्नीस":19,
+    "bees":20,"बीस":20,"ikkees":21,"इक्कीस":21,"baaees":22,"बाईस":22,
+    "teyees":23,"तेईस":23,"chaubees":24,"चौबीस":24,"pachchees":25,"पच्चीस":25,
+    "chhabees":26,"छब्बीस":26,"sattaees":27,"सत्ताईस":27,
+    "atthaees":28,"अट्ठाईस":28,"untees":29,"उनतीस":29,"tees":30,"तीस":30,
+    # ── Malayalam ──
+    "ഒന്ന്":1,"ഒന്നു":1,"ഒന്":1,"രണ്ട്":2,"രണ്ടു":2,"മൂന്ന്":3,"മൂന്നു":3,
+    "നാല്":4,"നാലു":4,"അഞ്ച്":5,"അഞ്ചു":5,"ആറ്":6,"ആറു":6,
+    "ഏഴ്":7,"ഏഴു":7,"എട്ട്":8,"എട്ടു":8,"ഒൻപത്":9,"ഒൻപതു":9,
+    "പത്ത്":10,"പത്തു":10,"പതിനൊന്ന്":11,"പന്ത്രണ്ട്":12,
+    "പതിമൂന്ന്":13,"പതിനാല്":14,"പതിനഞ്ച്":15,"പതിനാറ്":16,
+    "പതിനേഴ്":17,"പതിനെട്ട്":18,"പത്തൊൻപത്":19,"ഇരുപത്":20,
+    "ഇരുപത്തൊന്ന്":21,"ഇരുപത്തിരണ്ട്":22,"ഇരുപത്തിമൂന്ന്":23,
+    "ഇരുപത്തിനാല്":24,"ഇരുപത്തഞ്ച്":25,"ഇരുപത്താറ്":26,
+    "ഇരുപത്തേഴ്":27,"ഇരുപത്തെട്ട്":28,"ഇരുപത്തൊൻപത്":29,
+    "മുപ്പത്":30,"നാല്പത്":40,"അമ്പത്":50,
+}
+
+
+def _normalize_number(value: str) -> int | None:
+    """Convert spoken/written number in any language to int. Returns None if unrecognisable."""
+    if not value:
+        return None
+    stripped = value.strip()
+
+    # Already an integer string
+    try:
+        return int(stripped)
+    except ValueError:
+        pass
+
+    # Strip common prefix words: "number 3", "card 5", "no. 7"
+    lower = stripped.lower()
+    for prefix in ("number ", "card ", "no. ", "no ", "# ", "#", "num "):
+        if lower.startswith(prefix):
+            rest = lower[len(prefix):].strip()
+            try:
+                return int(rest)
+            except ValueError:
+                if rest in _NUMBER_WORDS:
+                    return _NUMBER_WORDS[rest]
+
+    # Direct word lookup (case-insensitive)
+    if lower in _NUMBER_WORDS:
+        return _NUMBER_WORDS[lower]
+
+    # Unicode script lookup (exact match for non-Latin scripts)
+    if stripped in _NUMBER_WORDS:
+        return _NUMBER_WORDS[stripped]
+
+    # Try word2number library (English compound words like "twenty nine")
+    try:
+        from word2number import w2n  # type: ignore
+        result = w2n.word_to_num(stripped)
+        if isinstance(result, int):
+            return result
+    except Exception:
+        pass
+
+    return None
+
+
 # ── Language detector ─────────────────────────────────────────────────────────
 
 def _detect_language(text: str) -> str:
@@ -141,11 +268,20 @@ _BACKEND_ONLY_TYPES = {"stop_wakeword", "start_wakeword", "ping", "end"}
 SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card combo validation game. You have two response modes only.
 
 ━━━ MODE 1 — COMBO CHECK (user asks if X and Y is a combo) ━━━
-1. Extract the two card numbers from what the user said.
-2. ALWAYS call query_database_for_combo — no exceptions, every single time, even if you think you already know the answer from a previous turn.
-3. Read the "avatar_response" field from the tool result.
-4. Speak ONLY that exact text. Word for word. Nothing added. Nothing removed.
-   - No greeting. No explanation. No punctuation changes. Just the avatar_response value.
+1. Extract the two card numbers from what the user said. The user may say numbers in ANY language or format:
+   - Digits: "1 and 29"
+   - English words: "one and twenty nine"
+   - Tamil: "ஒன்னு மற்றும் இருபத்தொன்பது"
+   - Hindi: "ek aur untees"
+   - Malayalam: "ഒന്ന് ഇരുപത്തൊൻപത്"
+   - Mixed: "one and 29"
+   Always convert to digit strings before calling the tool. Never pass word-form numbers.
+2. ALWAYS call query_database_for_combo — no exceptions, every single time.
+   Pass character and attribute as digit strings only (e.g. character="1", attribute="29").
+3. If the tool result contains "ask_to_repeat": true — the card numbers could not be understood.
+   Respond with ONLY: ask the user to clearly say the two card numbers again. Use the same language the user spoke.
+4. Otherwise read the "avatar_response" field from the tool result.
+   Speak ONLY that exact text. Word for word. Nothing added. Nothing removed.
 
 ━━━ MODE 2 — REASON (user asks "why" or "how" after a combo check) ━━━
 1. Do NOT call the tool again.
@@ -248,7 +384,7 @@ class RealtimeSession:
     async def _setup_session(self):
         _log("SESSION SETUP", self.uid,
              f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
-             f"stt=whisper-1 | silence=600ms | threshold=0.5")
+             f"stt=whisper-1 | silence=400ms | threshold=0.5")
         payload = {
             "type": "session.update",
             "session": {
@@ -266,8 +402,8 @@ class RealtimeSession:
                 "turn_detection": {
                     "type":                "server_vad",
                     "threshold":           0.5,
-                    "prefix_padding_ms":   300,
-                    "silence_duration_ms": 600,
+                    "prefix_padding_ms":   200,
+                    "silence_duration_ms": 400,
                 },
                 "tools": [{
                     "type":        "function",
@@ -278,9 +414,9 @@ class RealtimeSession:
                         "properties": {
                             "mode":      {"type": "string", "description": "Gameplay mode e.g. 'OriginArc (Balakanda)'"},
                             "character": {"type": "string", "description": "Character name or card number"},
-                            "karma":     {"type": "string", "description": "Virtue/karma name or card number"},
+                            "attribute": {"type": "string", "description": "Attribute card number (25+)"},
                         },
-                        "required": ["mode", "character", "karma"],
+                        "required": ["mode", "character", "attribute"],
                     },
                 }],
                 "tool_choice": "auto",
@@ -322,21 +458,50 @@ class RealtimeSession:
 
         ai_mode    = arguments.get("mode", "")
         target_mode = _resolve_db_mode(ai_mode) if ai_mode else self.db_mode
-        char        = arguments.get("character", "?")
-        karma       = arguments.get("karma", "?")
+        char        = str(arguments.get("character", "?"))
+        attribute   = str(arguments.get("attribute", "?"))
 
         _log_sep(self.uid, "DATABASE LOOKUP")
         _log("TOOL CALL RECEIVED",  self.uid,
              f"fn={name} | call_id={call_id[:12]}")
-        _log("TOOL ARGS",           self.uid,
-             f"mode='{target_mode}' | char='{char}' | karma='{karma}'")
+        _log("TOOL ARGS RAW",       self.uid,
+             f"mode='{target_mode}' | char='{char}' | attribute='{attribute}'")
+
+        # Normalise multilingual number words → digits
+        char_int  = _normalize_number(char)
+        attr_int  = _normalize_number(attribute)
+        _log("TOOL ARGS NORM",      self.uid,
+             f"char_norm={char_int} | attr_norm={attr_int}")
+
+        # If either number is unrecognisable, ask the user to repeat
+        if char_int is None or attr_int is None:
+            _log("NUMBER PARSE FAIL", self.uid,
+                 f"could not extract card numbers from char='{char}' attribute='{attribute}' — asking repeat")
+            unclear = json.dumps({"ask_to_repeat": True})
+            try:
+                await self.openai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type":    "function_call_output",
+                        "call_id": call_id,
+                        "output":  unclear,
+                    },
+                }))
+                await self.openai_ws.send(json.dumps({"type": "response.create"}))
+            except Exception as e:
+                _log("TOOL SEND ERROR", self.uid, f"{e}")
+            return
+
+        char  = str(char_int)
+        attribute = str(attr_int)
+
         _log("DB QUERY START",      self.uid,
-             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND karma='{karma}'")
+             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND attribute='{attribute}'")
 
         self._db_query_start_ts = time.monotonic()
         output_str = ""
         try:
-            result = await query_postgres_database(target_mode, char, karma)
+            result = await query_postgres_database(target_mode, char, attribute)
             elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
 
             # query_postgres_database returns a JSON string — parse to dict
@@ -348,7 +513,7 @@ class RealtimeSession:
                     pass
 
             if isinstance(result, dict):
-                is_error = "error" in result
+                is_error = "error" in result or result.get("character_not_in_mode") is True
                 status = result.get("final_status") or result.get("status", "")
                 if is_error:
                     _log("DB NO MATCH", self.uid,
@@ -468,7 +633,7 @@ class RealtimeSession:
                             # fires, leaving the buffer stuck. Appending silence here
                             # gives VAD the silence window it needs.
                             if self._audio_appended_since_commit:
-                                silence_16k = bytes(int(16000 * 0.75 * 2))  # 750ms PCM16 @ 16kHz
+                                silence_16k = bytes(int(16000 * 0.50 * 2))  # 500ms PCM16 @ 16kHz
                                 silence_24k = self._resample_16k_to_24k(silence_16k)
                                 try:
                                     await self.openai_ws.send(json.dumps({
@@ -476,7 +641,7 @@ class RealtimeSession:
                                         "audio": base64.b64encode(silence_24k).decode(),
                                     }))
                                     _log("SILENCE PADDING", self.uid,
-                                         "750ms silence appended → VAD will detect end-of-speech")
+                                         "500ms silence appended → VAD will detect end-of-speech")
                                 except Exception as _e:
                                     _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
                             self._mic_streaming   = False

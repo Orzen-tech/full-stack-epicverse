@@ -18,7 +18,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
   late AnimationController _entryController;
   late AnimationController _floatController;
   late AnimationController _glowController;
-  
+
   late Animation<double> _scaleAnimation;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
@@ -28,8 +28,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
   @override
   void initState() {
     super.initState();
-    
-    // 1. Entry Animation (Launch)
+
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -56,7 +55,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
       ),
     );
 
-    // 2. Continuous Floating Animation
     _floatController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 4),
@@ -69,7 +67,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
       ),
     );
 
-    // 3. Continuous Glow Pulse Animation
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
@@ -104,7 +101,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
         child: SafeArea(
           child: Column(
             children: [
-              // Animated AppBar with Staggered Fade & Slide
               FadeTransition(
                 opacity: _fadeAnimation,
                 child: SlideTransition(
@@ -112,7 +108,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                   child: _buildAppBar(context, ref, displayName),
                 ),
               ),
-              
               Expanded(
                 child: Center(
                   child: AnimatedBuilder(
@@ -124,52 +119,68 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                           scale: _scaleAnimation,
                           child: FadeTransition(
                             opacity: _fadeAnimation,
-                            child: GestureDetector(
-                              onTap: () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(builder: (_) => const ModeSelectionScreen()),
-                                );
-                              },
-                              child: Container(
-                                width: 220,
-                                height: 220,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  gradient: const LinearGradient(
-                                    colors: [Color(0xFF432571), Color(0xFF2C1349)],
-                                    begin: Alignment.topLeft,
-                                    end: Alignment.bottomRight,
-                                  ),
-                                  border: Border.all(
-                                    color: AppColors.primaryGold.withOpacity(0.6 * _glowAnimation.value.clamp(0.0, 1.0)), 
-                                    width: 3,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.7),
-                                      blurRadius: 30,
-                                      spreadRadius: 10,
-                                      offset: const Offset(0, 15),
-                                    ),
-                                    BoxShadow(
-                                      color: AppColors.primaryGold.withOpacity(0.25 * _glowAnimation.value),
-                                      blurRadius: 50 * _glowAnimation.value,
-                                      spreadRadius: 2,
-                                    ),
-                                  ],
-                                ),
-                                padding: const EdgeInsets.all(25),
-                                child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Center(
                                   child: Image.asset(
-                                    'assets/images/button_png.webp',
-                                    width: 170,
+                                    'assets/images/enter_header.webp',
+                                    width: 360,
                                     fit: BoxFit.contain,
                                     errorBuilder: (context, error, stackTrace) {
-                                      return const Icon(Icons.play_circle_fill, color: AppColors.primaryGold, size: 80);
+                                      return const SizedBox.shrink();
                                     },
                                   ),
                                 ),
-                              ),
+                                const SizedBox(height: 6),
+                                GestureDetector(
+                                  onTap: () {
+                                    Navigator.of(context).push(
+                                      MaterialPageRoute(builder: (_) => const ModeSelectionScreen()),
+                                    );
+                                  },
+                                  child: Container(
+                                    width: 220,
+                                    height: 220,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      gradient: const LinearGradient(
+                                        colors: [Color(0xFF432571), Color(0xFF2C1349)],
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                      ),
+                                      border: Border.all(
+                                        color: AppColors.primaryGold.withValues(alpha: 0.6 * _glowAnimation.value.clamp(0.0, 1.0)),
+                                        width: 3,
+                                      ),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withValues(alpha: 0.7),
+                                          blurRadius: 30,
+                                          spreadRadius: 10,
+                                          offset: const Offset(0, 15),
+                                        ),
+                                        BoxShadow(
+                                          color: AppColors.primaryGold.withValues(alpha: 0.25 * _glowAnimation.value),
+                                          blurRadius: 50 * _glowAnimation.value,
+                                          spreadRadius: 2,
+                                        ),
+                                      ],
+                                    ),
+                                    padding: const EdgeInsets.all(25),
+                                    child: Center(
+                                      child: Image.asset(
+                                        'assets/images/button_png.webp',
+                                        width: 170,
+                                        fit: BoxFit.contain,
+                                        errorBuilder: (context, error, stackTrace) {
+                                          return const Icon(Icons.play_circle_fill, color: AppColors.primaryGold, size: 80);
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -178,8 +189,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                   ),
                 ),
               ),
-              
-              const SizedBox(height: 60), 
+              const SizedBox(height: 60),
             ],
           ),
         ),
@@ -200,19 +210,19 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
               width: 48,
               height: 48,
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.1),
+                color: Colors.white.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white.withOpacity(0.4), width: 1.5),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.4), width: 1.5),
                 image: user?.profilePicture != null
-                  ? DecorationImage(
-                      image: MemoryImage(base64Decode(user!.profilePicture!)),
-                      fit: BoxFit.cover,
-                    )
-                  : null,
+                    ? DecorationImage(
+                        image: MemoryImage(base64Decode(user!.profilePicture!)),
+                        fit: BoxFit.cover,
+                      )
+                    : null,
               ),
               child: user?.profilePicture == null
-                ? const Icon(Icons.person_outline_rounded, color: Colors.white, size: 26)
-                : null,
+                  ? const Icon(Icons.person_outline_rounded, color: Colors.white, size: 26)
+                  : null,
             ),
           ),
           const SizedBox(width: 16),
@@ -237,5 +247,4 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
       ),
     );
   }
-
 }
