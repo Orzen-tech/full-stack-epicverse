@@ -549,10 +549,10 @@ VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
 }
 
 
-async def query_postgres_database(mode: str, character: str, karma: str) -> str:
+async def query_postgres_database(mode: str, character: str, attribute: str) -> str:
     try:
         c_num = int(character)
-        k_num = int(karma)
+        k_num = int(attribute)
 
         # LOGIC RULE: Both numbers are character cards (1 to 24)
         if 1 <= c_num <= 24 and 1 <= k_num <= 24:

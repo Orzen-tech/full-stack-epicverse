@@ -277,7 +277,7 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
    - Mixed: "one and 29"
    Always convert to digit strings before calling the tool. Never pass word-form numbers.
 2. ALWAYS call query_database_for_combo — no exceptions, every single time.
-   Pass character and karma as digit strings only (e.g. character="1", karma="29").
+   Pass character and attribute as digit strings only (e.g. character="1", attribute="29").
 3. If the tool result contains "ask_to_repeat": true — the card numbers could not be understood.
    Respond with ONLY: ask the user to clearly say the two card numbers again. Use the same language the user spoke.
 4. Otherwise read the "avatar_response" field from the tool result.
@@ -414,9 +414,9 @@ class RealtimeSession:
                         "properties": {
                             "mode":      {"type": "string", "description": "Gameplay mode e.g. 'OriginArc (Balakanda)'"},
                             "character": {"type": "string", "description": "Character name or card number"},
-                            "karma":     {"type": "string", "description": "Virtue/karma name or card number"},
+                            "attribute": {"type": "string", "description": "Attribute card number (25+)"},
                         },
-                        "required": ["mode", "character", "karma"],
+                        "required": ["mode", "character", "attribute"],
                     },
                 }],
                 "tool_choice": "auto",
@@ -459,24 +459,24 @@ class RealtimeSession:
         ai_mode    = arguments.get("mode", "")
         target_mode = _resolve_db_mode(ai_mode) if ai_mode else self.db_mode
         char        = str(arguments.get("character", "?"))
-        karma       = str(arguments.get("karma", "?"))
+        attribute   = str(arguments.get("attribute", "?"))
 
         _log_sep(self.uid, "DATABASE LOOKUP")
         _log("TOOL CALL RECEIVED",  self.uid,
              f"fn={name} | call_id={call_id[:12]}")
         _log("TOOL ARGS RAW",       self.uid,
-             f"mode='{target_mode}' | char='{char}' | karma='{karma}'")
+             f"mode='{target_mode}' | char='{char}' | attribute='{attribute}'")
 
         # Normalise multilingual number words → digits
         char_int  = _normalize_number(char)
-        karma_int = _normalize_number(karma)
+        attr_int  = _normalize_number(attribute)
         _log("TOOL ARGS NORM",      self.uid,
-             f"char_norm={char_int} | karma_norm={karma_int}")
+             f"char_norm={char_int} | attr_norm={attr_int}")
 
         # If either number is unrecognisable, ask the user to repeat
-        if char_int is None or karma_int is None:
+        if char_int is None or attr_int is None:
             _log("NUMBER PARSE FAIL", self.uid,
-                 f"could not extract card numbers from char='{char}' karma='{karma}' — asking repeat")
+                 f"could not extract card numbers from char='{char}' attribute='{attribute}' — asking repeat")
             unclear = json.dumps({"ask_to_repeat": True})
             try:
                 await self.openai_ws.send(json.dumps({
@@ -493,15 +493,15 @@ class RealtimeSession:
             return
 
         char  = str(char_int)
-        karma = str(karma_int)
+        attribute = str(attr_int)
 
         _log("DB QUERY START",      self.uid,
-             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND karma='{karma}'")
+             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND attribute='{attribute}'")
 
         self._db_query_start_ts = time.monotonic()
         output_str = ""
         try:
-            result = await query_postgres_database(target_mode, char, karma)
+            result = await query_postgres_database(target_mode, char, attribute)
             elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
 
             # query_postgres_database returns a JSON string — parse to dict

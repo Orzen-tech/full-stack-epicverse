@@ -110,9 +110,9 @@ NEVER switch languages unless the user switches first."""
                     "properties": {
                         "mode": {"type": "string", "description": "The gameplay_mode (e.g. 'Mode 1', 'Mode 2')."},
                         "character": {"type": "string", "description": "The character name or card number ID."},
-                        "karma": {"type": "string", "description": "The virtue/karma name or card number ID."}
+                        "attribute": {"type": "string", "description": "The attribute card number (25+)."}
                     },
-                    "required": ["mode", "character", "karma"]
+                    "required": ["mode", "character", "attribute"]
                 }
             }
         }
@@ -149,7 +149,7 @@ NEVER switch languages unless the user switches first."""
                     db_result = await query_postgres_database(
                         target_mode,
                         args.get('character'),
-                        args.get('karma')
+                        args.get('attribute')
                     )
 
                     tool_msg = {
