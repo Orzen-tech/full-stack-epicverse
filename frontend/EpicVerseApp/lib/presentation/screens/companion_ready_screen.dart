@@ -174,6 +174,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     _waveController.repeat();
     setState(() {
       _isTalking = true;
+      _statusText = "Speaking...";
       _speechVibrationController.repeat(reverse: true);
     });
   }
@@ -235,10 +236,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // --- Core Lifecycle Handlers ---
   void _postInitHandshake() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initWakeWord(); 
-      if (!_isConnected) {
-         _startVoiceTurn(); // Triggers lazy handshake with correct widget.gameMode
-      }
+      await _initWakeWord();
     });
   }
 
@@ -445,7 +443,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     
     debugPrint('[EpicVerse][MIC] Sent {"type":"end"} → awaiting LLM');
     webSocketService.sendMessage('{"type": "end"}');
-    
+    if (mounted) setState(() => _statusText = "Checking rules...");
+
     // Optional: Keep connection alive until AI finishes speaking for smoother UX
     // We will call disconnect() in onPlayerComplete if we want a full lazy cycle.
     
@@ -621,57 +620,44 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                   
                   const Spacer(flex: 2),
                   
-                  const SizedBox(height: 16),
-                  
-                  const Text(
-                    '',
-                    style: TextStyle(
-                      color: AppColors.primaryGold, 
-                      fontSize: 18, 
-                      letterSpacing: 4, 
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  
-                  const SizedBox(height: 12),
-                  
-                  // Connection Indicator Row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _isConnected ? Colors.greenAccent : AppColors.primaryGold.withValues(alpha: 0.3),
-                          boxShadow: [
-                            BoxShadow(
-                              color: (_isConnected ? Colors.greenAccent : AppColors.primaryGold).withValues(alpha: 0.3),
-                              blurRadius: 4,
-                              spreadRadius: 2,
-                            )
+                  const Spacer(),
+
+                    // Connection Indicator Row (near mic button)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: _isConnected ? Colors.greenAccent : AppColors.primaryGold.withValues(alpha: 0.3),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: (_isConnected ? Colors.greenAccent : AppColors.primaryGold).withValues(alpha: 0.3),
+                                    blurRadius: 4,
+                                    spreadRadius: 2,
+                                  )
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _statusText,
+                              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+                            ),
                           ],
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          _statusText,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                  
-                  const Spacer(),
 
                     // Repositioned Mic Button with Pentagon Background
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 40.0, right: 30.0),
+                      padding: const EdgeInsets.only(bottom: 40.0),
                       child: Align(
-                        alignment: Alignment.bottomRight,
+                        alignment: Alignment.bottomCenter,
                         child: GestureDetector(
                           onTap: () => _isRecording ? _stopRecording() : _startVoiceTurn(10),
                           onLongPressStart: (_) => _startVoiceTurn(60),
@@ -686,6 +672,14 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                                 child: Stack(
                                   alignment: Alignment.center,
                                   children: [
+                                    // Pentagon outer glow
+                                    SizedBox(
+                                      width: 96,
+                                      height: 96,
+                                      child: CustomPaint(
+                                        painter: PentagonGlowPainter(isActive: _isRecording),
+                                      ),
+                                    ),
                                     // Pentagon Background Component
                                     ClipPath(
                                       clipper: PentagonClipper(),
@@ -907,4 +901,46 @@ class PentagonClipper extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(CustomClipper<Path> oldClipper) => false;
+}
+
+class PentagonGlowPainter extends CustomPainter {
+  final bool isActive;
+  PentagonGlowPainter({required this.isActive});
+
+  Path _buildPath(Size size) {
+    final path = Path();
+    final radius = size.width / 2 * (80 / 96);
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    const step = (2 * math.pi) / 5;
+    path.moveTo(cx + radius * math.cos(-math.pi / 2),
+                cy + radius * math.sin(-math.pi / 2));
+    for (int i = 1; i <= 5; i++) {
+      path.lineTo(cx + radius * math.cos(-math.pi / 2 + i * step),
+                  cy + radius * math.sin(-math.pi / 2 + i * step));
+    }
+    path.close();
+    return path;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = _buildPath(size);
+
+    // Outer blur glow
+    canvas.drawPath(path, Paint()
+      ..color = AppColors.primaryGold.withValues(alpha: isActive ? 0.9 : 0.35)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = isActive ? 3.0 : 1.5
+      ..maskFilter = MaskFilter.blur(BlurStyle.outer, isActive ? 14 : 5));
+
+    // Crisp border line
+    canvas.drawPath(path, Paint()
+      ..color = AppColors.primaryGold.withValues(alpha: isActive ? 1.0 : 0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = isActive ? 2.0 : 1.0);
+  }
+
+  @override
+  bool shouldRepaint(PentagonGlowPainter old) => old.isActive != isActive;
 }

@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/app_colors.dart';
@@ -69,10 +70,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
 
     _glowController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 3),
+      duration: const Duration(milliseconds: 2200),
     )..repeat(reverse: true);
 
-    _glowAnimation = Tween<double>(begin: 1.0, end: 1.4).animate(
+    _glowAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _glowController,
         curve: Curves.easeInOut,
@@ -132,53 +133,63 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
                                     },
                                   ),
                                 ),
-                                const SizedBox(height: 6),
-                                GestureDetector(
-                                  onTap: () {
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute(builder: (_) => const ModeSelectionScreen()),
-                                    );
-                                  },
-                                  child: Container(
-                                    width: 220,
-                                    height: 220,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      gradient: const LinearGradient(
-                                        colors: [Color(0xFF432571), Color(0xFF2C1349)],
-                                        begin: Alignment.topLeft,
-                                        end: Alignment.bottomRight,
-                                      ),
-                                      border: Border.all(
-                                        color: AppColors.primaryGold.withValues(alpha: 0.6 * _glowAnimation.value.clamp(0.0, 1.0)),
-                                        width: 3,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(alpha: 0.7),
-                                          blurRadius: 30,
-                                          spreadRadius: 10,
-                                          offset: const Offset(0, 15),
+                                Stack(
+                                  alignment: Alignment.center,
+                                  children: [
+                                    // Sun rays CustomPaint
+                                    SizedBox(
+                                      width: 600,
+                                      height: 240,
+                                      child: CustomPaint(
+                                        painter: SunRaysPainter(
+                                          animationValue: _glowAnimation.value,
                                         ),
-                                        BoxShadow(
-                                          color: AppColors.primaryGold.withValues(alpha: 0.25 * _glowAnimation.value),
-                                          blurRadius: 50 * _glowAnimation.value,
-                                          spreadRadius: 2,
-                                        ),
-                                      ],
-                                    ),
-                                    padding: const EdgeInsets.all(25),
-                                    child: Center(
-                                      child: Image.asset(
-                                        'assets/images/button_png.webp',
-                                        width: 170,
-                                        fit: BoxFit.contain,
-                                        errorBuilder: (context, error, stackTrace) {
-                                          return const Icon(Icons.play_circle_fill, color: AppColors.primaryGold, size: 80);
-                                        },
                                       ),
                                     ),
-                                  ),
+                                    // Main button
+                                    GestureDetector(
+                                      onTap: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(builder: (_) => const ModeSelectionScreen()),
+                                        );
+                                      },
+                                      child: Container(
+                                        width: 220,
+                                        height: 220,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          gradient: const LinearGradient(
+                                            colors: [Color(0xFF432571), Color(0xFF2C1349)],
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                          ),
+                                          border: Border.all(
+                                            color: AppColors.primaryGold.withValues(alpha: 0.25 + 0.20 * _glowAnimation.value),
+                                            width: 3.0,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.7),
+                                              blurRadius: 30,
+                                              spreadRadius: 10,
+                                              offset: const Offset(0, 15),
+                                            ),
+                                          ],
+                                        ),
+                                        padding: const EdgeInsets.all(25),
+                                        child: Center(
+                                          child: Image.asset(
+                                            'assets/images/button_png.webp',
+                                            width: 170,
+                                            fit: BoxFit.contain,
+                                            errorBuilder: (context, error, stackTrace) {
+                                              return const Icon(Icons.play_circle_fill, color: AppColors.primaryGold, size: 80);
+                                            },
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
@@ -247,4 +258,138 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
       ),
     );
   }
+}
+
+class _Ray {
+  final double angle;
+  final double length;
+  final double halfSpan;
+  const _Ray({required this.angle, required this.length, required this.halfSpan});
+}
+
+class SunRaysPainter extends CustomPainter {
+  final double animationValue;
+
+  static const double _btnRadius = 110.0;
+
+  // Three layers: wide bloom beams, medium rays, fine hair streaks
+  static final List<_Ray> _wideRays  = _gen(10, 0.05, 0.13, 30, 40, seed: 1);
+  static final List<_Ray> _midRays   = _gen(22, 0.01, 0.05, 20, 35, seed: 2);
+  static final List<_Ray> _hairRays  = _gen(40, 0.003, 0.012, 12, 28, seed: 3);
+
+  SunRaysPainter({required this.animationValue});
+
+  static List<_Ray> _gen(int n, double spanMin, double spanMax,
+      double lenBase, double lenVar, {required int seed}) {
+    final rng = math.Random(seed);
+    return List.generate(n, (i) {
+      // Heavy jitter so rays cluster and gap naturally
+      final angle = (i / n) * 2 * math.pi + (rng.nextDouble() - 0.5) * 0.80;
+      // Exponential-ish length variation: some very short, a few very long
+      final t = rng.nextDouble();
+      final length = lenBase + (t * t) * lenVar;
+      // Span varies a lot for messy feel
+      final halfSpan = spanMin + rng.nextDouble() * rng.nextDouble() * (spanMax - spanMin);
+      return _Ray(angle: angle, length: length, halfSpan: halfSpan);
+    });
+  }
+
+  // Draws one wedge sub-pass with a given span multiplier and alpha factor
+  void _drawWedge(Canvas canvas, Offset center, double totalLen,
+      double angle, double halfSpan, double edgeFrac, double peakFrac,
+      double fadeFrac, double alphaFactor, Color nearColor, Color farColor) {
+    final lA  = angle - halfSpan;
+    final rA  = angle + halfSpan;
+    final lPt = Offset(center.dx + totalLen * math.cos(lA),
+                       center.dy + totalLen * math.sin(lA));
+    final rPt = Offset(center.dx + totalLen * math.cos(rA),
+                       center.dy + totalLen * math.sin(rA));
+
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx, center.dy)
+        ..lineTo(lPt.dx, lPt.dy)
+        ..lineTo(rPt.dx, rPt.dy)
+        ..close(),
+      Paint()
+        ..shader = RadialGradient(
+          colors: [
+            Colors.transparent,
+            Colors.transparent,
+            nearColor.withValues(alpha: alphaFactor),
+            farColor.withValues(alpha: alphaFactor * 0.40),
+            Colors.transparent,
+          ],
+          stops: [0.0, edgeFrac, peakFrac, fadeFrac, 1.0],
+        ).createShader(Rect.fromCircle(center: center, radius: totalLen)),
+    );
+  }
+
+  void _drawLayer(Canvas canvas, Offset center, List<_Ray> rays,
+      double extScale, double peakAlpha, Color nearColor, Color farColor) {
+    for (final ray in rays) {
+      final totalLen = _btnRadius + ray.length * extScale;
+      final edgeFrac = (_btnRadius / totalLen).clamp(0.0, 0.90);
+      final peakFrac = (edgeFrac + 0.05).clamp(0.0, 1.0);
+      final fadeFrac = (edgeFrac + 0.55).clamp(0.0, 1.0);
+
+      // Core beam — full alpha, exact span
+      _drawWedge(canvas, center, totalLen, ray.angle, ray.halfSpan,
+          edgeFrac, peakFrac, fadeFrac, peakAlpha, nearColor, farColor);
+
+      // Soft inner feather — 1.4× span, 45% alpha (creates gradient edge)
+      _drawWedge(canvas, center, totalLen, ray.angle, ray.halfSpan * 1.4,
+          edgeFrac, peakFrac, fadeFrac, peakAlpha * 0.45, nearColor, farColor);
+
+      // Wide outer feather — 2.0× span, 18% alpha (soft bleed at sides)
+      _drawWedge(canvas, center, totalLen, ray.angle, ray.halfSpan * 2.0,
+          edgeFrac, peakFrac, fadeFrac, peakAlpha * 0.18, nearColor, farColor);
+    }
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final b   = 0.38 + 0.62 * animationValue;  // brightness 0.38 → 1.0
+    final ext = 0.48 + 0.12 * animationValue;  // length     48%  → 60%
+
+    // Layer 1 — wide soft bloom beams (deep amber base)
+    _drawLayer(canvas, center, _wideRays, ext * 0.85,
+        0.18 * b, const Color(0xFFFFCC00), const Color(0xFFFF8800));
+
+    // Layer 2 — medium golden rays
+    _drawLayer(canvas, center, _midRays, ext,
+        0.22 * b, const Color(0xFFFFE040), const Color(0xFFFFAA00));
+
+    // Layer 3 — fine bright hair streaks
+    _drawLayer(canvas, center, _hairRays, ext * 1.15,
+        0.28 * b, const Color(0xFFFFF176), const Color(0xFFFFCC00));
+
+    // Volumetric corona ring at the button edge — 5 passes for intense brightness
+    for (int i = 0; i < 5; i++) {
+      final r = _btnRadius + 1.0 + i * 6.0;
+      canvas.drawCircle(center, r, Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 10.0 - i * 1.2
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 4.0 + i * 5.0)
+        ..color = const Color(0xFFFFEE00).withValues(alpha: (0.45 - i * 0.07).clamp(0.0, 1.0) * b));
+    }
+
+    // Extra tight hard rim at the circle edge
+    canvas.drawCircle(center, _btnRadius, Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5
+      ..color = const Color(0xFFFFFFAA).withValues(alpha: 0.35 * b));
+
+    // Soft wide outer bloom
+    canvas.drawCircle(center, _btnRadius + 18, Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 28
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18)
+      ..color = const Color(0xFFFFCC00).withValues(alpha: 0.18 * b));
+
+  }
+
+  @override
+  bool shouldRepaint(SunRaysPainter old) => old.animationValue != animationValue;
 }
