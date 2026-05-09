@@ -399,8 +399,8 @@ class RealtimeSession:
 
     async def _setup_session(self):
         _log("SESSION SETUP", self.uid,
-             f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
-             f"stt=whisper-1 | silence=400ms | threshold=0.5")
+             f"mode={self.db_mode} | voice=alloy | vad=manual | "
+             f"stt=whisper-1")
         payload = {
             "type": "session.update",
             "session": {
@@ -415,12 +415,7 @@ class RealtimeSession:
                 "input_audio_format":  "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type":                "server_vad",
-                    "threshold":           0.5,
-                    "prefix_padding_ms":   200,
-                    "silence_duration_ms": 400,
-                },
+                "turn_detection": None,
                 "tools": [{
                     "type":        "function",
                     "name":        "query_database_for_combo",
@@ -651,42 +646,28 @@ class RealtimeSession:
                             _log("MIC BUTTON OFF", self.uid,
                                  f"user closed mic | chunks={self._audio_chunks_sent} "
                                  f"bytes={round(self._audio_bytes_sent/1024,1)}KB")
-                            # If TTS is still playing when mic closes, the buffer only
-                            # contains speaker echo — clear it instead of committing.
                             in_cooldown = (
                                 self._tts_done_ts is not None
                                 and (time.monotonic() - self._tts_done_ts) < _TTS_ECHO_COOLDOWN
                             )
                             if self._tts_streaming or in_cooldown:
+                                # TTS is playing — buffer contains only speaker echo, discard it
                                 _log("ECHO CLEAR",    self.uid,
-                                     "mic closed during TTS — clearing echo buffer")
+                                     "mic closed during TTS — clearing echo buffer, no commit")
                                 try:
                                     await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
                                 except Exception:
                                     pass
-                                self._audio_appended_since_commit = False
-                                self._mic_streaming   = False
-                                self._audio_chunks_sent = 0
-                                self._audio_bytes_sent  = 0
-                                continue
-                            _log("AUDIO STREAM END", self.uid,
-                                 "mic closed — appending silence to trigger VAD commit")
-                            # server_vad needs 600ms of silence to auto-commit the
-                            # buffer. When the mic closes, audio stops and VAD never
-                            # fires, leaving the buffer stuck. Appending silence here
-                            # gives VAD the silence window it needs.
-                            if self._audio_appended_since_commit:
-                                silence_16k = bytes(int(16000 * 0.50 * 2))  # 500ms PCM16 @ 16kHz
-                                silence_24k = self._resample_16k_to_24k(silence_16k)
+                            elif self._audio_appended_since_commit:
+                                # TTS is silent — commit the real user audio and trigger response
                                 try:
-                                    await self.openai_ws.send(json.dumps({
-                                        "type":  "input_audio_buffer.append",
-                                        "audio": base64.b64encode(silence_24k).decode(),
-                                    }))
-                                    _log("SILENCE PADDING", self.uid,
-                                         "500ms silence appended → VAD will detect end-of-speech")
+                                    await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                                    await self.openai_ws.send(json.dumps({"type": "response.create"}))
+                                    _log("AUDIO COMMITTED", self.uid,
+                                         "manual commit → response.create sent")
                                 except Exception as _e:
-                                    _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
+                                    _log("COMMIT ERR", self.uid, f"{type(_e).__name__}: {_e}")
+                            self._audio_appended_since_commit = False
                             self._mic_streaming   = False
                             self._audio_chunks_sent = 0
                             self._audio_bytes_sent  = 0
@@ -912,15 +893,6 @@ class RealtimeSession:
                             self._tts_chunk_count = 0
                             _log("TTS AUDIO START",  self.uid,
                                  "OpenAI audio stream → forwarding PCM24k to Flutter")
-                            # Clear any mic audio already buffered before TTS started.
-                            # This prevents audio captured during the LLM thinking phase
-                            # from being transcribed as user input.
-                            try:
-                                await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
-                                _log("ECHO PREEMPT",     self.uid,
-                                     "cleared input buffer at TTS start — discarding any pre-TTS mic capture")
-                            except Exception:
-                                pass
                         self._tts_chunk_count += 1
                         try:
                             await self.client_ws.send_bytes(base64.b64decode(audio_b64))
