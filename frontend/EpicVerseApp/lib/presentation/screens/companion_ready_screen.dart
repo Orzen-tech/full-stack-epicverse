@@ -170,6 +170,18 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   void _startTalking() {
     if (!mounted || _isTalking) return;
     debugPrint('[EpicVerse][AI] AI started talking');
+
+    // Immediately kill the mic when AI starts speaking — no "end" message sent
+    // so the backend doesn't commit a buffer full of echo audio.
+    if (_isRecording) {
+      _recordingTimer?.cancel();
+      _micSubscription?.cancel();
+      _micSubscription = null;
+      _audioRecorder.stop();
+      setState(() => _isRecording = false);
+      debugPrint('[EpicVerse][MIC] Mic force-stopped — AI speaking');
+    }
+
     _waveController.duration = const Duration(milliseconds: 800); // Fast!
     _waveController.repeat();
     setState(() {
