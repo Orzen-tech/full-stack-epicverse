@@ -600,6 +600,15 @@ class RealtimeSession:
                 if "bytes" in message:
                     raw = message["bytes"]
 
+                    # Drop mic audio while AI is speaking — prevents mic from
+                    # capturing speaker output and feeding it back as user input.
+                    in_cooldown = (
+                        self._tts_done_ts is not None
+                        and (time.monotonic() - self._tts_done_ts) < _TTS_ECHO_COOLDOWN
+                    )
+                    if self._tts_streaming or in_cooldown:
+                        continue
+
                     if not self._mic_streaming:
                         self._mic_streaming = True
                         self._turn_count   += 1
@@ -642,6 +651,24 @@ class RealtimeSession:
                             _log("MIC BUTTON OFF", self.uid,
                                  f"user closed mic | chunks={self._audio_chunks_sent} "
                                  f"bytes={round(self._audio_bytes_sent/1024,1)}KB")
+                            # If TTS is still playing when mic closes, the buffer only
+                            # contains speaker echo — clear it instead of committing.
+                            in_cooldown = (
+                                self._tts_done_ts is not None
+                                and (time.monotonic() - self._tts_done_ts) < _TTS_ECHO_COOLDOWN
+                            )
+                            if self._tts_streaming or in_cooldown:
+                                _log("ECHO CLEAR",    self.uid,
+                                     "mic closed during TTS — clearing echo buffer")
+                                try:
+                                    await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                                except Exception:
+                                    pass
+                                self._audio_appended_since_commit = False
+                                self._mic_streaming   = False
+                                self._audio_chunks_sent = 0
+                                self._audio_bytes_sent  = 0
+                                continue
                             _log("AUDIO STREAM END", self.uid,
                                  "mic closed — appending silence to trigger VAD commit")
                             # server_vad needs 600ms of silence to auto-commit the
