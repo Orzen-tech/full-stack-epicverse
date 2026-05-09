@@ -19,6 +19,9 @@ OPENAI_REALTIME_URL = (
     f"wss://api.openai.com/v1/realtime?model={settings.OPENAI_REALTIME_MODEL}"
 )
 
+# Seconds to suppress VAD after TTS finishes — prevents mic from picking up speaker echo
+_TTS_ECHO_COOLDOWN = 1.5
+
 # ── Combo response message pools ──────────────────────────────────────────────
 
 import random as _random
@@ -352,6 +355,7 @@ class RealtimeSession:
         self._db_query_start_ts: Optional[float] = None
         self._tts_chunk_count           = 0       # audio chunks streamed to client
         self._partial_transcript        = ""      # accumulated STT partial
+        self._tts_done_ts: Optional[float] = None  # when TTS last finished (echo cooldown)
 
     # ─────────────────────────────────────────────────────────────────────────
     # OpenAI connection
@@ -732,6 +736,20 @@ class RealtimeSession:
 
                 elif etype == "input_audio_buffer.speech_started":
                     offset_ms = event.get("audio_start_ms", "?")
+                    # Suppress echo: if TTS is still playing or finished within cooldown,
+                    # the mic is picking up the speaker — clear the buffer and ignore.
+                    in_cooldown = (
+                        self._tts_done_ts is not None
+                        and (time.monotonic() - self._tts_done_ts) < _TTS_ECHO_COOLDOWN
+                    )
+                    if self._tts_streaming or in_cooldown:
+                        _log("ECHO SUPPRESSED",  self.uid,
+                             f"VAD fired during TTS playback/cooldown — clearing buffer | audio_offset={offset_ms}ms")
+                        try:
+                            await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                        except Exception:
+                            pass
+                        continue
                     _log("VAD SPEECH START",     self.uid,
                          f"voice activity detected | audio_offset={offset_ms}ms")
 
@@ -877,8 +895,9 @@ class RealtimeSession:
                 elif etype == "response.audio.done":
                     if self._tts_streaming:
                         self._tts_streaming = False
+                        self._tts_done_ts   = time.monotonic()
                         _log("TTS AUDIO DONE",   self.uid,
-                             f"audio stream complete | chunks_streamed={self._tts_chunk_count}")
+                             f"audio stream complete | chunks_streamed={self._tts_chunk_count} | echo_cooldown={_TTS_ECHO_COOLDOWN}s")
 
                 elif etype == "response.text.delta":
                     pass  # text-only delta — skip
