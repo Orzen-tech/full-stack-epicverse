@@ -912,6 +912,15 @@ class RealtimeSession:
                             self._tts_chunk_count = 0
                             _log("TTS AUDIO START",  self.uid,
                                  "OpenAI audio stream → forwarding PCM24k to Flutter")
+                            # Clear any mic audio already buffered before TTS started.
+                            # This prevents audio captured during the LLM thinking phase
+                            # from being transcribed as user input.
+                            try:
+                                await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                                _log("ECHO PREEMPT",     self.uid,
+                                     "cleared input buffer at TTS start — discarding any pre-TTS mic capture")
+                            except Exception:
+                                pass
                         self._tts_chunk_count += 1
                         try:
                             await self.client_ws.send_bytes(base64.b64decode(audio_b64))
