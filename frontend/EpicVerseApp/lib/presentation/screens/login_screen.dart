@@ -267,7 +267,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     if (confirmed != true || !mounted) return;
     final email = dialogController.text.trim();
-    dialogController.dispose();
 
     if (email.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
