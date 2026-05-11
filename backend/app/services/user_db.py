@@ -38,6 +38,8 @@ async def init_db():
         # scheduled for permanent deletion 30 days later. A subsequent
         # authenticated sign-in auto-clears this column (grace period).
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY,
@@ -80,15 +82,17 @@ async def save_user(user: UserRecord):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO users (uid, display_name, email, primary_language, profile_picture)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO users (uid, display_name, email, primary_language, profile_picture, invite_code)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (uid)
             DO UPDATE SET
                 display_name = COALESCE(EXCLUDED.display_name, users.display_name),
                 email = COALESCE(EXCLUDED.email, users.email),
                 primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
-                profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture)
-        ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture)
+                profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture),
+                invite_code = COALESCE(users.invite_code, EXCLUDED.invite_code)
+        ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture,
+             user.invite_code.upper() if user.invite_code else None)
     return True
 
 
@@ -141,6 +145,31 @@ async def get_all_feedback() -> list[dict]:
             ORDER BY f.created_at DESC
         ''')
         return [dict(r) for r in rows]
+
+
+async def get_dashboard_data() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        user_rows = await conn.fetch('''
+            SELECT display_name, email, invite_code, created_at
+            FROM users
+            WHERE deletion_requested_at IS NULL
+            ORDER BY created_at DESC
+        ''')
+        feedback_rows = await conn.fetch('''
+            SELECT f.message, f.created_at, u.display_name, u.email
+            FROM user_feedback f
+            LEFT JOIN users u ON u.uid = f.uid
+            ORDER BY f.created_at DESC
+        ''')
+    users = [dict(r) for r in user_rows]
+    feedback = [dict(r) for r in feedback_rows]
+    return {
+        "total_users": len(users),
+        "total_feedback": len(feedback),
+        "users": users,
+        "feedback": feedback,
+    }
 
 
 async def save_feedback(uid: str, message: str) -> bool:
@@ -304,14 +333,35 @@ async def validate_invite_code(code: str) -> bool:
         return False
 
 
-async def mark_invite_code_used(code: str, uid: str) -> bool:
+async def mark_email_verified(email: str) -> bool:
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE invite_codes SET current_uses = current_uses + 1 WHERE UPPER(code) = UPPER($1)",
+                "UPDATE users SET email_verified = TRUE WHERE LOWER(email) = LOWER($1)",
+                email,
+            )
+            print(f"[DB] Email verified for {email}", flush=True)
+            return True
+    except Exception as e:
+        print(f"[DB] mark_email_verified error: {e}")
+        return False
+
+
+async def mark_invite_code_used(code: str, uid: str) -> bool:
+    """Stores the invite code on the user record then deletes it from the pool."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET invite_code = UPPER($1) WHERE uid = $2",
+                code, uid,
+            )
+            await conn.execute(
+                "DELETE FROM invite_codes WHERE UPPER(code) = UPPER($1)",
                 code,
             )
+            print(f"[DB] Invite code {code.upper()} stored on user {uid} and deleted from pool", flush=True)
             return True
     except Exception as e:
         print(f"[DB] mark_invite_code_used error: {e}")

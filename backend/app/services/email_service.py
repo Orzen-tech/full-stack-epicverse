@@ -4,6 +4,50 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+async def send_feedback_notification(display_name: str, user_email: str, message: str) -> bool:
+    """Notifies tech@kriyora.com when a user submits feedback."""
+    if not settings.SENDGRID_API_KEY:
+        return False
+    url = "https://api.sendgrid.com/v3/mail/send"
+    headers = {
+        "Authorization": f"Bearer {settings.SENDGRID_API_KEY.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "personalizations": [{"to": [{"email": "tech@kriyora.com"}],
+                               "subject": f"New EpicVerse Feedback from {display_name}"}],
+        "from": {"email": settings.SENDGRID_FROM_EMAIL, "name": "EpicVerse AI"},
+        "content": [{"type": "text/html", "value": f"""
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;
+                        border:1px solid #3D1E6B;border-radius:12px;background:#1B0C2D;color:#E8E0F0;">
+                <h2 style="color:#C084FC;margin-bottom:4px;">New Feedback Received</h2>
+                <p style="color:#9B7DC4;font-size:13px;margin-top:0;">EpicVerse App</p>
+                <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+                    <tr><td style="padding:8px 0;color:#9B7DC4;width:120px;">From</td>
+                        <td style="padding:8px 0;color:#F3E8FF;">{display_name}</td></tr>
+                    <tr><td style="padding:8px 0;color:#9B7DC4;">Email</td>
+                        <td style="padding:8px 0;color:#F3E8FF;">{user_email}</td></tr>
+                </table>
+                <div style="background:#2A1245;border-left:3px solid #6D28D9;border-radius:4px;
+                            padding:16px;font-size:15px;color:#E8E0F0;line-height:1.6;">
+                    {message}
+                </div>
+            </div>
+        """}],
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code >= 400:
+                print(f"[SENDGRID-ERROR] Feedback notify failed: {response.status_code}")
+                return False
+            print(f"[SENDGRID-SUCCESS] Feedback notification sent for {display_name}")
+            return True
+    except Exception as e:
+        print(f"[SENDGRID-FATAL] Feedback notify error: {e}")
+        return False
+
+
 async def send_otp_email(email: str, otp: str) -> bool:
     """Sends a 6-digit OTP to the user's email using SendGrid API."""
     if not settings.SENDGRID_API_KEY:
