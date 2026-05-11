@@ -44,7 +44,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   bool _emailVerified = false;
   bool _isVerifyingEmail = false;
   bool _showOtpRow = false;
+  bool _emailAlreadyExists = false;
   String? _emailOtpError;
+  final FocusNode _emailFocusNode = FocusNode();
   final List<TextEditingController> _otpControllers =
       List.generate(6, (_) => TextEditingController());
   final List<FocusNode> _otpFocusNodes =
@@ -122,14 +124,16 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     _inviteController.dispose();
     for (final c in _otpControllers) c.dispose();
     for (final n in _otpFocusNodes) n.dispose();
+    _emailFocusNode.dispose();
     super.dispose();
   }
 
   void _onEmailChanged() {
-    if (_showOtpRow || _emailVerified) {
+    if (_showOtpRow || _emailVerified || _emailAlreadyExists) {
       setState(() {
         _showOtpRow = false;
         _emailVerified = false;
+        _emailAlreadyExists = false;
         _emailOtpError = null;
       });
       for (final c in _otpControllers) c.clear();
@@ -180,11 +184,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         setState(() {
           _showOtpRow = false;
           _emailOtpError = null;
+          _emailAlreadyExists = true;
         });
         for (final c in _otpControllers) c.clear();
-        if (mounted) {
-          _showError('This email already has an account. Please log in instead.');
-        }
         return;
       }
       setState(() {
@@ -341,6 +343,45 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                         const SizedBox(height: 20),
                         _buildFieldLabel('EMAIL'),
                         _buildEmailField(),
+                        if (_emailAlreadyExists)
+                          Container(
+                            margin: const EdgeInsets.only(top: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.redAccent.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: Colors.redAccent.withValues(alpha: 0.4)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.info_outline, color: Colors.redAccent, size: 16),
+                                const SizedBox(width: 8),
+                                const Expanded(
+                                  child: Text(
+                                    'Email already has an account.',
+                                    style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: () {
+                                    _emailController.clear();
+                                    setState(() => _emailAlreadyExists = false);
+                                    _emailFocusNode.requestFocus();
+                                  },
+                                  child: const Text(
+                                    'Change Email',
+                                    style: TextStyle(
+                                      color: AppColors.primaryGold,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      decoration: TextDecoration.underline,
+                                      decorationColor: AppColors.primaryGold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         if (_showOtpRow) ...[
                           const SizedBox(height: 12),
                           _buildInlineOtpRow(),
@@ -487,6 +528,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   Widget _buildEmailField() {
     return TextFormField(
       controller: _emailController,
+      focusNode: _emailFocusNode,
       keyboardType: TextInputType.emailAddress,
       enabled: !_emailVerified,
       style: const TextStyle(color: Colors.white),
