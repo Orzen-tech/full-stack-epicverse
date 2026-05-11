@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:dio/dio.dart';
-import 'dart:convert';
 import '../../core/constants/app_colors.dart';
-import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
@@ -12,7 +10,6 @@ import 'dashboard_screen.dart';
 import '../../core/network/api_config.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/session_manager.dart';
-import 'verification_pending_screen.dart';
 import 'welcome_screen.dart';
 import 'otp_verification_screen.dart';
 import 'create_profile_screen.dart';
@@ -225,10 +222,56 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Future<void> _handleForgotPassword() async {
-    final email = _emailController.text.trim();
+    final prefilled = _emailController.text.trim();
+    final dialogController = TextEditingController(text: prefilled);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1B0C2D),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Reset Password', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("We'll send a reset link to your email.", style: TextStyle(color: Colors.white70, fontSize: 13)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: dialogController,
+              keyboardType: TextInputType.emailAddress,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'your@email.com',
+                hintStyle: const TextStyle(color: Colors.white38),
+                prefixIcon: const Icon(Icons.email_outlined, color: Colors.white38, size: 20),
+                filled: true,
+                fillColor: Colors.white.withValues(alpha: 0.07),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Send Link', style: TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+    final email = dialogController.text.trim();
+    dialogController.dispose();
+
     if (email.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter your email above first.'), backgroundColor: Colors.orangeAccent),
+        const SnackBar(content: Text('Please enter your email.'), backgroundColor: Colors.orangeAccent),
       );
       return;
     }
@@ -237,7 +280,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Password reset link sent! Check your inbox.'), backgroundColor: Colors.green),
+        const SnackBar(content: Text('Reset link sent! Check your inbox.'), backgroundColor: Colors.green),
       );
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;

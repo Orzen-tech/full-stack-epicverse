@@ -11,7 +11,6 @@ import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
 import '../../core/network/api_config.dart';
 import '../../core/network/session_manager.dart';
-import 'otp_verification_screen.dart';
 import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
 
@@ -27,9 +26,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController = TextEditingController();
   final TextEditingController _inviteController = TextEditingController();
 
   bool _obscurePassword = true;
+  bool _obscureConfirmPassword = true;
   bool _isInviteValid = false;
   String? _inviteFeedback;
   bool _isLoading = false;
@@ -117,6 +118,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _confirmPasswordController.dispose();
     _inviteController.dispose();
     for (final c in _otpControllers) c.dispose();
     for (final n in _otpFocusNodes) n.dispose();
@@ -262,29 +264,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     );
 
     try {
-      // Send OTP FIRST — invite_code authorizes the request while still unused.
-      debugPrint('[EpicVerse][REG] Step 3: POST /auth/send-otp identifier=${model.email}');
-      final otpRes = await _dio.post(
-        '${ApiConfig.apiUrl}/auth/send-otp',
-        data: FormData.fromMap({'identifier': model.email, 'invite_code': inviteCode}),
-        options: Options(headers: ApiConfig.headers),
-      );
-      debugPrint('[EpicVerse][REG] /auth/send-otp status=${otpRes.statusCode}');
-
-      if (!_emailVerified) {
-        // Legacy path: send OTP now (invite_code authorizes the request)
-        debugPrint('[EpicVerse][REG] Step 3: POST /auth/send-otp identifier=${model.email}');
-        final otpRes = await _dio.post(
-          '${ApiConfig.apiUrl}/auth/send-otp',
-          data: FormData.fromMap({'identifier': model.email, 'invite_code': inviteCode}),
-          options: Options(headers: ApiConfig.headers),
-        );
-        debugPrint('[EpicVerse][REG] /auth/send-otp status=${otpRes.statusCode}');
-      }
-
-      // Sync user — this consumes (marks used) the invite code.
-      debugPrint('[EpicVerse][REG] Step 4: POST /sync-user uid=${user.uid}');
-      final syncRes = await _dio.post('${ApiConfig.apiUrl}/sync-user', data: {
+      // Sync user — consumes (marks used) the invite code.
+      debugPrint('[EpicVerse][REG] Step 3: POST /sync-user uid=${user.uid}');
+      await _dio.post('${ApiConfig.apiUrl}/sync-user', data: {
         "firebase_id": user.uid,
         "display_name": model.displayName,
         "email": model.email,
@@ -293,41 +275,25 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         "profile_picture": base64Image,
         "session_id": sessionId,
       }, options: Options(headers: await ApiConfig.authHeaders()));
-      debugPrint('[EpicVerse][REG] /sync-user status=${syncRes.statusCode}');
+      debugPrint('[EpicVerse][REG] /sync-user OK');
+
+      // Mark email verified in DB (email was confirmed inline before registration)
+      try {
+        await _dio.post(
+          '${ApiConfig.apiUrl}/auth/mark-verified',
+          options: Options(headers: await ApiConfig.authHeaders()),
+        );
+        debugPrint('[EpicVerse][REG] mark-verified OK → Dashboard');
+      } catch (e) {
+        debugPrint('[EpicVerse][REG] mark-verified error (non-fatal): $e');
+      }
 
       ref.read(userProvider.notifier).setUser(model);
       if (mounted) {
-        final navigator = Navigator.of(context);
-        if (_emailVerified) {
-          // Email already verified inline — mark in DB and go straight to Dashboard
-          debugPrint('[EpicVerse][REG] Email pre-verified → mark-verified → Dashboard');
-          try {
-            await _dio.post(
-              '${ApiConfig.apiUrl}/auth/mark-verified',
-              options: Options(headers: await ApiConfig.authHeaders()),
-            );
-          } catch (e) {
-            debugPrint('[EpicVerse][REG] mark-verified error (non-fatal): $e');
-          }
-          navigator.pushAndRemoveUntil(
-            MaterialPageRoute(builder: (_) => const DashboardScreen()),
-            (route) => false,
-          );
-        } else {
-          navigator.push(MaterialPageRoute(
-            builder: (_) => OtpVerificationScreen(
-              email: model.email,
-              onBack: () => navigator.pop(),
-              onVerified: () {
-                debugPrint('[EpicVerse][REG] OTP verified → Dashboard');
-                navigator.pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const DashboardScreen()),
-                  (route) => false,
-                );
-              },
-            ),
-          ));
-        }
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const DashboardScreen()),
+          (route) => false,
+        );
       }
     } catch (e) {
       debugPrint('[EpicVerse][REG] _completeRegistration error: $e');
@@ -376,7 +342,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                           controller: _passwordController,
                           obscureText: _obscurePassword,
                           style: const TextStyle(color: Colors.white),
-                          decoration: _buildDecoration('******', Icons.lock_outline).copyWith(
+                          decoration: _buildDecoration('••••••••', Icons.lock_outline).copyWith(
                             suffixIcon: IconButton(
                               icon: Icon(
                                 _obscurePassword ? Icons.visibility_off : Icons.visibility,
@@ -385,7 +351,32 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                               onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                             ),
                           ),
-                          validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+                          validator: (v) {
+                            if (v == null || v.isEmpty) return 'Required';
+                            if (v.length < 6) return 'Minimum 6 characters';
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 20),
+                        _buildFieldLabel('CONFIRM PASSWORD'),
+                        TextFormField(
+                          controller: _confirmPasswordController,
+                          obscureText: _obscureConfirmPassword,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: _buildDecoration('••••••••', Icons.lock_outline).copyWith(
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _obscureConfirmPassword ? Icons.visibility_off : Icons.visibility,
+                                color: Colors.white54,
+                              ),
+                              onPressed: () => setState(() => _obscureConfirmPassword = !_obscureConfirmPassword),
+                            ),
+                          ),
+                          validator: (v) {
+                            if (v == null || v.isEmpty) return 'Required';
+                            if (v != _passwordController.text) return 'Passwords do not match';
+                            return null;
+                          },
                         ),
                         const SizedBox(height: 20),
                         _buildFieldLabel('INVITE CODE'),
