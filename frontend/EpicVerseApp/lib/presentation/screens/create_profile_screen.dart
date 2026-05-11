@@ -39,10 +39,21 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   File? _profileImage;
   final ImagePicker _picker = ImagePicker();
 
+  // Email inline verification
+  bool _emailVerified = false;
+  bool _isVerifyingEmail = false;
+  bool _showOtpRow = false;
+  String? _emailOtpError;
+  final List<TextEditingController> _otpControllers =
+      List.generate(6, (_) => TextEditingController());
+  final List<FocusNode> _otpFocusNodes =
+      List.generate(6, (_) => FocusNode());
+
   @override
   void initState() {
     super.initState();
     _inviteController.addListener(_onInviteChanged);
+    _emailController.addListener(_onEmailChanged);
   }
 
   void _onInviteChanged() {
@@ -102,11 +113,76 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   @override
   void dispose() {
     _inviteController.removeListener(_onInviteChanged);
+    _emailController.removeListener(_onEmailChanged);
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     _inviteController.dispose();
+    for (final c in _otpControllers) c.dispose();
+    for (final n in _otpFocusNodes) n.dispose();
     super.dispose();
+  }
+
+  void _onEmailChanged() {
+    if (_showOtpRow || _emailVerified) {
+      setState(() {
+        _showOtpRow = false;
+        _emailVerified = false;
+        _emailOtpError = null;
+      });
+      for (final c in _otpControllers) c.clear();
+    }
+  }
+
+  Future<void> _sendEmailOtp() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty || !email.contains('@')) {
+      _showError('Please enter a valid email first');
+      return;
+    }
+    setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
+    try {
+      await _dio.post(
+        '${ApiConfig.apiUrl}/auth/send-email-otp',
+        data: FormData.fromMap({'identifier': email}),
+        options: Options(headers: ApiConfig.headers),
+      );
+      setState(() => _showOtpRow = true);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 429) {
+        _showError('Too many attempts. Please wait before trying again.');
+      } else {
+        _showError('Failed to send verification code. Please try again.');
+      }
+    } catch (e) {
+      _showError('Failed to send verification code. Please try again.');
+    } finally {
+      if (mounted) setState(() => _isVerifyingEmail = false);
+    }
+  }
+
+  Future<void> _verifyEmailOtp() async {
+    final otp = _otpControllers.map((c) => c.text).join();
+    if (otp.length < 6) return;
+    setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
+    try {
+      await _dio.post(
+        '${ApiConfig.apiUrl}/auth/verify-otp',
+        data: FormData.fromMap({'identifier': _emailController.text.trim(), 'otp': otp}),
+        options: Options(headers: ApiConfig.headers),
+      );
+      setState(() {
+        _emailVerified = true;
+        _showOtpRow = false;
+      });
+      for (final c in _otpControllers) c.clear();
+    } catch (e) {
+      setState(() => _emailOtpError = 'Invalid or expired code. Try again.');
+      for (final c in _otpControllers) c.clear();
+      _otpFocusNodes[0].requestFocus();
+    } finally {
+      if (mounted) setState(() => _isVerifyingEmail = false);
+    }
   }
 
   Future<void> _pickImage() async {
@@ -126,6 +202,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     }
     if (!_acceptedPrivacy || !_acceptedTerms) {
       _showError('Please accept Privacy Policy and Terms of Service');
+      return;
+    }
+    if (!_emailVerified) {
+      _showError('Please verify your email first');
       return;
     }
     setState(() => _isLoading = true);
@@ -191,7 +271,18 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       );
       debugPrint('[EpicVerse][REG] /auth/send-otp status=${otpRes.statusCode}');
 
-      // Then sync user — this consumes (marks used) the invite code.
+      if (!_emailVerified) {
+        // Legacy path: send OTP now (invite_code authorizes the request)
+        debugPrint('[EpicVerse][REG] Step 3: POST /auth/send-otp identifier=${model.email}');
+        final otpRes = await _dio.post(
+          '${ApiConfig.apiUrl}/auth/send-otp',
+          data: FormData.fromMap({'identifier': model.email, 'invite_code': inviteCode}),
+          options: Options(headers: ApiConfig.headers),
+        );
+        debugPrint('[EpicVerse][REG] /auth/send-otp status=${otpRes.statusCode}');
+      }
+
+      // Sync user — this consumes (marks used) the invite code.
       debugPrint('[EpicVerse][REG] Step 4: POST /sync-user uid=${user.uid}');
       final syncRes = await _dio.post('${ApiConfig.apiUrl}/sync-user', data: {
         "firebase_id": user.uid,
@@ -206,22 +297,37 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
       ref.read(userProvider.notifier).setUser(model);
       if (mounted) {
-        // Capture NavigatorState before pushReplacement so the onVerified
-        // callback can still navigate after this screen is disposed.
         final navigator = Navigator.of(context);
-        navigator.push(MaterialPageRoute(
-          builder: (_) => OtpVerificationScreen(
-            email: model.email,
-            onBack: () => navigator.pop(),
-            onVerified: () {
-              debugPrint('[EpicVerse][REG] OTP verified → Dashboard');
-              navigator.pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const DashboardScreen()),
-                (route) => false,
-              );
-            },
-          ),
-        ));
+        if (_emailVerified) {
+          // Email already verified inline — mark in DB and go straight to Dashboard
+          debugPrint('[EpicVerse][REG] Email pre-verified → mark-verified → Dashboard');
+          try {
+            await _dio.post(
+              '${ApiConfig.apiUrl}/auth/mark-verified',
+              options: Options(headers: await ApiConfig.authHeaders()),
+            );
+          } catch (e) {
+            debugPrint('[EpicVerse][REG] mark-verified error (non-fatal): $e');
+          }
+          navigator.pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const DashboardScreen()),
+            (route) => false,
+          );
+        } else {
+          navigator.push(MaterialPageRoute(
+            builder: (_) => OtpVerificationScreen(
+              email: model.email,
+              onBack: () => navigator.pop(),
+              onVerified: () {
+                debugPrint('[EpicVerse][REG] OTP verified → Dashboard');
+                navigator.pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const DashboardScreen()),
+                  (route) => false,
+                );
+              },
+            ),
+          ));
+        }
       }
     } catch (e) {
       debugPrint('[EpicVerse][REG] _completeRegistration error: $e');
@@ -254,7 +360,16 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                         _buildTextField(_nameController, 'Your Name', Icons.person_outline),
                         const SizedBox(height: 20),
                         _buildFieldLabel('EMAIL'),
-                        _buildTextField(_emailController, 'your@email.com', Icons.mail_outline, type: TextInputType.emailAddress),
+                        _buildEmailField(),
+                        if (_showOtpRow) ...[
+                          const SizedBox(height: 12),
+                          _buildInlineOtpRow(),
+                        ],
+                        if (_emailOtpError != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6, left: 4),
+                            child: Text(_emailOtpError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                          ),
                         const SizedBox(height: 20),
                         _buildFieldLabel('PASSWORD'),
                         TextFormField(
@@ -363,6 +478,78 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       child: Text(l, style: const TextStyle(color: AppColors.primaryGold, fontSize: 10, fontWeight: FontWeight.bold)),
     ),
   );
+
+  Widget _buildEmailField() {
+    return TextFormField(
+      controller: _emailController,
+      keyboardType: TextInputType.emailAddress,
+      enabled: !_emailVerified,
+      style: const TextStyle(color: Colors.white),
+      decoration: _buildDecoration('your@email.com', Icons.mail_outline).copyWith(
+        suffixIcon: _emailVerified
+            ? const Padding(
+                padding: EdgeInsets.only(right: 12),
+                child: Icon(Icons.verified, color: Colors.greenAccent, size: 22),
+              )
+            : _isVerifyingEmail
+                ? const Padding(
+                    padding: EdgeInsets.all(14),
+                    child: SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primaryGold),
+                    ),
+                  )
+                : TextButton(
+                    onPressed: _sendEmailOtp,
+                    child: const Text('VERIFY', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold, fontSize: 13)),
+                  ),
+      ),
+      validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+    );
+  }
+
+  Widget _buildInlineOtpRow() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Enter the code sent to your email',
+            style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: List.generate(6, (i) => SizedBox(
+            width: 42,
+            child: TextField(
+              controller: _otpControllers[i],
+              focusNode: _otpFocusNodes[i],
+              textAlign: TextAlign.center,
+              keyboardType: TextInputType.number,
+              maxLength: 1,
+              style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+              decoration: InputDecoration(
+                counterText: '',
+                filled: true,
+                fillColor: Colors.white.withValues(alpha: 0.05),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                focusedBorder: const OutlineInputBorder(
+                  borderSide: BorderSide(color: AppColors.primaryGold, width: 2),
+                  borderRadius: BorderRadius.all(Radius.circular(8)),
+                ),
+              ),
+              onChanged: (value) {
+                if (value.isNotEmpty && i < 5) _otpFocusNodes[i + 1].requestFocus();
+                if (value.isEmpty && i > 0) _otpFocusNodes[i - 1].requestFocus();
+                if (_otpControllers.every((c) => c.text.isNotEmpty)) _verifyEmailOtp();
+              },
+            ),
+          )),
+        ),
+      ],
+    );
+  }
 
   Widget _buildTermsAndPrivacyRow() => Column(
     children: [
