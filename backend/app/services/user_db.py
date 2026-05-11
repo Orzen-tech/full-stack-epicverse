@@ -162,13 +162,22 @@ async def get_dashboard_data() -> dict:
             LEFT JOIN users u ON u.uid = f.uid
             ORDER BY f.created_at DESC
         ''')
+        deletion_rows = await conn.fetch('''
+            SELECT display_name, email, deletion_requested_at
+            FROM users
+            WHERE deletion_requested_at IS NOT NULL
+            ORDER BY deletion_requested_at DESC
+        ''')
     users = [dict(r) for r in user_rows]
     feedback = [dict(r) for r in feedback_rows]
+    deletions = [dict(r) for r in deletion_rows]
     return {
         "total_users": len(users),
         "total_feedback": len(feedback),
+        "total_deletions": len(deletions),
         "users": users,
         "feedback": feedback,
+        "deletions": deletions,
     }
 
 
