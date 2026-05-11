@@ -194,6 +194,34 @@ async def verify_otp_route(identifier: str = Form(None), email: str = Form(None)
     }
 
 
+@router.post("/auth/send-password-reset")
+async def send_password_reset(identifier: str = Form(None), email: str = Form(None)):
+    """Generates a Firebase password reset link and sends it via SendGrid.
+    Uses SendGrid for reliable inbox delivery instead of Firebase's default sender.
+    """
+    from app.services.email_service import send_password_reset_email
+
+    target = (identifier or email or "").strip()
+    if not target or "@" not in target:
+        raise HTTPException(status_code=422, detail="Valid email required")
+
+    try:
+        from firebase_admin import auth as fb_auth
+        reset_link = fb_auth.generate_password_reset_link(target)
+    except fb_auth.UserNotFoundError:
+        # Return 200 to avoid leaking whether the email is registered
+        print(f"[AUTH] Password reset requested for unknown email: {target}", flush=True)
+        return {"status": "sent"}
+    except Exception as e:
+        print(f"[AUTH] generate_password_reset_link error: {e}", flush=True)
+        raise HTTPException(status_code=500, detail="Failed to generate reset link")
+
+    sent = await send_password_reset_email(target, reset_link)
+    if not sent:
+        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    return {"status": "sent"}
+
+
 @router.post("/auth/send-email-otp")
 async def send_email_otp_preregistration(
     identifier: str = Form(None),

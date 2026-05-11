@@ -95,3 +95,56 @@ async def send_otp_email(email: str, otp: str) -> bool:
     except Exception as e:
         print(f"[SENDGRID-FATAL] Error sending to {email}: {e}")
         return False
+
+
+async def send_password_reset_email(email: str, reset_link: str) -> bool:
+    """Sends a password reset link via SendGrid (better deliverability than Firebase default)."""
+    if not settings.SENDGRID_API_KEY:
+        logger.error("[EMAIL] CRITICAL: SendGrid API_KEY is missing.")
+        return False
+
+    url = "https://api.sendgrid.com/v3/mail/send"
+    headers = {
+        "Authorization": f"Bearer {settings.SENDGRID_API_KEY.strip()}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "personalizations": [{
+            "to": [{"email": email}],
+            "subject": "Reset Your EpicVerse Password"
+        }],
+        "from": {"email": settings.SENDGRID_FROM_EMAIL, "name": "EpicVerse AI"},
+        "content": [{
+            "type": "text/html",
+            "value": f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                    <h2 style="color: #D4AF37; text-align: center;">Reset Your Password</h2>
+                    <p>Hello,</p>
+                    <p>We received a request to reset your EpicVerse password. Click the button below to set a new password. This link expires in 1 hour.</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{reset_link}" style="background: #D4AF37; color: #000; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 16px;">
+                            Reset Password
+                        </a>
+                    </div>
+                    <p>If the button doesn't work, copy and paste this link into your browser:</p>
+                    <p style="word-break: break-all; color: #555; font-size: 13px;">{reset_link}</p>
+                    <p style="margin-top: 20px;">If you did not request a password reset, please ignore this email.</p>
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    <p style="font-size: 12px; color: #999; text-align: center;">EpicVerse AI &bull; Account Security</p>
+                </div>
+            """
+        }]
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code >= 400:
+                print(f"[SENDGRID-ERROR] Password reset email failed: {response.status_code}: {response.text}")
+                return False
+            print(f"[SENDGRID-SUCCESS] Password reset email sent to {email}")
+            return True
+    except Exception as e:
+        print(f"[SENDGRID-FATAL] Password reset email error: {e}")
+        return False
