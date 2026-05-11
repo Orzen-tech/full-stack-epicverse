@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
+import 'otp_verification_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import '../../providers/user_provider.dart';
@@ -96,6 +97,30 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
             final data = response.data;
             final user = UserModel.fromJson(data);
             ref.read(userProvider.notifier).setUser(user);
+
+            final emailVerified = data['email_verified'] ?? false;
+            if (!emailVerified) {
+              debugPrint('[EpicVerse][SPLASH] email_verified=false → OTP screen');
+              if (!mounted) return;
+              final navigator = Navigator.of(context);
+              navigator.pushReplacement(
+                PageRouteBuilder(
+                  transitionDuration: const Duration(milliseconds: 800),
+                  pageBuilder: (ctx, a, b) => OtpVerificationScreen(
+                    email: firebaseUser.email ?? '',
+                    onVerified: () {
+                      navigator.pushAndRemoveUntil(
+                        MaterialPageRoute(builder: (_) => const DashboardScreen()),
+                        (route) => false,
+                      );
+                    },
+                  ),
+                  transitionsBuilder: (_, animation, __, child) =>
+                      FadeTransition(opacity: animation, child: child),
+                ),
+              );
+              return;
+            }
           }
         } catch (e) {
           debugPrint("Splash: Failed to fetch profile: $e");
