@@ -32,7 +32,7 @@ from app.services.user_db import (
     save_user, UserRecord, get_user, save_otp, verify_otp,
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
-    save_feedback, get_all_feedback, get_dashboard_data,
+    save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
 )
 from app.api.dependencies import get_current_user
 
@@ -150,6 +150,10 @@ async def verify_otp_route(identifier: str = Form(None), email: str = Form(None)
     is_valid = await verify_otp(identifier, otp)
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+    # Mark email as verified in the users table
+    if "@" in identifier:
+        await mark_email_verified(identifier)
 
     uid = None
     custom_token = None

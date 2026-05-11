@@ -87,6 +87,28 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           // Update local state with rich backend data immediately
           final fullUser = UserModel.fromJson(res.data);
           ref.read(userProvider.notifier).setUser(fullUser);
+
+          // Block login if OTP was never verified (app closed mid-registration)
+          final emailVerified = res.data['email_verified'] ?? false;
+          if (!emailVerified) {
+            debugPrint('[EpicVerse][LOGIN] email_verified=false → OTP screen');
+            if (!mounted) return;
+            final navigator = Navigator.of(context);
+            navigator.pushReplacement(
+              MaterialPageRoute(
+                builder: (_) => OtpVerificationScreen(
+                  email: firebaseUser.email ?? '',
+                  onVerified: () {
+                    navigator.pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const DashboardScreen()),
+                      (route) => false,
+                    );
+                  },
+                ),
+              ),
+            );
+            return;
+          }
         }
       } catch (e) {
         debugPrint("User not found in backend: Proceeding to profile creation flow.");

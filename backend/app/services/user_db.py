@@ -39,6 +39,7 @@ async def init_db():
         # authenticated sign-in auto-clears this column (grace period).
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY,
@@ -329,6 +330,21 @@ async def validate_invite_code(code: str) -> bool:
             return row is not None
     except Exception as e:
         print(f"[DB] validate_invite_code error: {e}")
+        return False
+
+
+async def mark_email_verified(email: str) -> bool:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET email_verified = TRUE WHERE LOWER(email) = LOWER($1)",
+                email,
+            )
+            print(f"[DB] Email verified for {email}", flush=True)
+            return True
+    except Exception as e:
+        print(f"[DB] mark_email_verified error: {e}")
         return False
 
 
