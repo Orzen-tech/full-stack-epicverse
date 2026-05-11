@@ -1,5 +1,5 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -32,7 +32,7 @@ from app.services.user_db import (
     save_user, UserRecord, get_user, save_otp, verify_otp,
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
-    save_feedback, get_all_feedback,
+    save_feedback, get_all_feedback, get_dashboard_data,
 )
 from app.api.dependencies import get_current_user
 
@@ -717,8 +717,134 @@ async def submit_feedback(
     body: FeedbackRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    from app.services.email_service import send_feedback_notification
     uid = current_user.get("uid")
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Feedback message cannot be empty")
     await save_feedback(uid, body.message.strip())
+    # Notify owner — fire and forget, don't block the response
+    try:
+        user = await get_user(uid)
+        display_name = (user or {}).get("display_name", "Unknown")
+        user_email   = (user or {}).get("email", "")
+        import asyncio
+        asyncio.create_task(send_feedback_notification(display_name, user_email, body.message.strip()))
+    except Exception:
+        pass
     return {"status": "success", "message": "Thank you for your feedback!"}
+
+
+@router.get("/admin/dashboard-data")
+async def admin_dashboard_data(key: str = ""):
+    if key != "kriyora-admin-2026":
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    return await get_dashboard_data()
+
+
+@router.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard(key: str = ""):
+    if key != "kriyora-admin-2026":
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>EpicVerse Admin Dashboard</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0F0720;color:#E8E0F0;min-height:100vh;padding:24px}
+    h1{font-size:22px;font-weight:700;color:#C084FC;margin-bottom:4px}
+    .subtitle{font-size:13px;color:#6B4FA0;margin-bottom:28px}
+    .stats{display:flex;gap:16px;margin-bottom:32px;flex-wrap:wrap}
+    .stat{background:#1B0C2D;border:1px solid #3D1E6B;border-radius:12px;padding:20px 28px;min-width:140px}
+    .stat-val{font-size:32px;font-weight:700;color:#C084FC}
+    .stat-label{font-size:12px;color:#6B4FA0;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+    .section{margin-bottom:40px}
+    .section-title{font-size:14px;font-weight:600;color:#C084FC;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+    .badge{background:#3D1E6B;color:#C084FC;font-size:11px;padding:2px 8px;border-radius:20px}
+    table{width:100%;border-collapse:collapse;background:#1B0C2D;border-radius:12px;overflow:hidden}
+    th{background:#2A1245;color:#9B7DC4;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:12px 16px;text-align:left}
+    td{padding:12px 16px;font-size:13px;color:#D4C5E8;border-top:1px solid #2A1245;vertical-align:top}
+    tr:hover td{background:#1F0E35}
+    .empty{text-align:center;color:#4A2D7A;padding:32px;font-size:13px}
+    .msg{max-width:360px;word-break:break-word;line-height:1.5}
+    .refresh{font-size:12px;color:#4A2D7A;margin-bottom:20px}
+    .dot{width:7px;height:7px;border-radius:50%;background:#22C55E;display:inline-block;margin-right:6px;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .invite{font-family:monospace;font-size:12px;background:#2A1245;padding:2px 8px;border-radius:4px;color:#A78BFA}
+    .time{color:#4A2D7A;font-size:12px;white-space:nowrap}
+  </style>
+</head>
+<body>
+  <h1>EpicVerse Admin</h1>
+  <div class="subtitle">Owner Dashboard &mdash; Kriyora</div>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-val" id="total-users">—</div><div class="stat-label">Total Users</div></div>
+    <div class="stat"><div class="stat-val" id="total-feedback">—</div><div class="stat-label">Feedback</div></div>
+  </div>
+
+  <div class="refresh"><span class="dot"></span>Auto-refreshes every 30 seconds &nbsp;|&nbsp; Last updated: <span id="last-updated">—</span></div>
+
+  <div class="section">
+    <div class="section-title">Users <span class="badge" id="users-badge">0</span></div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Invite Code</th><th>Joined</th></tr></thead>
+      <tbody id="users-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Feedback <span class="badge" id="feedback-badge">0</span></div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Message</th><th>Date</th></tr></thead>
+      <tbody id="feedback-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
+<script>
+const KEY = new URLSearchParams(location.search).get('key') || '';
+const fmt = s => s ? new Date(s).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+
+async function load() {
+  try {
+    const r = await fetch(`/api/v1/admin/dashboard-data?key=${KEY}`);
+    if (!r.ok) { document.body.innerHTML = '<p style="color:#F87171;padding:40px">Access denied.</p>'; return; }
+    const d = await r.json();
+
+    document.getElementById('total-users').textContent = d.total_users;
+    document.getElementById('total-feedback').textContent = d.total_feedback;
+    document.getElementById('users-badge').textContent = d.total_users;
+    document.getElementById('feedback-badge').textContent = d.total_feedback;
+    document.getElementById('last-updated').textContent = fmt(new Date().toISOString());
+
+    // Users table
+    const ub = document.getElementById('users-body');
+    if (!d.users.length) { ub.innerHTML = '<tr><td colspan="5" class="empty">No users yet</td></tr>'; }
+    else ub.innerHTML = d.users.map((u,i) => `<tr>
+      <td class="time">${i+1}</td>
+      <td>${u.display_name || '—'}</td>
+      <td>${u.email || '—'}</td>
+      <td>${u.invite_code ? '<span class="invite">'+u.invite_code+'</span>' : '<span style="color:#4A2D7A">—</span>'}</td>
+      <td class="time">${fmt(u.created_at)}</td>
+    </tr>`).join('');
+
+    // Feedback table
+    const fb = document.getElementById('feedback-body');
+    if (!d.feedback.length) { fb.innerHTML = '<tr><td colspan="5" class="empty">No feedback yet</td></tr>'; }
+    else fb.innerHTML = d.feedback.map((f,i) => `<tr>
+      <td class="time">${i+1}</td>
+      <td>${f.display_name || '—'}</td>
+      <td>${f.email || '—'}</td>
+      <td class="msg">${f.message}</td>
+      <td class="time">${fmt(f.created_at)}</td>
+    </tr>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>"""

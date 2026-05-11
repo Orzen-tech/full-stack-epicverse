@@ -146,6 +146,31 @@ async def get_all_feedback() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def get_dashboard_data() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        user_rows = await conn.fetch('''
+            SELECT display_name, email, invite_code, created_at
+            FROM users
+            WHERE deletion_requested_at IS NULL
+            ORDER BY created_at DESC
+        ''')
+        feedback_rows = await conn.fetch('''
+            SELECT f.message, f.created_at, u.display_name, u.email
+            FROM user_feedback f
+            LEFT JOIN users u ON u.uid = f.uid
+            ORDER BY f.created_at DESC
+        ''')
+    users = [dict(r) for r in user_rows]
+    feedback = [dict(r) for r in feedback_rows]
+    return {
+        "total_users": len(users),
+        "total_feedback": len(feedback),
+        "users": users,
+        "feedback": feedback,
+    }
+
+
 async def save_feedback(uid: str, message: str) -> bool:
     try:
         pool = await get_pool()
