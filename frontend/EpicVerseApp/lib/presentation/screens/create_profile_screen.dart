@@ -515,9 +515,19 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                       child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primaryGold),
                     ),
                   )
-                : TextButton(
-                    onPressed: _sendEmailOtp,
-                    child: const Text('VERIFY', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold, fontSize: 13)),
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                    child: GestureDetector(
+                      onTap: _sendEmailOtp,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryGold,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Text('VERIFY', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
+                      ),
+                    ),
                   ),
       ),
       validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
