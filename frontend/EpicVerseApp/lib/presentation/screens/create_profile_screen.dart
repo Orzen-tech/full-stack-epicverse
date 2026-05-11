@@ -511,27 +511,9 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       style: const TextStyle(color: Colors.white),
       decoration: _buildDecoration('your@email.com', Icons.mail_outline).copyWith(
         suffixIcon: _emailVerified
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.verified, color: Colors.greenAccent, size: 20),
-                  const SizedBox(width: 4),
-                  GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _emailVerified = false;
-                        _showOtpRow = false;
-                        _emailOtpError = null;
-                      });
-                      for (final c in _otpControllers) { c.clear(); }
-                      _emailFocusNode.requestFocus();
-                    },
-                    child: const Padding(
-                      padding: EdgeInsets.only(right: 12, left: 4),
-                      child: Text('Change', style: TextStyle(color: Colors.white54, fontSize: 12, decoration: TextDecoration.underline)),
-                    ),
-                  ),
-                ],
+            ? const Padding(
+                padding: EdgeInsets.only(right: 12),
+                child: Icon(Icons.verified, color: Colors.greenAccent, size: 22),
               )
             : _isVerifyingEmail
                 ? const Padding(
