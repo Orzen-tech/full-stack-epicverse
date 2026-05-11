@@ -276,19 +276,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   }
                   setDialogState(() { sending = true; errorMsg = null; });
                   try {
-                    await _dio.post(
-                      '${ApiConfig.apiUrl}/auth/send-password-reset',
-                      data: FormData.fromMap({'identifier': email}),
-                      options: Options(headers: ApiConfig.headers),
-                    );
+                    await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
                     if (ctx.mounted) Navigator.pop(ctx);
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Reset link sent! Check your inbox.'), backgroundColor: Colors.green),
+                        const SnackBar(
+                          content: Text('Reset link sent! Check your inbox (and spam folder).'),
+                          backgroundColor: Colors.green,
+                          duration: Duration(seconds: 5),
+                        ),
                       );
                     }
-                  } on DioException catch (e) {
-                    final msg = e.response?.data?['detail'] ?? 'Failed to send reset email.';
+                  } on FirebaseAuthException catch (e) {
+                    final msg = e.code == 'user-not-found'
+                        ? 'No account found with this email.'
+                        : e.message ?? 'Failed to send reset email.';
                     setDialogState(() { sending = false; errorMsg = msg; });
                   } catch (_) {
                     setDialogState(() { sending = false; errorMsg = 'An error occurred. Please try again.'; });
