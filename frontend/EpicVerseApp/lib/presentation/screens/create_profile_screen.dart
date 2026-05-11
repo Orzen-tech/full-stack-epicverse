@@ -168,11 +168,25 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     if (otp.length < 6) return;
     setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
     try {
-      await _dio.post(
+      final res = await _dio.post(
         '${ApiConfig.apiUrl}/auth/verify-otp',
         data: FormData.fromMap({'identifier': _emailController.text.trim(), 'otp': otp}),
         options: Options(headers: ApiConfig.headers),
       );
+      // If the response contains a custom_token, the email is already registered
+      // in Firebase — block registration and tell the user to log in instead.
+      final customToken = res.data?['custom_token'];
+      if (customToken != null) {
+        setState(() {
+          _showOtpRow = false;
+          _emailOtpError = null;
+        });
+        for (final c in _otpControllers) c.clear();
+        if (mounted) {
+          _showError('This email already has an account. Please log in instead.');
+        }
+        return;
+      }
       setState(() {
         _emailVerified = true;
         _showOtpRow = false;
