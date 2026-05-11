@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/network/api_config.dart';
 import '../widgets/network_background.dart';
+import 'welcome_screen.dart';
 
 class OtpVerificationScreen extends StatefulWidget {
   final String? email;
@@ -315,6 +316,16 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
 
   Widget _buildBackButton() => Positioned(
     top: 0, left: -8,
-    child: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
+    child: IconButton(
+      icon: const Icon(Icons.arrow_back, color: Colors.white),
+      onPressed: () async {
+        await FirebaseAuth.instance.signOut();
+        if (!mounted) return;
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+          (route) => false,
+        );
+      },
+    ),
   );
 }
