@@ -194,6 +194,76 @@ async def verify_otp_route(identifier: str = Form(None), email: str = Form(None)
     }
 
 
+@router.post("/auth/send-password-reset")
+async def send_password_reset(identifier: str = Form(None), email: str = Form(None)):
+    """Generates a Firebase password reset link and sends it via SendGrid.
+    Uses SendGrid for reliable inbox delivery instead of Firebase's default sender.
+    """
+    from app.services.email_service import send_password_reset_email
+
+    target = (identifier or email or "").strip()
+    if not target or "@" not in target:
+        raise HTTPException(status_code=422, detail="Valid email required")
+
+    try:
+        from firebase_admin import auth as fb_auth
+        reset_link = fb_auth.generate_password_reset_link(target)
+    except fb_auth.UserNotFoundError:
+        # Return 200 to avoid leaking whether the email is registered
+        print(f"[AUTH] Password reset requested for unknown email: {target}", flush=True)
+        return {"status": "sent"}
+    except Exception as e:
+        print(f"[AUTH] generate_password_reset_link error: {e}", flush=True)
+        raise HTTPException(status_code=500, detail="Failed to generate reset link")
+
+    sent = await send_password_reset_email(target, reset_link)
+    if not sent:
+        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    return {"status": "sent"}
+
+
+@router.post("/auth/send-email-otp")
+async def send_email_otp_preregistration(
+    identifier: str = Form(None),
+    email: str = Form(None),
+):
+    """Open endpoint for pre-registration email verify. No invite code or token needed.
+    Rate-limited by the existing _otp_allowed limiter (3 per 10 min per email).
+    """
+    import random
+    from app.services.email_service import send_otp_email
+
+    target = (identifier or email or "").strip()
+    if not target or "@" not in target:
+        raise HTTPException(status_code=422, detail="Valid email required")
+
+    allowed, retry_after = _otp_allowed(target.lower())
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please wait {retry_after // 60} minutes.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    otp = str(random.randint(100000, 999999))
+    await save_otp(target.lower(), otp)
+    sent = await send_otp_email(target, otp)
+    if not sent:
+        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    return {"status": "sent"}
+
+
+@router.post("/auth/mark-verified")
+async def mark_email_verified_route(current_user: dict = Depends(get_current_user)):
+    """Sets email_verified=TRUE for the authenticated user. Called after pre-registration
+    email OTP is confirmed and Firebase account + sync-user have completed."""
+    email = current_user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="No email on token")
+    await mark_email_verified(email)
+    return {"status": "ok"}
+
+
 @router.get("/user/{firebase_id}")
 async def fetch_user(firebase_id: str):
     """Fetches user info from the SQL database."""
