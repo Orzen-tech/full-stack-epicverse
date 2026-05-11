@@ -209,7 +209,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         // Capture NavigatorState before pushReplacement so the onVerified
         // callback can still navigate after this screen is disposed.
         final navigator = Navigator.of(context);
-        navigator.pushReplacement(MaterialPageRoute(
+        navigator.push(MaterialPageRoute(
           builder: (_) => OtpVerificationScreen(
             email: model.email,
             onVerified: () {

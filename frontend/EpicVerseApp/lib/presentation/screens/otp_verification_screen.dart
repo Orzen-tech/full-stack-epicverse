@@ -319,12 +319,16 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     child: IconButton(
       icon: const Icon(Icons.arrow_back, color: Colors.white),
       onPressed: () async {
-        await FirebaseAuth.instance.signOut();
-        if (!mounted) return;
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const WelcomeScreen()),
-          (route) => false,
-        );
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        } else {
+          await FirebaseAuth.instance.signOut();
+          if (!mounted) return;
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+            (route) => false,
+          );
+        }
       },
     ),
   );
