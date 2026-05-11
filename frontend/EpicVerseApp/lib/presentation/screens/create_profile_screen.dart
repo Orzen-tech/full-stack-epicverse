@@ -212,6 +212,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         navigator.push(MaterialPageRoute(
           builder: (_) => OtpVerificationScreen(
             email: model.email,
+            onBack: () => navigator.pop(),
             onVerified: () {
               debugPrint('[EpicVerse][REG] OTP verified → Dashboard');
               navigator.pushAndRemoveUntil(

@@ -13,6 +13,7 @@ class OtpVerificationScreen extends StatefulWidget {
   final String? phone;
   final String? verificationId;
   final VoidCallback onVerified;
+  final VoidCallback? onBack;
 
   const OtpVerificationScreen({
     super.key,
@@ -20,6 +21,7 @@ class OtpVerificationScreen extends StatefulWidget {
     this.phone,
     this.verificationId,
     required this.onVerified,
+    this.onBack,
   });
 
   @override
@@ -319,8 +321,8 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     child: IconButton(
       icon: const Icon(Icons.arrow_back, color: Colors.white),
       onPressed: () async {
-        if (Navigator.of(context).canPop()) {
-          Navigator.of(context).pop();
+        if (widget.onBack != null) {
+          widget.onBack!();
         } else {
           await FirebaseAuth.instance.signOut();
           if (!mounted) return;
