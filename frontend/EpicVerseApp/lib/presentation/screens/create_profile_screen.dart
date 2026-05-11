@@ -481,7 +481,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       decoration: BoxDecoration(color: AppColors.primaryGold, borderRadius: BorderRadius.circular(15)),
       alignment: Alignment.center,
       child: _isLoading
-          ? const CircularProgressIndicator()
+          ? const CircularProgressIndicator(color: Colors.black)
           : const Text('GET STARTED', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
     ),
   );
