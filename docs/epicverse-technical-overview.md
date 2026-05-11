@@ -1,212 +1,81 @@
-# EpicVerse — Technical Overview Document
+# EpicVerse — Technical Overview
 
-**Prepared by:** Kriyora Engineering Team  
-**Date:** May 2026  
+**Prepared by:** Kriyora Engineering Team
+**Date:** May 2026
 **Confidential — Internal Use Only**
 
 ---
 
-## PART 1 — GAME MODE DATA
+## Part 1 — Game Mode Data
 
-### Overview
+### How the Game Data is Structured
 
-EpicVerse validates card combos across **7 game modes**. Each mode represents a chapter of the story and has its own set of valid characters and combo rules stored in the database.
+EpicVerse is built around a card-based game where players combine a character card with an attribute card to check if it forms a valid combo. The game is divided into seven modes, each representing a different chapter of the story. Every mode has its own set of characters that are relevant to that chapter, and only those characters are allowed in that mode.
 
----
+All of this data lives in a PostgreSQL database table called `card_combos`. Each row in this table represents one possible combination — it stores the game mode, the character card number, the attribute card number, and whether that combination is valid, invalid, or excluded. Along with the result, each record also holds a lore-accurate explanation written in the scholar's voice, a reference to the original Valmiki source, the Kanda and Shloka it comes from, and a short summarized explanation.
 
-### Game Modes
+### The Seven Game Modes
 
-| Mode | Name | Valid Character Cards |
-|---|---|---|
-| Mode 1 | — | 1, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24 |
-| Mode 2 | — | 1, 2, 3, 5, 6, 8, 9, 10, 19, 24 |
-| Mode 3 | — | 1, 2, 3, 5, 11, 12, 15, 23 |
-| Mode 4 | — | 1, 2, 3, 4, 15, 17, 18, 21 |
-| Mode 5 | — | 2, 4, 11, 13, 14, 18, 20, 21 |
-| Mode 6 | — | 1, 3, 4, 11, 13, 14, 18, 20, 21, 22 |
-| Mode 7 | — | 1, 2, 3, 4, 5, 6, 13 |
+The game currently has seven modes. Each mode only recognises specific character cards. If a user asks about a character that does not belong to the current mode, the system immediately tells them so without even querying the database.
 
----
+Mode 1 supports character cards 1, 2, 3, 5, 6, 7, 8, 9, 10, 23, and 24.
+Mode 2 supports character cards 1, 2, 3, 5, 6, 8, 9, 10, 19, and 24.
+Mode 3 supports character cards 1, 2, 3, 5, 11, 12, 15, and 23.
+Mode 4 supports character cards 1, 2, 3, 4, 15, 17, 18, and 21.
+Mode 5 supports character cards 2, 4, 11, 13, 14, 18, 20, and 21.
+Mode 6 supports character cards 1, 3, 4, 11, 13, 14, 18, 20, 21, and 22.
+Mode 7 supports character cards 1, 2, 3, 4, 5, 6, and 13.
 
-### Database Schema — `card_combos` Table
+### How a Combo Check Works
 
-Each combo record in the PostgreSQL database has the following structure:
+When a user speaks to the app and asks whether two cards form a combo, the system goes through a clear sequence of steps. First it extracts the two card numbers from whatever the user said, in any language or format. Then it checks whether the character card is valid for the current game mode. If the character does not belong to that mode, the AI responds with a lore-accurate message explaining that this character has no role in this chapter, and the process stops there.
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | BIGSERIAL | Auto-incremented primary key |
-| `gameplay_mode` | TEXT | Game mode name |
-| `character` | TEXT | Character name |
-| `character_card_number` | INTEGER | Character card number |
-| `attribute` | TEXT | Attribute name |
-| `attribute_card_no` | INTEGER | Attribute card number (25+) |
-| `final_segment` | TEXT | Game segment reference |
-| `final_status` | TEXT | `Valid`, `Invalid`, or `Excluded` |
-| `revised_scholar_reason` | TEXT | Lore-accurate explanation |
-| `valmiki_reference_anchor` | TEXT | Source reference |
-| `kanda` | TEXT | Story chapter (Kanda) |
-| `shloka` | TEXT | Verse reference |
-| `explanation_summarized` | TEXT | Short summary |
-| `created_at` | TIMESTAMPTZ | Record creation timestamp |
+If the character is valid for the mode, the system looks up the combination in the database and gets back one of three results. A result of Valid means the combination is a recognised and active game combo. A result of Invalid means the combination does not work in the game. A result of Excluded means the combination is technically valid but has been excluded from current gameplay. The AI then reads out the scholar's explanation that is stored alongside the result.
+
+### How the Data is Served
+
+The system uses a three-layer caching strategy to make sure data is always available quickly, even if the database has a temporary issue. The first layer is Redis, which holds recently looked-up combos in memory with a time-based expiry. If the result is not in Redis, the system queries PostgreSQL directly. If for any reason the database is not reachable, the system falls back to an in-memory copy of the Excel data that was loaded into RAM when the server started up. This means the app can keep working even during a database blip.
 
 ---
 
-### Combo Validation Logic
+## Part 2 — Technology Stack
 
-When a user asks "is card X and card Y a combo?", the system:
+### Frontend — Mobile Application
 
-1. **Extracts** two card numbers from the user's speech (any language)
-2. **Validates** the character card belongs to the current game mode
-3. **Queries** the `card_combos` table for the combination
-4. **Returns** one of three statuses:
+The mobile app is built using Flutter, which is Google's cross-platform framework written in Dart. This allows us to maintain a single codebase that works on both Android and iOS. State across the app is managed using Riverpod, which is a reactive state management library for Flutter.
 
-| Status | Meaning |
-|---|---|
-| `Valid` | The combination is a valid game combo |
-| `Invalid` | The combination is not valid |
-| `Excluded` | Valid combination but excluded from current gameplay |
+For network communication, the app uses two channels. Regular API calls such as login, profile fetch, and feedback submission go through the Dio HTTP client. The real-time voice session runs over a WebSocket connection managed by the web_socket_channel package.
 
-5. **Responds** with a lore-accurate explanation from `revised_scholar_reason`
+Audio recording is handled by the record package, which captures the user's voice as raw PCM audio at 16kHz mono. The AI's response audio, which arrives from the backend as 24kHz PCM, is played back using flutter_pcm_sound. Firebase is used for user authentication, supporting both Google Sign-In and email-based login. The permission_handler package takes care of requesting microphone and storage permissions from the device.
 
----
+For the user interface, the app uses google_fonts for typography, the animations package for smooth screen transitions, and intl for internationalisation support. Profile pictures are selected using image_picker. Sessions are stored locally using shared_preferences, and each session is identified by a unique ID generated with the uuid package.
 
-### Data Caching Strategy
+### Backend — Server Application
 
-```
-User Query
-    │
-    ▼
-Redis Cache (fast lookup, TTL-based)
-    │ cache miss
-    ▼
-PostgreSQL card_combos table
-    │ DB unavailable
-    ▼
-Excel RAM Cache (preloaded at server startup)
-```
+The backend is a Python application built with FastAPI, a modern and high-performance web framework. It runs on Uvicorn, which is an ASGI server that handles asynchronous requests efficiently. The server is hosted on Google Cloud Run in the Mumbai region, which keeps latency low for Indian users.
 
-If a character card number does not belong to the current game mode, the system returns a lore-accurate "wrong mode" message without querying the database.
+Database access is done through asyncpg, which is an asynchronous PostgreSQL driver that works without blocking the server. All settings and environment variables are validated at startup using pydantic-settings. The Firebase Admin SDK is used to verify user tokens on every protected request.
 
----
+For the AI voice pipeline, the server acts as a bridge between the Flutter app and the OpenAI Realtime API. It uses the websockets library to maintain a persistent connection to OpenAI. Audio resampling from 16kHz to 24kHz is done using numpy. Game data is loaded from Excel files at startup using pandas and openpyxl, and cached in Redis using the redis client. The openai package is used for any non-realtime AI calls.
 
----
+For infrastructure-related tasks, the server uses google-cloud-storage for file operations, google-cloud-logging for structured cloud logs, and sendgrid for sending OTP emails during account verification.
 
-## PART 2 — TECHNOLOGY STACK
+### AI and Voice
 
----
+The heart of the voice experience is the OpenAI Realtime API running GPT-4o. This single WebSocket connection handles everything — speech recognition, language understanding, tool execution, and voice response. There is no separate STT or TTS service to coordinate; it all happens within one session.
 
-### Frontend — Flutter Mobile App
+Speech-to-text is powered by OpenAI Whisper-1, which is built into the Realtime API. It automatically detects the user's language and transcribes their speech across 99 languages without any configuration. The AI response is spoken back using the built-in TTS with the alloy voice. If the user spoke in a language other than English, GPT-4o translates the response into that language before speaking it, covering over 100 languages natively.
 
-**Platform:** Android + iOS  
-**Language:** Dart
+### Cloud Infrastructure
 
-#### Packages & Tools
+The backend runs on Google Cloud Run, a fully managed serverless platform. It is configured to always keep at least one instance running so there is no cold start delay for users. It can scale up to 20 instances automatically under load, with each instance able to handle 80 concurrent connections, 2 virtual CPUs, and 2 gigabytes of memory.
 
-| Package | Version | Purpose |
-|---|---|---|
-| `flutter` | SDK | Core mobile framework |
-| `flutter_riverpod` | ^3.3.1 | State management |
-| `dio` | ^5.9.2 | HTTP client for REST API calls |
-| `web_socket_channel` | ^3.0.3 | WebSocket connection to backend |
-| `record` | ^6.2.0 | Mic recording — PCM16, 24kHz mono |
-| `flutter_pcm_sound` | ^3.3.3 | AI voice playback — PCM24k, 24kHz |
-| `audioplayers` | ^6.6.0 | General audio playback |
-| `speech_to_text` | ^7.0.0 | Wake word / local STT support |
-| `firebase_core` | ^4.6.0 | Firebase initialisation |
-| `firebase_auth` | ^6.3.0 | User authentication |
-| `permission_handler` | ^12.0.1 | Mic + storage permissions |
-| `shared_preferences` | ^2.5.4 | Local session storage |
-| `uuid` | ^4.3.3 | Session ID generation |
-| `image_picker` | ^1.2.1 | Profile picture selection |
-| `google_fonts` | ^8.0.2 | Typography |
-| `animations` | ^2.1.1 | Transition animations |
-| `intl` | ^0.20.2 | Internationalisation |
-| `flutter_launcher_icons` | ^0.14.4 | App icon generation |
+The PostgreSQL database is hosted on Google Cloud SQL and connects to Cloud Run through a secure Unix socket. Deployment is automated through Google Cloud Build, which builds the Docker image, pushes it to Google Artifact Registry, and deploys it to Cloud Run whenever a new version is released. All sensitive credentials such as the OpenAI API key, database URL, and SendGrid key are stored in Google Secret Manager and injected into the server at deploy time. The source code is version controlled on GitHub.
 
-#### Audio Format
-
-| Direction | Format | Sample Rate | Channels |
-|---|---|---|---|
-| Mic → Backend | PCM 16-bit | 16 kHz | Mono |
-| Backend → Speaker | PCM 16-bit | 24 kHz | Mono |
-
----
-
-### Backend — FastAPI Server
-
-**Language:** Python 3.11  
-**Hosting:** Google Cloud Run (asia-south1 / Mumbai)
-
-#### Packages & Tools
-
-| Package | Version | Purpose |
-|---|---|---|
-| `fastapi` | 0.103.2 | Web framework + REST API + WebSocket |
-| `uvicorn` | 0.23.2 | ASGI server |
-| `websockets` | 12.0 | WebSocket client (OpenAI Realtime bridge) |
-| `asyncpg` | 0.29.0 | Async PostgreSQL driver |
-| `pydantic-settings` | ≥2.0.0 | Settings + environment variable validation |
-| `openai` | ≥1.3.5 | OpenAI API client |
-| `firebase-admin` | 6.2.0 | Firebase token verification |
-| `redis` | ≥5.0.0 | Redis cache client |
-| `numpy` | ≥1.26.0 | PCM audio resampling (16kHz → 24kHz) |
-| `pandas` | 2.1.1 | Excel data loading |
-| `openpyxl` | 3.1.2 | Excel file parsing |
-| `python-multipart` | 0.0.6 | File upload handling |
-| `httpx` | ≥0.24.0 | Async HTTP client |
-| `google-cloud-storage` | 2.11.0 | GCS file storage |
-| `google-cloud-logging` | 3.6.0 | Cloud logging |
-| `python-dotenv` | 1.0.0 | Local environment variables |
-
----
-
-### AI & Voice Services
-
-| Service | Provider | Purpose |
-|---|---|---|
-| **LLM** | OpenAI GPT-4o Realtime | Language understanding + combo validation logic |
-| **STT** | OpenAI Whisper-1 | Speech-to-text (99 languages, auto-detect) |
-| **TTS** | OpenAI Realtime (voice: alloy) | AI voice response |
-| **Translation** | GPT-4o native | Response translation into user's language (100+ languages) |
-
----
-
-### Infrastructure & Cloud Services
-
-| Service | Provider | Purpose |
-|---|---|---|
-| **App Hosting** | Google Cloud Run | Serverless backend — auto-scales 1 to 20 instances |
-| **Database** | Google Cloud SQL (PostgreSQL) | Primary game data + user data |
-| **Cache** | Redis | Fast combo lookup cache |
-| **Container Registry** | Google Artifact Registry | Docker image storage |
-| **CI/CD Pipeline** | Google Cloud Build | Automated build + deploy on code push |
-| **Secrets** | Google Secret Manager | API keys, DB credentials |
-| **Authentication** | Firebase Authentication | User login (Google Sign-In + Email) |
-| **Email** | SendGrid | OTP delivery for email verification |
-| **Source Control** | GitHub | Code repository |
-
----
-
-### Cloud Run Configuration
-
-| Parameter | Value |
-|---|---|
-| Region | asia-south1 (Mumbai) |
-| Min Instances | 1 (always warm) |
-| Max Instances | 20 |
-| Memory | 2 GB |
-| vCPUs | 2 |
-| Max Concurrency | 80 connections |
-
----
-
-### Production Endpoint
-
-```
+The live backend is accessible at:
 https://epicverse-backend-721191424605.asia-south1.run.app
-```
 
 ---
 
-*Kriyora Concepts Private Limited — Confidential*  
+*Kriyora Concepts Private Limited — Confidential*
 *For queries: support@kriyora.com*
