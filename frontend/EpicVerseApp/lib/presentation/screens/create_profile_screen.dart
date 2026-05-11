@@ -175,10 +175,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         data: FormData.fromMap({'identifier': _emailController.text.trim(), 'otp': otp}),
         options: Options(headers: ApiConfig.headers),
       );
-      // If the response contains a custom_token, the email is already registered
+      // If the response contains a uid, the email is already registered
       // in Firebase — block registration and tell the user to log in instead.
-      final customToken = res.data?['custom_token'];
-      if (customToken != null) {
+      final existingUid = res.data?['uid'];
+      if (existingUid != null) {
         // Email already registered — clear field so user can type a new one
         _emailController.clear();
         setState(() {
