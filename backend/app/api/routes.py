@@ -265,6 +265,17 @@ async def mark_email_verified_route(current_user: dict = Depends(get_current_use
     return {"status": "ok"}
 
 
+@router.post("/auth/update-session")
+async def update_session(session_id: str = Form(...), current_user: dict = Depends(get_current_user)):
+    """Called on every login. Writes this device's session_id to DB.
+    Any other device holding a different session_id will be force-logged out."""
+    uid = current_user.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    await update_session_id(uid, session_id)
+    return {"status": "ok"}
+
+
 @router.get("/auth/check-session")
 async def check_session(session_id: str, current_user: dict = Depends(get_current_user)):
     """Returns whether the given session_id is still the active session for this user.

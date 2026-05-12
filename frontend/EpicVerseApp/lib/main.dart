@@ -48,7 +48,31 @@ class _EpicVerseAppState extends State<EpicVerseApp> {
   void initState() {
     super.initState();
     _kickedSub = webSocketService.sessionKicked.listen((_) async {
-      debugPrint('[EpicVerse][APP] Session kicked — signing out and returning to login');
+      debugPrint('[EpicVerse][APP] Session kicked — showing popup then signing out');
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        // ignore: use_build_context_synchronously
+        await showDialog<void>(
+          context: ctx,
+          barrierDismissible: false,
+          useRootNavigator: true,
+          builder: (dCtx) => AlertDialog(
+            backgroundColor: const Color(0xFF1B0C2D),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Text('Signed Out', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            content: const Text(
+              'Your account was signed in on another device. You have been logged out.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dCtx).pop(),
+                child: const Text('OK', style: TextStyle(color: Color(0xFFD4AF37), fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      }
       await FirebaseAuth.instance.signOut();
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
