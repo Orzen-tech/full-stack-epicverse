@@ -258,6 +258,16 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       );
       debugPrint('[EpicVerse][REG] Firebase user created uid=${cred.user?.uid}');
       await _completeRegistration(cred, inviteCode);
+    } on FirebaseAuthException catch (e) {
+      debugPrint('[EpicVerse][REG] Registration error: $e');
+      if (e.code == 'email-already-in-use') {
+        setState(() {
+          _emailVerified = false;
+        });
+        _showError('This email is already in use. Please use a different email.');
+      } else {
+        _showError(e.message ?? e.toString());
+      }
     } catch (e) {
       debugPrint('[EpicVerse][REG] Registration error: $e');
       _showError(e.toString());
