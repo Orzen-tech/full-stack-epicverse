@@ -156,15 +156,27 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         return;
       }
 
-      // 6. Resume Journey: Already has profile, skip directly to Dashboard
+      // 6. Register this device's session so other devices get forced out
+      try {
+        final sessionId = await SessionManager.getSessionId();
+        await _dio.post(
+          '${ApiConfig.apiUrl}/auth/update-session',
+          data: FormData.fromMap({'session_id': sessionId}),
+          options: Options(headers: await ApiConfig.authHeaders()),
+        );
+        debugPrint('[EpicVerse][LOGIN] session updated sessionId=$sessionId');
+      } catch (e) {
+        debugPrint('[EpicVerse][LOGIN] update-session failed (non-fatal): $e');
+      }
+
+      // 7. Resume Journey: Already has profile, skip directly to Dashboard
       if (!mounted) return;
       debugPrint('[EpicVerse][LOGIN] Profile exists → Dashboard');
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
 
-      // 5. BACKGROUND BACKGROUND: Sync/Fetch with Backend silently
-      // We don't await this to keep the login instant.
+      // Background sync
       _syncUserInBackground(firebaseUser.uid, loggedInUser);
 
     } on FirebaseAuthException catch (e) {

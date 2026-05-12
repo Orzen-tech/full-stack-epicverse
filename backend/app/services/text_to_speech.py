@@ -1,13 +1,4 @@
-import openai
-from app.core.config import settings
-
-_client = None
-
-def get_openai_client() -> openai.AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _client
+from app.services.openai_client import get_openai_client
 
 async def synthesize_speech(text: str, language_code: str) -> bytes:
     """Uses OpenAI Text-to-Speech to generate synthesized audio. Natively supports almost all languages."""

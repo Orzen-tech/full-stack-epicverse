@@ -4,12 +4,10 @@ import asyncio
 from typing import Any
 
 import asyncpg
-import openai
 from redis.asyncio import Redis
 
 from app.core.config import settings
-
-client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+from app.services.openai_client import get_openai_client
 
 EXACT_LOOKUP_SQL = """
 SELECT
@@ -347,7 +345,7 @@ async def _cache_set(key: str, value: Any, ttl: int) -> None:
 
 async def get_embedding(text: str) -> list[float] | None:
     try:
-        response = await client.embeddings.create(
+        response = await get_openai_client().embeddings.create(
             input=[text.replace("\n", " ").strip()],
             model=settings.EMBEDDING_MODEL,
         )
@@ -488,7 +486,7 @@ async def resolve_segment_lookup(
     character_card_number: int | None = None,
     attribute_card_no: int | None = None,
     query: str | None = None,
-    game_mode: str = "Mode 1 Origin Arc( Balakanda)",
+    game_mode: str = "OriginArc (Balakanda)",
 ) -> dict[str, Any]:
     if character_card_number is not None and attribute_card_no is not None:
         exact = await get_segment_exact(character_card_number, attribute_card_no, game_mode)
@@ -539,13 +537,13 @@ async def semantic_search_database(query: str, limit: int = 3) -> str:
 # Valid character card numbers per mode — sourced from Excel data files.
 # Any character card NOT in this set for the selected mode triggers the "wrong mode" response.
 VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
-    "Mode 1": {1, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24},
-    "Mode 2": {1, 2, 3, 5, 6, 8, 9, 10, 19, 24},
-    "Mode 3": {1, 2, 3, 5, 11, 12, 15, 23},
-    "Mode 4": {1, 2, 3, 4, 15, 17, 18, 21},
-    "Mode 5": {2, 4, 11, 13, 14, 18, 20, 21},
-    "Mode 6": {1, 3, 4, 11, 13, 14, 18, 20, 21, 22},
-    "Mode 7": {1, 2, 3, 4, 5, 6, 13},
+    "OriginArc (Balakanda)":        {1, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24},
+    "CrownShift (AyodhyaKanda)":    {1, 2, 3, 5, 6, 8, 9, 10, 19, 24},
+    "WildRun (AranyaKanda)":        {1, 2, 3, 5, 11, 12, 15, 23},
+    "GlowLine (KishkindhaKanda)":   {1, 2, 3, 4, 15, 17, 18, 21},
+    "lankaLeap (SundaraKanda)":     {2, 4, 11, 13, 14, 18, 20, 21},
+    "WarRoom (YuddhaKanda)":        {1, 3, 4, 11, 13, 14, 18, 20, 21, 22},
+    "AfterLight (UttaraKanda)":     {1, 2, 3, 4, 5, 6, 13},
 }
 
 
