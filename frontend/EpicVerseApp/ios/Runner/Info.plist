@@ -66,5 +66,13 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>EpicVerse uses your microphone to capture voice commands which are processed by OpenAI to generate AI companion responses.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app requires camera access to capture photos and videos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app requires photo library access to upload images.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>EpicVerse uses speech recognition to convert your voice into text for the AI companion.</string>
 </dict>
 </plist>

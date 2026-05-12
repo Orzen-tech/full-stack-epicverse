@@ -14,6 +14,8 @@ import '../../core/network/websocket_service.dart';
 import '../../services/wake_word_service.dart';
 import '../../core/network/api_config.dart';
 import 'login_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 
 class CompanionReadyScreen extends StatefulWidget {
   final String gameMode;
@@ -248,7 +250,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // --- Core Lifecycle Handlers ---
   void _postInitHandshake() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initWakeWord();
+      await _initWakeWord(); 
+      // Auto-start of voice turn has been disabled
     });
   }
 
@@ -329,13 +332,13 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         }
       },
     );
-    debugPrint("CompanionScreen: Starting wake word listener...");
-    await wakeWordService.startListening();
-    if (mounted) {
-      setState(() {
-        _isListeningWakeWord = true;
-      });
-    }
+    debugPrint("CompanionScreen: Wake word listener is disabled on load.");
+    // await wakeWordService.startListening();
+    // if (mounted) {
+    //   setState(() {
+    //     _isListeningWakeWord = true;
+    //   });
+    // }
   }
 
   void _showWakeWordSettings() {
@@ -375,8 +378,58 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     );
   }
 
+  Future<bool> _checkAndShowConsent() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasConsented = prefs.getBool('ai_consent_given') ?? false;
+    
+    if (hasConsented) return true;
+    
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('AI Consent Required', style: TextStyle(color: AppColors.primaryGold)),
+        content: const Text(
+          'This app sends your messages and voice input to third-party AI services (OpenAI) to generate responses.\n\n'
+          'Data shared may include:\n'
+          '• Messages\n'
+          '• Voice input\n'
+          '• User prompts\n\n'
+          'Third-party providers may process this data according to their privacy policies. Do you agree?',
+          style: TextStyle(color: AppColors.textPrimary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Decline', style: TextStyle(color: AppColors.textMuted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Agree', style: TextStyle(color: AppColors.primaryGold)),
+          ),
+        ],
+      ),
+    );
+    
+    if (result == true) {
+      await prefs.setBool('ai_consent_given', true);
+      return true;
+    }
+    
+    return false;
+  }
+
   Future<void> _startVoiceTurn([int timeoutSeconds = 5]) async {
     debugPrint('[EpicVerse][MIC] Mic tapped → _startVoiceTurn(timeout=${timeoutSeconds}s)');
+    
+    // Check AI Consent
+    final consented = await _checkAndShowConsent();
+    if (!consented) {
+      debugPrint('[EpicVerse][MIC] User declined AI consent');
+      return;
+    }
+
     // 1. Establish Lazy Handshake if not already connected
     if (!_isConnected || !webSocketService.isConnected) {
       if (mounted) setState(() => _statusText = "Authenticating...");
