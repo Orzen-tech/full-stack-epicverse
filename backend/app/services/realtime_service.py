@@ -542,10 +542,15 @@ class RealtimeSession:
                          f"\"{reason_preview}{'...' if len(reason_preview) == 80 else ''}\"")
 
                 # Inject avatar_response so LLM speaks it exactly (not its own words)
-                avatar_msg = _pick_combo_message(
-                    status if not is_error else None,
-                    is_error=is_error,
-                )
+                if result.get("both_character"):
+                    avatar_msg = "Two character card numbers can't be a combo."
+                elif result.get("both_attribute"):
+                    avatar_msg = "Two attribute card numbers can't be a combo."
+                else:
+                    avatar_msg = _pick_combo_message(
+                        status if not is_error else None,
+                        is_error=is_error,
+                    )
                 result["avatar_response"] = avatar_msg
                 _log("AVATAR RESPONSE", self.uid, f"\"{avatar_msg}\"")
 
