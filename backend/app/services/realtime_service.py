@@ -547,10 +547,11 @@ class RealtimeSession:
                 elif result.get("both_attribute"):
                     avatar_msg = "Two attribute card numbers can't be a combo."
                 else:
-                    avatar_msg = _pick_combo_message(
+                    flavor = _pick_combo_message(
                         status if not is_error else None,
                         is_error=is_error,
                     )
+                    avatar_msg = f"Card {char_int} and {attr_int} — {flavor}"
                 result["avatar_response"] = avatar_msg
                 _log("AVATAR RESPONSE", self.uid, f"\"{avatar_msg}\"")
 
