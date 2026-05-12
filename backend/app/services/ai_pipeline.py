@@ -48,7 +48,7 @@ The AI must only return information that exists in the database and must not inv
 DATABASE STRUCTURE
 
 The PostgreSQL database contains a table called `card_combos`.
-Current selected mode: {game_mode or 'Mode 1'}
+Current selected mode: {game_mode or 'OriginArc (Balakanda)'}
 
 The table contains the following key columns:
 gameplay_mode (e.g., 'OriginArc (Balakanda)', 'CrownShift (AyodhyaKanda)'), character, attribute, final_status, revised_scholar_reason, character_card_number, attribute_card_no
@@ -180,6 +180,8 @@ NEVER switch languages unless the user switches first."""
         # 5. Cleanly store only text-based history to avoid future tool conflicts
         USER_SESSIONS[session_id].append({"role": "user", "content": text})
         USER_SESSIONS[session_id].append({"role": "assistant", "content": final_text})
+        # Trim to last 20 entries (10 exchanges) to prevent unbounded memory growth
+        USER_SESSIONS[session_id] = USER_SESSIONS[session_id][-20:]
         
         return {"final_response": final_text}
 

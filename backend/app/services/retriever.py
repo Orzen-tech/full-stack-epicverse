@@ -9,7 +9,13 @@ from redis.asyncio import Redis
 
 from app.core.config import settings
 
-client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+_openai_client: openai.AsyncOpenAI | None = None
+
+def _get_openai_client() -> openai.AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    return _openai_client
 
 EXACT_LOOKUP_SQL = """
 SELECT
@@ -347,7 +353,7 @@ async def _cache_set(key: str, value: Any, ttl: int) -> None:
 
 async def get_embedding(text: str) -> list[float] | None:
     try:
-        response = await client.embeddings.create(
+        response = await _get_openai_client().embeddings.create(
             input=[text.replace("\n", " ").strip()],
             model=settings.EMBEDDING_MODEL,
         )
@@ -488,7 +494,7 @@ async def resolve_segment_lookup(
     character_card_number: int | None = None,
     attribute_card_no: int | None = None,
     query: str | None = None,
-    game_mode: str = "Mode 1 Origin Arc( Balakanda)",
+    game_mode: str = "OriginArc (Balakanda)",
 ) -> dict[str, Any]:
     if character_card_number is not None and attribute_card_no is not None:
         exact = await get_segment_exact(character_card_number, attribute_card_no, game_mode)
