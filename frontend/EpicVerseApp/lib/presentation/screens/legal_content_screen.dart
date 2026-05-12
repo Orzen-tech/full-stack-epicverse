@@ -98,6 +98,23 @@ We may update this policy. Continued use after changes constitutes acceptance.
 For privacy questions: support@kriyora.com
 
 Last updated: May 2026''';
+    } else if (widget.endpoint.contains('ai-disclosure')) {
+      return '''AI Usage Disclosure
+
+EpicVerse uses OpenAI's Realtime API to provide AI conversations and voice interactions.
+
+Data Shared
+• Voice recordings
+• Message transcripts
+• User prompts
+
+Purpose
+This data is securely sent to OpenAI to generate AI responses in real time.
+
+Data is processed in real-time and not stored by EpicVerse or OpenAI.
+
+EpicVerse does not sell personal data. Data is only used to provide AI functionality.
+''';
     } else {
       return '''EpicVerse Terms of Service
 

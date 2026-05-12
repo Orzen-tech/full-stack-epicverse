@@ -14,6 +14,9 @@ import '../../core/network/websocket_service.dart';
 import '../../services/wake_word_service.dart';
 import '../../core/network/api_config.dart';
 import 'login_screen.dart';
+import 'legal_content_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 
 class CompanionReadyScreen extends StatefulWidget {
   final String gameMode;
@@ -248,7 +251,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // --- Core Lifecycle Handlers ---
   void _postInitHandshake() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initWakeWord();
+      await _initWakeWord(); 
+      // Auto-start of voice turn has been disabled
     });
   }
 
@@ -329,13 +333,13 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         }
       },
     );
-    debugPrint("CompanionScreen: Starting wake word listener...");
-    await wakeWordService.startListening();
-    if (mounted) {
-      setState(() {
-        _isListeningWakeWord = true;
-      });
-    }
+    debugPrint("CompanionScreen: Wake word listener is disabled on load.");
+    // await wakeWordService.startListening();
+    // if (mounted) {
+    //   setState(() {
+    //     _isListeningWakeWord = true;
+    //   });
+    // }
   }
 
   void _showWakeWordSettings() {
@@ -375,8 +379,103 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     );
   }
 
+  Future<bool> _checkAndShowConsent() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasConsented = prefs.getBool('ai_consent_given') ?? false;
+    
+    if (hasConsented) return true;
+    
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('AI Usage Disclosure', style: TextStyle(color: AppColors.primaryGold)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'EpicVerse uses OpenAI\'s Realtime API to provide AI conversations and voice interactions.',
+                style: TextStyle(color: AppColors.textPrimary),
+              ),
+              const SizedBox(height: 16),
+              const Text('Data Shared', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+              const Text('• Voice recordings\n• Message transcripts\n• User prompts', style: TextStyle(color: AppColors.textPrimary)),
+              const SizedBox(height: 16),
+              const Text('Purpose', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+              const Text(
+                'This data is securely sent to OpenAI to generate AI responses in real time.\n\n'
+                'Data is processed in real-time and not stored by EpicVerse or OpenAI.\n\n'
+                'EpicVerse does not sell personal data. Data is only used to provide AI functionality.\n\n'
+                'By tapping “Agree & Continue,” you consent to sending this data to OpenAI for processing.',
+                style: TextStyle(color: AppColors.textPrimary),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LegalContentScreen(
+                          title: 'Privacy Policy',
+                          endpoint: '/legal/privacy',
+                        ),
+                      ),
+                    ),
+                    child: const Text('Privacy Policy', style: TextStyle(color: AppColors.primaryGold, decoration: TextDecoration.underline)),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LegalContentScreen(
+                          title: 'Terms of Service',
+                          endpoint: '/legal/terms',
+                        ),
+                      ),
+                    ),
+                    child: const Text('Terms of Service', style: TextStyle(color: AppColors.primaryGold, decoration: TextDecoration.underline)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Agree & Continue', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    
+    if (result == true) {
+      await prefs.setBool('ai_consent_given', true);
+      return true;
+    }
+    
+    return false;
+  }
+
   Future<void> _startVoiceTurn([int timeoutSeconds = 5]) async {
     debugPrint('[EpicVerse][MIC] Mic tapped → _startVoiceTurn(timeout=${timeoutSeconds}s)');
+    
+    // Check AI Consent
+    final consented = await _checkAndShowConsent();
+    if (!consented) {
+      debugPrint('[EpicVerse][MIC] User declined AI consent');
+      return;
+    }
+
     // 1. Establish Lazy Handshake if not already connected
     if (!_isConnected || !webSocketService.isConnected) {
       if (mounted) setState(() => _statusText = "Authenticating...");

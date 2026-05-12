@@ -181,6 +181,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                     const SizedBox(height: 16),
                     _buildSettingsOption(
+                      icon: Icons.smart_toy_outlined,
+                      title: 'AI Usage Disclosure',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const LegalContentScreen(
+                            title: 'AI Usage Disclosure',
+                            endpoint: '/legal/ai-disclosure',
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _buildSettingsOption(
                       icon: Icons.description_outlined,
                       title: 'Terms of Service',
                       onTap: () => Navigator.push(
@@ -241,6 +255,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         trailing: Icon(Icons.chevron_right, color: AppColors.textMuted),
         onTap: onTap,
+      ),
+    );
+  }
+
+  void _showAIUsageDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('AI Usage Disclosure', style: TextStyle(color: AppColors.primaryGold)),
+        content: const Text(
+          'EpicVerse uses OpenAI\'s Realtime API to generate responses for your companion.\n\n'
+          '• Data Shared: Voice recordings and message transcripts are sent to OpenAI.\n'
+          '• Purpose: To provide real-time, context-aware conversations.\n'
+          '• Privacy: Data is processed according to OpenAI\'s privacy policies.',
+          style: TextStyle(color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close', style: TextStyle(color: AppColors.primaryGold)),
+          ),
+        ],
       ),
     );
   }
