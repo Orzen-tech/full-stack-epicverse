@@ -482,58 +482,6 @@ def _extract_card_numbers(query: str) -> tuple[int, int] | None:
     return _normalize_card_numbers(tokens[0], tokens[1])
 
 
-async def resolve_segment_lookup(
-    character_card_number: int | None = None,
-    attribute_card_no: int | None = None,
-    query: str | None = None,
-    game_mode: str = "OriginArc (Balakanda)",
-) -> dict[str, Any]:
-    if character_card_number is not None and attribute_card_no is not None:
-        exact = await get_segment_exact(character_card_number, attribute_card_no, game_mode)
-        return {
-            "lookup_type": "exact",
-            "result": exact,
-        }
-
-    if query:
-        numbers = _extract_card_numbers(query)
-        if numbers is not None:
-            exact = await get_segment_exact(numbers[0], numbers[1], game_mode)
-            if exact is not None:
-                return {
-                    "lookup_type": "exact",
-                    "result": exact,
-                }
-
-        semantic = await semantic_search_segments(query)
-        return {
-            "lookup_type": "semantic",
-            "result": semantic,
-        }
-
-    return {
-        "lookup_type": "none",
-        "result": None,
-    }
-
-
-async def semantic_search_database(query: str, limit: int = 3) -> str:
-    results = await semantic_search_segments(query=query, limit=limit)
-    if not results:
-        return "No semantically similar combos found."
-    return "\n---\n".join(
-        [
-            (
-                f"[Similarity: {item['similarity']:.3f}] "
-                f"{item['character_card_number']} + {item['attribute_card_no']}\n"
-                f"{item.get('final_status') or ''}\n"
-                f"{item.get('revised_scholar_reason') or item.get('final_segment') or ''}"
-            ).strip()
-            for item in results
-        ]
-    )
-
-
 # Valid character card numbers per mode — sourced from Excel data files.
 # Any character card NOT in this set for the selected mode triggers the "wrong mode" response.
 VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
