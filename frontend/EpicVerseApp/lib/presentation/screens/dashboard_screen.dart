@@ -1,12 +1,18 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
+import '../../core/network/api_config.dart';
+import '../../core/network/session_manager.dart';
 import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
 import 'mode_selection_screen.dart';
 import 'dart:convert';
 import 'settings_screen.dart';
+import 'welcome_screen.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
@@ -26,9 +32,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
   late Animation<double> _floatAnimation;
   late Animation<double> _glowAnimation;
 
+  Timer? _sessionTimer;
+  final Dio _dio = Dio();
+
   @override
   void initState() {
     super.initState();
+    _startSessionWatchdog();
 
     _entryController = AnimationController(
       vsync: this,
@@ -83,8 +93,60 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> with TickerPr
     _entryController.forward();
   }
 
+  void _startSessionWatchdog() {
+    _sessionTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
+      try {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user == null) return;
+        final sessionId = await SessionManager.getSessionId();
+        final res = await _dio.get(
+          '${ApiConfig.apiUrl}/auth/check-session',
+          queryParameters: {'session_id': sessionId},
+          options: Options(headers: await ApiConfig.authHeaders()),
+        );
+        final valid = res.data?['valid'] ?? true;
+        if (!valid && mounted) {
+          _sessionTimer?.cancel();
+          await _showForcedLogoutDialog();
+        }
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _showForcedLogoutDialog() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1B0C2D),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Signed Out', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: const Text(
+          'Your account was signed in on another device. You have been logged out.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              await FirebaseAuth.instance.signOut();
+              if (mounted) {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                  (route) => false,
+                );
+              }
+            },
+            child: const Text('OK', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _sessionTimer?.cancel();
     _entryController.dispose();
     _floatController.dispose();
     _glowController.dispose();

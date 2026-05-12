@@ -33,6 +33,7 @@ from app.services.user_db import (
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
+    verify_session, update_session_id,
 )
 from app.api.dependencies import get_current_user
 
@@ -262,6 +263,17 @@ async def mark_email_verified_route(current_user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="No email on token")
     await mark_email_verified(email)
     return {"status": "ok"}
+
+
+@router.get("/auth/check-session")
+async def check_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    """Returns whether the given session_id is still the active session for this user.
+    If another device has logged in since, the stored session_id will differ."""
+    uid = current_user.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    valid = await verify_session(uid, session_id)
+    return {"valid": valid}
 
 
 @router.get("/user/{firebase_id}")
