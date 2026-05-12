@@ -5,6 +5,7 @@ import '../widgets/network_background.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import '../../providers/user_provider.dart';
@@ -45,6 +46,8 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   bool _isVerifyingEmail = false;
   bool _showOtpRow = false;
   String? _emailOtpError;
+  int _resendCooldown = 0;
+  Timer? _cooldownTimer;
   final FocusNode _emailFocusNode = FocusNode();
   final List<TextEditingController> _otpControllers =
       List.generate(6, (_) => TextEditingController());
@@ -114,6 +117,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
   @override
   void dispose() {
+    _cooldownTimer?.cancel();
     _inviteController.removeListener(_onInviteChanged);
     _emailController.removeListener(_onEmailChanged);
     _nameController.dispose();
@@ -125,6 +129,18 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     for (final n in _otpFocusNodes) n.dispose();
     _emailFocusNode.dispose();
     super.dispose();
+  }
+
+  void _startCooldown() {
+    setState(() => _resendCooldown = 60);
+    _cooldownTimer?.cancel();
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() {
+        _resendCooldown--;
+        if (_resendCooldown <= 0) t.cancel();
+      });
+    });
   }
 
   void _onEmailChanged() {
@@ -152,9 +168,22 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         options: Options(headers: ApiConfig.headers),
       );
       setState(() => _showOtpRow = true);
+      _startCooldown();
     } on DioException catch (e) {
       if (e.response?.statusCode == 429) {
-        _showError('Too many attempts. Please wait before trying again.');
+        final retryAfterStr = e.response?.headers.value('retry-after');
+        final retrySeconds = int.tryParse(retryAfterStr ?? '') ?? 600;
+        final retryMins = (retrySeconds / 60).ceil();
+        setState(() => _resendCooldown = retrySeconds);
+        _cooldownTimer?.cancel();
+        _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+          if (!mounted) { t.cancel(); return; }
+          setState(() {
+            _resendCooldown--;
+            if (_resendCooldown <= 0) t.cancel();
+          });
+        });
+        _showError('Too many attempts. Please wait $retryMins minute${retryMins == 1 ? '' : 's'} before trying again.');
       } else {
         _showError('Failed to send verification code. Please try again.');
       }
@@ -580,6 +609,40 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
               },
             ),
           )),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: _resendCooldown > 0
+              ? RichText(
+                  text: TextSpan(
+                    style: const TextStyle(fontSize: 12),
+                    children: [
+                      const TextSpan(
+                        text: 'Resend code in ',
+                        style: TextStyle(color: AppColors.textMuted),
+                      ),
+                      TextSpan(
+                        text: '${(_resendCooldown ~/ 60).toString().padLeft(2, '0')}:${(_resendCooldown % 60).toString().padLeft(2, '0')}',
+                        style: const TextStyle(
+                          color: AppColors.primaryGold,
+                          fontWeight: FontWeight.bold,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : GestureDetector(
+                  onTap: _isVerifyingEmail ? null : _sendEmailOtp,
+                  child: const Text(
+                    'Resend code',
+                    style: TextStyle(
+                      color: AppColors.primaryGold,
+                      fontSize: 12,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
         ),
       ],
     );

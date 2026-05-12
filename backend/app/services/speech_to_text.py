@@ -1,17 +1,6 @@
-import openai
 import io
 import wave
-from app.core.config import settings
-
-_client = None
-
-def get_openai_client() -> openai.AsyncOpenAI:
-    global _client
-    if _client is None:
-        key = settings.OPENAI_API_KEY
-        print(f"[STT] Initializing OpenAI client. Key set: {bool(key)} | Length: {len(key)}", flush=True)
-        _client = openai.AsyncOpenAI(api_key=key)
-    return _client
+from app.services.openai_client import get_openai_client
 
 async def transcribe_audio(audio_content: bytes, project_id: str = "", location: str = "global") -> dict:
     """Transcribes audio using OpenAI Whisper (pcm16, 16kHz mono)."""

@@ -4,18 +4,10 @@ import asyncio
 from typing import Any
 
 import asyncpg
-import openai
 from redis.asyncio import Redis
 
 from app.core.config import settings
-
-_openai_client: openai.AsyncOpenAI | None = None
-
-def _get_openai_client() -> openai.AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _openai_client
+from app.services.openai_client import get_openai_client
 
 EXACT_LOOKUP_SQL = """
 SELECT
@@ -353,7 +345,7 @@ async def _cache_set(key: str, value: Any, ttl: int) -> None:
 
 async def get_embedding(text: str) -> list[float] | None:
     try:
-        response = await _get_openai_client().embeddings.create(
+        response = await get_openai_client().embeddings.create(
             input=[text.replace("\n", " ").strip()],
             model=settings.EMBEDDING_MODEL,
         )

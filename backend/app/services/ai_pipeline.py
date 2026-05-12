@@ -1,8 +1,9 @@
 import datetime as _dt
-import openai
 import json
 from app.core.config import settings
+from app.services.openai_client import get_openai_client
 from app.services.retriever import query_postgres_database
+from app.services.memory_store import session_store
 
 
 class _SafeJsonEncoder(json.JSONEncoder):
@@ -13,25 +14,13 @@ class _SafeJsonEncoder(json.JSONEncoder):
             return obj.decode("utf-8", errors="replace")
         return str(obj)
 
-_client = None
-
-def get_client() -> openai.AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _client
-
-USER_SESSIONS = {}
-
 async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: str = "default") -> dict:
-    """Uses OpenAI Function Calling with conversation memory."""
-    global USER_SESSIONS
-    
-    if session_id not in USER_SESSIONS:
-         USER_SESSIONS[session_id] = []
-         
+    """Uses OpenAI Function Calling with conversation memory (Redis-backed, in-memory fallback)."""
+    stored = await session_store.get_session_data(session_id)
+    all_msgs: list = stored.get("messages", [])
+
     # Keep only the last 10 messages for context so we don't blow up token limits
-    context_msgs = USER_SESSIONS[session_id][-10:]
+    context_msgs = all_msgs[-10:]
     
     # 1. Provide the exact SYSTEM ROLE instructions
     system_prompt = f"""SYSTEM ROLE
@@ -123,7 +112,7 @@ NEVER switch languages unless the user switches first."""
     messages.append({"role": "user", "content": text})
     
     try:
-        client = get_client()
+        client = get_openai_client()
         # 2. Call OpenAI with the database tool
         response = await client.chat.completions.create(
             model=settings.OPENAI_MODEL,
@@ -161,7 +150,7 @@ NEVER switch languages unless the user switches first."""
                     messages.append(tool_msg)
             
             # 4. Generate the final response grounded in the DB results and translated
-            final_response = await get_client().chat.completions.create(
+            final_response = await get_openai_client().chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=messages
             )
@@ -177,11 +166,11 @@ NEVER switch languages unless the user switches first."""
         print(f"RESPONSE           : {final_text}", flush=True)
         print("="*50 + "\n", flush=True)
         
-        # 5. Cleanly store only text-based history to avoid future tool conflicts
-        USER_SESSIONS[session_id].append({"role": "user", "content": text})
-        USER_SESSIONS[session_id].append({"role": "assistant", "content": final_text})
-        # Trim to last 20 entries (10 exchanges) to prevent unbounded memory growth
-        USER_SESSIONS[session_id] = USER_SESSIONS[session_id][-20:]
+        # 5. Persist text-only history (trim to last 20 to prevent unbounded growth)
+        all_msgs.append({"role": "user", "content": text})
+        all_msgs.append({"role": "assistant", "content": final_text})
+        trimmed = all_msgs[-20:]
+        await session_store.set_session_data(session_id, {"messages": trimmed})
         
         return {"final_response": final_text}
 
