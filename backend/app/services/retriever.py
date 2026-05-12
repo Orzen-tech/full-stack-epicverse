@@ -482,58 +482,6 @@ def _extract_card_numbers(query: str) -> tuple[int, int] | None:
     return _normalize_card_numbers(tokens[0], tokens[1])
 
 
-async def resolve_segment_lookup(
-    character_card_number: int | None = None,
-    attribute_card_no: int | None = None,
-    query: str | None = None,
-    game_mode: str = "OriginArc (Balakanda)",
-) -> dict[str, Any]:
-    if character_card_number is not None and attribute_card_no is not None:
-        exact = await get_segment_exact(character_card_number, attribute_card_no, game_mode)
-        return {
-            "lookup_type": "exact",
-            "result": exact,
-        }
-
-    if query:
-        numbers = _extract_card_numbers(query)
-        if numbers is not None:
-            exact = await get_segment_exact(numbers[0], numbers[1], game_mode)
-            if exact is not None:
-                return {
-                    "lookup_type": "exact",
-                    "result": exact,
-                }
-
-        semantic = await semantic_search_segments(query)
-        return {
-            "lookup_type": "semantic",
-            "result": semantic,
-        }
-
-    return {
-        "lookup_type": "none",
-        "result": None,
-    }
-
-
-async def semantic_search_database(query: str, limit: int = 3) -> str:
-    results = await semantic_search_segments(query=query, limit=limit)
-    if not results:
-        return "No semantically similar combos found."
-    return "\n---\n".join(
-        [
-            (
-                f"[Similarity: {item['similarity']:.3f}] "
-                f"{item['character_card_number']} + {item['attribute_card_no']}\n"
-                f"{item.get('final_status') or ''}\n"
-                f"{item.get('revised_scholar_reason') or item.get('final_segment') or ''}"
-            ).strip()
-            for item in results
-        ]
-    )
-
-
 # Valid character card numbers per mode — sourced from Excel data files.
 # Any character card NOT in this set for the selected mode triggers the "wrong mode" response.
 VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
@@ -552,12 +500,22 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
         c_num = int(character)
         k_num = int(attribute)
 
-        # LOGIC RULE: Both numbers are character cards (1 to 24)
+        # LOGIC RULE: Both numbers are character cards (1–24)
         if 1 <= c_num <= 24 and 1 <= k_num <= 24:
             return json.dumps({
                 "status": "Invalid",
+                "both_character": True,
                 "final_segment": "Both numbers are character cards, they are not a combo.",
-                "revised_scholar_reason": "In the game rules, a combo must consist of one character card (1-24) and one attribute card (25+). Two character cards cannot form a combination."
+                "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two character cards cannot form a combination."
+            })
+
+        # LOGIC RULE: Both numbers are attribute cards (25–104)
+        if 25 <= c_num <= 104 and 25 <= k_num <= 104:
+            return json.dumps({
+                "status": "Invalid",
+                "both_attribute": True,
+                "final_segment": "Both numbers are attribute cards, they are not a combo.",
+                "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two attribute cards cannot form a combination."
             })
 
         # LOGIC RULE: Character card not present in this mode at all

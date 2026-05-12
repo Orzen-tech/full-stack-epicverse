@@ -2,7 +2,7 @@ import io
 import wave
 from app.services.openai_client import get_openai_client
 
-async def transcribe_audio(audio_content: bytes, project_id: str = "", location: str = "global") -> dict:
+async def transcribe_audio(audio_content: bytes) -> dict:
     """Transcribes audio using OpenAI Whisper (pcm16, 16kHz mono)."""
 
     if not audio_content or len(audio_content) < 100:

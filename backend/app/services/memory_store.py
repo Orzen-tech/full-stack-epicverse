@@ -62,10 +62,4 @@ class SessionStore:
             self._redis_enabled = False
             return {}
 
-    async def update_last_numbers(self, user_uid: str, numbers: list[str]):
-        """Specialized helper to update just the card numbers."""
-        data = await self.get_session_data(user_uid)
-        data["last_numbers"] = numbers
-        await self.set_session_data(user_uid, data)
-
 session_store = SessionStore()
