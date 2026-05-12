@@ -51,7 +51,7 @@ The PostgreSQL database contains a table called `card_combos`.
 Current selected mode: {game_mode or 'Mode 1'}
 
 The table contains the following key columns:
-gameplay_mode (e.g., 'Mode 1', 'Mode 2'), character, atributes, combo_status, validation_reason, character_card_number, virtue_karma_card_number
+gameplay_mode (e.g., 'OriginArc (Balakanda)', 'CrownShift (AyodhyaKanda)'), character, attribute, final_status, revised_scholar_reason, character_card_number, attribute_card_no
 
 ---
 
@@ -108,7 +108,7 @@ NEVER switch languages unless the user switches first."""
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "mode": {"type": "string", "description": "The gameplay_mode (e.g. 'Mode 1', 'Mode 2')."},
+                        "mode": {"type": "string", "description": "The gameplay_mode exactly as provided (e.g. 'OriginArc (Balakanda)', 'CrownShift (AyodhyaKanda)', 'WildRun (AranyaKanda)', 'GlowLine (KishkindhaKanda)', 'lankaLeap (SundaraKanda)', 'WarRoom (YuddhaKanda)', 'AfterLight (UttaraKanda)')."},
                         "character": {"type": "string", "description": "The character name or card number ID."},
                         "attribute": {"type": "string", "description": "The attribute card number (25+)."}
                     },
