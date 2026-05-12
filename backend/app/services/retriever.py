@@ -500,12 +500,22 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
         c_num = int(character)
         k_num = int(attribute)
 
-        # LOGIC RULE: Both numbers are character cards (1 to 24)
+        # LOGIC RULE: Both numbers are character cards (1–24)
         if 1 <= c_num <= 24 and 1 <= k_num <= 24:
             return json.dumps({
                 "status": "Invalid",
+                "both_character": True,
                 "final_segment": "Both numbers are character cards, they are not a combo.",
-                "revised_scholar_reason": "In the game rules, a combo must consist of one character card (1-24) and one attribute card (25+). Two character cards cannot form a combination."
+                "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two character cards cannot form a combination."
+            })
+
+        # LOGIC RULE: Both numbers are attribute cards (25–104)
+        if 25 <= c_num <= 104 and 25 <= k_num <= 104:
+            return json.dumps({
+                "status": "Invalid",
+                "both_attribute": True,
+                "final_segment": "Both numbers are attribute cards, they are not a combo.",
+                "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two attribute cards cannot form a combination."
             })
 
         # LOGIC RULE: Character card not present in this mode at all

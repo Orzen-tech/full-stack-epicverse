@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.services.openai_client import get_openai_client
 from app.services.retriever import query_postgres_database
 from app.services.memory_store import session_store
+from app.services.realtime_service import _pick_combo_message
 
 
 class _SafeJsonEncoder(json.JSONEncoder):
@@ -13,6 +14,7 @@ class _SafeJsonEncoder(json.JSONEncoder):
         if isinstance(obj, bytes):
             return obj.decode("utf-8", errors="replace")
         return str(obj)
+
 
 async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: str = "default") -> dict:
     """Uses OpenAI Function Calling with conversation memory (Redis-backed, in-memory fallback)."""
@@ -64,19 +66,21 @@ PROCESSING RULES
 1. Extract the two numbers from the user's question, OR refer to numbers discussed previously in the conversation context.
 2. Determine which mode the player has selected (Current Mode: {game_mode or 'Mode 1'}).
 3. Query the 'card_combos' table for that mode by calling the 'query_database_for_combo' tool.
-4. IF THE USER ASKS IF A COMBINATION EXISTS (e.g. "is 1 and 29 a combo?", "is it a combo?"): 
-   You must report the EXACT status from the database. Be detailed: e.g., "Combo Status: Valid (Final Status: Valid (Active))" or "Combo Status: Valid (Final Status: Excluded)". 
-   DO NOT simplify. State it exactly as provided in the tool result in the user's language.
-   CRITICAL: DO NOT provide the validation_reason or any explanation at this stage. Keep it to one short sentence.
-5. IF THE USER ASKS WHY OR HOW (e.g. "why?", "how?", "ஏன்?"): 
-   Return ONLY the 'validation_reason' from the database in the exact language the user just used for the question.
-6. If the database result contains "character_not_in_mode": true, it means the character card does not exist in the selected mode at all. In this case, pick ONE message at random from the list below and respond with it translated into the user's language:
+4. IF THE USER ASKS IF A COMBINATION EXISTS (e.g. "is 1 and 29 a combo?", "is it a combo?"):
+   The tool result will contain a 'flavor_msg' and the card numbers 'character' and 'attribute'.
+   Respond EXACTLY in this format: "Card {{character}} and {{attribute}} — {{flavor_msg}}"
+   Translate this entire sentence into the user's language. Nothing else. No extra explanation.
+5. IF THE USER ASKS WHY OR HOW (e.g. "why?", "how?", "ஏன்?"):
+   Return ONLY the 'revised_scholar_reason' from the database translated into the exact language the user just used.
+6. If the database result contains "both_character": true, respond ONLY with: "Two character card numbers can't be a combo." — translated into the user's language.
+7. If the database result contains "both_attribute": true, respond ONLY with: "Two attribute card numbers can't be a combo." — translated into the user's language.
+8. If the database result contains "character_not_in_mode": true, it means the character card does not exist in the selected mode at all. In this case, pick ONE message at random from the list below and respond with it translated into the user's language:
    - "Wrong mode. This character has no part in this chapter. Big card, wrong room."
    - "This character is not part of this mode's story. Not their chapter, not their moment."
    - "This character sat this mode out entirely. No role, no lines, no score."
    - "Not their era. The plot moved on without them for this one."
    - "Lore-accurate no-show. This character simply doesn't exist in this mode."
-7. If no matching row exists but the character does exist in the mode, tell the user that specific combination is not valid.
+9. If no matching row exists but the character does exist in the mode, tell the user that specific combination is not valid.
 
 IMPORTANT: You MUST detect the language of the CURRENT user query and respond in that EXACT same language. 
 1. If the current query is in English (e.g., "Why?", "How?"), respond ONLY in English.
@@ -141,11 +145,18 @@ NEVER switch languages unless the user switches first."""
                         args.get('attribute')
                     )
 
+                    # Inject flavor_msg + card numbers so AI formats response as "Card X and Y — [msg]"
+                    db_parsed = json.loads(db_result) if isinstance(db_result, str) else db_result
+                    flavor = _pick_combo_message(db_parsed.get("status"), is_error=False)
+                    db_parsed["flavor_msg"] = flavor
+                    db_parsed["character"] = args.get("character")
+                    db_parsed["attribute"] = args.get("attribute")
+
                     tool_msg = {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": tool_call.function.name,
-                        "content": json.dumps(db_result, cls=_SafeJsonEncoder) if isinstance(db_result, (dict, list)) else str(db_result)
+                        "content": json.dumps(db_parsed, cls=_SafeJsonEncoder)
                     }
                     messages.append(tool_msg)
             
