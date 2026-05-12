@@ -33,6 +33,7 @@ from app.services.user_db import (
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
+    verify_session, update_session_id,
 )
 from app.api.dependencies import get_current_user
 
@@ -262,6 +263,17 @@ async def mark_email_verified_route(current_user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="No email on token")
     await mark_email_verified(email)
     return {"status": "ok"}
+
+
+@router.get("/auth/check-session")
+async def check_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    """Returns whether the given session_id is still the active session for this user.
+    If another device has logged in since, the stored session_id will differ."""
+    uid = current_user.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    valid = await verify_session(uid, session_id)
+    return {"valid": valid}
 
 
 @router.get("/user/{firebase_id}")
@@ -827,7 +839,7 @@ async def admin_dashboard(key: str = ""):
   <title>EpicVerse Admin Dashboard</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0F0720;color:#E8E0F0;min-height:100vh;padding:24px}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#3C1740;color:#E8E0F0;min-height:100vh;padding:24px}
     h1{font-size:22px;font-weight:700;color:#C084FC;margin-bottom:4px}
     .subtitle{font-size:13px;color:#6B4FA0;margin-bottom:28px}
     .stats{display:flex;gap:16px;margin-bottom:32px;flex-wrap:wrap}
@@ -857,6 +869,7 @@ async def admin_dashboard(key: str = ""):
   <div class="stats">
     <div class="stat"><div class="stat-val" id="total-users">—</div><div class="stat-label">Total Users</div></div>
     <div class="stat"><div class="stat-val" id="total-feedback">—</div><div class="stat-label">Feedback</div></div>
+    <div class="stat"><div class="stat-val" id="total-deletions" style="color:#F87171">—</div><div class="stat-label">Pending Deletion</div></div>
   </div>
 
   <div class="refresh"><span class="dot"></span>Auto-refreshes every 30 seconds &nbsp;|&nbsp; Last updated: <span id="last-updated">—</span></div>
@@ -877,6 +890,14 @@ async def admin_dashboard(key: str = ""):
     </table>
   </div>
 
+  <div class="section">
+    <div class="section-title" style="color:#F87171">Pending Deletion <span class="badge" style="background:#4B1C1C;color:#F87171" id="deletions-badge">0</span></div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Requested At</th><th>Purge Date</th></tr></thead>
+      <tbody id="deletions-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
 const fmt = s => s ? new Date(s).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
@@ -889,8 +910,10 @@ async function load() {
 
     document.getElementById('total-users').textContent = d.total_users;
     document.getElementById('total-feedback').textContent = d.total_feedback;
+    document.getElementById('total-deletions').textContent = d.total_deletions || 0;
     document.getElementById('users-badge').textContent = d.total_users;
     document.getElementById('feedback-badge').textContent = d.total_feedback;
+    document.getElementById('deletions-badge').textContent = d.total_deletions || 0;
     document.getElementById('last-updated').textContent = fmt(new Date().toISOString());
 
     // Users table
@@ -913,6 +936,18 @@ async function load() {
       <td>${f.email || '—'}</td>
       <td class="msg">${f.message}</td>
       <td class="time">${fmt(f.created_at)}</td>
+    </tr>`).join('');
+
+    // Deletions table
+    const purgeDate = s => { const d = new Date(s); d.setDate(d.getDate()+30); return fmt(d.toISOString()); };
+    const db = document.getElementById('deletions-body');
+    if (!d.deletions || !d.deletions.length) { db.innerHTML = '<tr><td colspan="5" class="empty">No pending deletions</td></tr>'; }
+    else db.innerHTML = d.deletions.map((u,i) => `<tr>
+      <td class="time">${i+1}</td>
+      <td style="color:#F87171">${u.display_name || '—'}</td>
+      <td style="color:#F87171">${u.email || '—'}</td>
+      <td class="time" style="color:#F87171">${fmt(u.deletion_requested_at)}</td>
+      <td class="time" style="color:#FCA5A5">${purgeDate(u.deletion_requested_at)}</td>
     </tr>`).join('');
   } catch(e) { console.error(e); }
 }
