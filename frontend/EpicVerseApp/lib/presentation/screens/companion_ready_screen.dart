@@ -14,6 +14,7 @@ import '../../core/network/websocket_service.dart';
 import '../../services/wake_word_service.dart';
 import '../../core/network/api_config.dart';
 import 'login_screen.dart';
+import 'legal_content_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 
@@ -389,24 +390,69 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       barrierDismissible: false,
       builder: (context) => AlertDialog(
         backgroundColor: AppColors.surfaceElevated,
-        title: const Text('AI Consent Required', style: TextStyle(color: AppColors.primaryGold)),
-        content: const Text(
-          'This app sends your messages and voice input to third-party AI services (OpenAI) to generate responses.\n\n'
-          'Data shared may include:\n'
-          '• Messages\n'
-          '• Voice input\n'
-          '• User prompts\n\n'
-          'Third-party providers may process this data according to their privacy policies. Do you agree?',
-          style: TextStyle(color: AppColors.textPrimary),
+        title: const Text('AI Usage Disclosure', style: TextStyle(color: AppColors.primaryGold)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'EpicVerse uses OpenAI\'s Realtime API to provide AI conversations and voice interactions.',
+                style: TextStyle(color: AppColors.textPrimary),
+              ),
+              const SizedBox(height: 16),
+              const Text('Data Shared', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+              const Text('• Voice recordings\n• Message transcripts\n• User prompts', style: TextStyle(color: AppColors.textPrimary)),
+              const SizedBox(height: 16),
+              const Text('Purpose', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+              const Text(
+                'This data is securely sent to OpenAI to generate AI responses in real time.\n\n'
+                'Data is processed in real-time and not stored by EpicVerse or OpenAI.\n\n'
+                'EpicVerse does not sell personal data. Data is only used to provide AI functionality.\n\n'
+                'By tapping “Agree & Continue,” you consent to sending this data to OpenAI for processing.',
+                style: TextStyle(color: AppColors.textPrimary),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LegalContentScreen(
+                          title: 'Privacy Policy',
+                          endpoint: '/legal/privacy',
+                        ),
+                      ),
+                    ),
+                    child: const Text('Privacy Policy', style: TextStyle(color: AppColors.primaryGold, decoration: TextDecoration.underline)),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LegalContentScreen(
+                          title: 'Terms of Service',
+                          endpoint: '/legal/terms',
+                        ),
+                      ),
+                    ),
+                    child: const Text('Terms of Service', style: TextStyle(color: AppColors.primaryGold, decoration: TextDecoration.underline)),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Decline', style: TextStyle(color: AppColors.textMuted)),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Agree', style: TextStyle(color: AppColors.primaryGold)),
+            child: const Text('Agree & Continue', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
           ),
         ],
       ),

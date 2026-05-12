@@ -183,7 +183,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     _buildSettingsOption(
                       icon: Icons.smart_toy_outlined,
                       title: 'AI Usage Disclosure',
-                      onTap: () => _showAIUsageDialog(context),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const LegalContentScreen(
+                            title: 'AI Usage Disclosure',
+                            endpoint: '/legal/ai-disclosure',
+                          ),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 16),
                     _buildSettingsOption(
