@@ -318,6 +318,8 @@ async def _normalize_number_async(value: str) -> int | None:
 # ── Language detector ─────────────────────────────────────────────────────────
 
 def _detect_language(text: str) -> str:
+    """Fast Unicode-range language detection. Returns 'Latin' for Latin-script languages
+    (English/French/Spanish/etc.) which need a slower LLM call to distinguish."""
     for ch in text:
         cp = ord(ch)
         if 0x0B80 <= cp <= 0x0BFF: return "Tamil"
@@ -326,7 +328,18 @@ def _detect_language(text: str) -> str:
         if 0x0600 <= cp <= 0x06FF: return "Arabic"
         if 0x4E00 <= cp <= 0x9FFF: return "Chinese"
         if 0x3040 <= cp <= 0x30FF: return "Japanese"
-    return "English"
+        if 0xAC00 <= cp <= 0xD7A3: return "Korean"
+        if 0x1100 <= cp <= 0x11FF: return "Korean"
+        if 0x0E00 <= cp <= 0x0E7F: return "Thai"
+        if 0x10A0 <= cp <= 0x10FF: return "Georgian"
+        if 0x0400 <= cp <= 0x04FF: return "Russian"
+        if 0x0370 <= cp <= 0x03FF: return "Greek"
+        if 0x0590 <= cp <= 0x05FF: return "Hebrew"
+        if 0x0980 <= cp <= 0x09FF: return "Bengali"
+        if 0x0A80 <= cp <= 0x0AFF: return "Gujarati"
+        if 0x0C00 <= cp <= 0x0C7F: return "Telugu"
+        if 0x0C80 <= cp <= 0x0CFF: return "Kannada"
+    return "Latin"
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -374,15 +387,13 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 6. Do not summarize, shorten, add context, or add any extra sentences.
 
 ━━━ LANGUAGE RULE ━━━
-- Detect language from the CURRENT user turn ONLY — the audio/words the user just spoke RIGHT NOW.
-- Do NOT use any prior conversation turns to determine the response language.
-- Each user turn is completely independent for language detection.
-- Always respond in the exact language of the CURRENT turn. No exceptions.
+- The tool result always contains a "respond_in_language" field (e.g. "Tamil", "French", "English").
+  This is the EXACT language the user just spoke, detected from their audio transcript.
+  You MUST respond in that exact language. This field overrides everything else. No exceptions.
+- For MODE 2 (why/how follow-up with no tool call): detect language directly from the current user utterance. Each turn is independent — do NOT carry over the language from previous turns.
 - Never mix languages in a single response.
-- If the current turn is English, respond in English — even if all previous turns were in another language.
-- If the current turn is Tamil, respond in Tamil — even if the previous turn was in English.
 - The avatar_response and revised_scholar_reason fields are always stored in English.
-  If the user spoke any non-English language, translate those fields before speaking — never output them in English to a non-English user.
+  Always translate them into respond_in_language before speaking — never output English to a non-English user.
 
 ━━━ CRITICAL — NO HALLUCINATION ━━━
 - NEVER say "valid" or "invalid" without first calling query_database_for_combo. No exceptions.
@@ -431,6 +442,54 @@ class RealtimeSession:
         self._tts_chunk_count           = 0       # audio chunks streamed to client
         self._partial_transcript        = ""      # accumulated STT partial
         self._tts_done_ts: Optional[float] = None  # when TTS last finished (echo cooldown)
+        self._current_language          = "English"  # language detected from latest STT transcript
+        self._language_task: Optional[asyncio.Task] = None  # async LLM language detection
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Language detection
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _detect_language_for_turn(self, transcript: str) -> None:
+        """Detect the language of the current user turn and store in self._current_language.
+        Non-Latin scripts are detected instantly via Unicode ranges.
+        Latin-script languages (English, French, Spanish, German, etc.) are identified
+        with a gpt-4o-mini call so they don't all collapse to 'English'."""
+        lang = _detect_language(transcript)
+        if lang != "Latin":
+            # Non-Latin script — already known (Tamil, Arabic, Korean, etc.)
+            self._current_language = lang
+            _log("LANG DETECTED",  self.uid, f"script-based → {lang}")
+            return
+
+        # Latin script — need LLM to distinguish English/French/Spanish/etc.
+        if len(transcript.strip()) < 3:
+            self._current_language = "English"
+            return
+        try:
+            client = get_openai_client()
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Identify the language of the following text. "
+                            "Reply with ONLY the language name in English "
+                            "(e.g. 'English', 'French', 'Spanish', 'German', 'Portuguese', 'Italian', 'Dutch', 'Swedish'). "
+                            "Nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": transcript},
+                ],
+                max_tokens=10,
+                temperature=0,
+            )
+            lang = (response.choices[0].message.content or "English").strip()
+            self._current_language = lang
+            _log("LANG DETECTED",  self.uid, f"LLM-based → {lang} | transcript='{transcript[:50]}'")
+        except Exception as e:
+            _log("LANG DETECT ERR", self.uid, f"{e}")
+            self._current_language = "English"
 
     # ─────────────────────────────────────────────────────────────────────────
     # OpenAI connection
@@ -629,6 +688,18 @@ class RealtimeSession:
                     avatar_msg = f"Card {char_int} and {attr_int} — {flavor}"
                 result["avatar_response"] = avatar_msg
                 _log("AVATAR RESPONSE", self.uid, f"\"{avatar_msg}\"")
+
+                # Wait for language detection to finish (started at STT complete).
+                # This runs in parallel with the DB query so adds near-zero latency.
+                if self._language_task and not self._language_task.done():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self._language_task), timeout=2.0
+                        )
+                    except Exception:
+                        pass
+                result["respond_in_language"] = self._current_language
+                _log("LANG INJECTED",  self.uid, f"respond_in_language={self._current_language}")
 
             output_str = (
                 json.dumps(result, cls=_SafeJsonEncoder)
@@ -899,12 +970,18 @@ class RealtimeSession:
                     transcript = event.get("transcript", "").strip()
                     self._partial_transcript = ""
                     if transcript:
-                        lang = _detect_language(transcript)
                         _log_sep(self.uid, "USER SPOKE")
                         _log("STT COMPLETE",     self.uid,
-                             f"[{lang}] \"{transcript}\"")
+                             f"\"{transcript}\"")
                         _log("STT SEND TO LLM",  self.uid,
                              f"transcript forwarded to LLM context | len={len(transcript)}chars")
+                        # Fire language detection concurrently — result stored in
+                        # self._current_language before _handle_tool_call needs it.
+                        if self._language_task and not self._language_task.done():
+                            self._language_task.cancel()
+                        self._language_task = asyncio.create_task(
+                            self._detect_language_for_turn(transcript)
+                        )
                         self._response_start_ts = time.monotonic()
 
                 elif etype == "conversation.item.input_audio_transcription.failed":
