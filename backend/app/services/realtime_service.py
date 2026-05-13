@@ -12,6 +12,7 @@ from fastapi import WebSocket
 
 from app.core.config import settings
 from app.services.retriever import query_postgres_database
+from app.services.openai_client import get_openai_client
 
 # URL is built from settings.OPENAI_REALTIME_MODEL (env-overridable) so we
 # don't hard-code a dated snapshot that OpenAI may retire without warning.
@@ -250,6 +251,70 @@ def _normalize_number(value: str) -> int | None:
     return None
 
 
+# Module-level cache so repeated words (same session or across sessions) skip the LLM call
+_NUMBER_WORD_CACHE: dict[str, int | None] = {}
+
+
+async def _normalize_number_async(value: str) -> int | None:
+    """Convert spoken/written number in any language to int.
+
+    Fast path: _normalize_number (hardcoded dict + word2number).
+    Fallback: gpt-4o-mini call for words in any of the 100+ languages
+    that the dict doesn't cover (e.g. French, Korean, Persian, Swahili...).
+    Results are cached in _NUMBER_WORD_CACHE to avoid duplicate API calls.
+    """
+    # Fast path — covers English/Tamil/Hindi/Malayalam and already-digit strings
+    result = _normalize_number(value)
+    if result is not None:
+        return result
+
+    if not value or not value.strip():
+        return None
+
+    stripped = value.strip()
+
+    # Cache hit — avoid LLM call for a word we've seen before
+    if stripped in _NUMBER_WORD_CACHE:
+        return _NUMBER_WORD_CACHE[stripped]
+
+    # LLM fallback — handles any language the dict misses
+    try:
+        client = get_openai_client()
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a number extractor. "
+                        "The user gives you a word or short phrase representing a number "
+                        "in any language (French, Korean, Arabic, Swahili, etc.). "
+                        "Reply with ONLY the integer (e.g. 42). "
+                        "If it is not a number word, reply with exactly: null"
+                    ),
+                },
+                {"role": "user", "content": stripped},
+            ],
+            max_tokens=10,
+            temperature=0,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text.lower() == "null":
+            _NUMBER_WORD_CACHE[stripped] = None
+            return None
+        parsed = int(float(text))  # handles "42" and "42.0"
+        # Sanity-check: card numbers in this game are 1–104
+        if not (1 <= parsed <= 104):
+            _NUMBER_WORD_CACHE[stripped] = None
+            return None
+        _NUMBER_WORD_CACHE[stripped] = parsed
+        return parsed
+    except Exception as e:
+        print(f"[NORM] LLM number fallback failed for '{stripped}': {e}", flush=True)
+        _NUMBER_WORD_CACHE[stripped] = None
+        return None
+
+
 # ── Language detector ─────────────────────────────────────────────────────────
 
 def _detect_language(text: str) -> str:
@@ -483,9 +548,9 @@ class RealtimeSession:
         _log("TOOL ARGS RAW",       self.uid,
              f"mode='{target_mode}' | char='{char}' | attribute='{attribute}'")
 
-        # Normalise multilingual number words → digits
-        char_int  = _normalize_number(char)
-        attr_int  = _normalize_number(attribute)
+        # Normalise multilingual number words → digits (async: LLM fallback for 100+ langs)
+        char_int  = await _normalize_number_async(char)
+        attr_int  = await _normalize_number_async(attribute)
         _log("TOOL ARGS NORM",      self.uid,
              f"char_norm={char_int} | attr_norm={attr_int}")
 
