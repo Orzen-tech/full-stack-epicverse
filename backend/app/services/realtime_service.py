@@ -335,6 +335,13 @@ _BACKEND_ONLY_TYPES = {"stop_wakeword", "start_wakeword", "ping", "end"}
 
 SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card combo validation game. You have two response modes only.
 
+━━━ SILENCE RULE (read this first) ━━━
+- Do NOT speak at session start.
+- Do NOT greet the user or acknowledge the connection.
+- Do NOT respond to silence, breathing, background noise, or any audio that is not a clear question.
+- Do NOT respond to incomplete utterances or single words that are not card numbers.
+- Remain completely silent until the user clearly asks a combo question or a why/how follow-up.
+
 ━━━ MODE 1 — COMBO CHECK (user asks if X and Y is a combo) ━━━
 1. Extract TWO card numbers from what the user said.
    The user may speak in ANY language — English, Tamil, Hindi, Malayalam, Arabic, French, Japanese, Korean, Spanish, German, or any other language.
@@ -367,10 +374,13 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 6. Do not summarize, shorten, add context, or add any extra sentences.
 
 ━━━ LANGUAGE RULE ━━━
-- Automatically detect the language of EVERY user message.
-- Always respond in that exact same language. No exceptions.
+- Detect language from the CURRENT user turn ONLY — the audio/words the user just spoke RIGHT NOW.
+- Do NOT use any prior conversation turns to determine the response language.
+- Each user turn is completely independent for language detection.
+- Always respond in the exact language of the CURRENT turn. No exceptions.
 - Never mix languages in a single response.
-- Never switch languages unless the user switches first.
+- If the current turn is English, respond in English — even if all previous turns were in another language.
+- If the current turn is Tamil, respond in Tamil — even if the previous turn was in English.
 - The avatar_response and revised_scholar_reason fields are always stored in English.
   If the user spoke any non-English language, translate those fields before speaking — never output them in English to a non-English user.
 
@@ -482,9 +492,9 @@ class RealtimeSession:
                 "input_audio_transcription": {"model": "whisper-1"},
                 "turn_detection": {
                     "type":                "server_vad",
-                    "threshold":           0.5,
+                    "threshold":           0.7,
                     "prefix_padding_ms":   200,
-                    "silence_duration_ms": 400,
+                    "silence_duration_ms": 500,
                 },
                 "tools": [{
                     "type":        "function",
