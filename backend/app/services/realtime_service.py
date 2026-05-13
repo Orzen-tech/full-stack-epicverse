@@ -477,21 +477,24 @@ class RealtimeSession:
     async def _detect_language_for_turn(self, transcript: str) -> None:
         """Detect the language of the current user turn and store in self._current_language.
 
-        Fast path: if the Unicode script matches the previous turn, reuse the cached
-        language — saves 150–400ms on every repeat turn in the same language.
-        LLM call only fires when the script changes or on the first turn.
+        Unique scripts (Tamil, Malayalam, Telugu, etc.) — cached after first LLM call.
+        Shared scripts (Devanagari, ArabicScript, Cyrillic, Latin) — LLM called every
+        single turn so Hindi/Marathi, Arabic/Urdu, English/French never collide.
         """
         script = _detect_language(transcript)  # e.g. "Tamil", "Devanagari", "Latin"
-        initial = script if script in _UNIQUE_SCRIPT_LANGUAGES else "English"
 
-        # Cache only for unique scripts (Tamil, Malayalam, Telugu, etc.)
-        # Shared scripts (Devanagari=Hindi/Marathi, ArabicScript=Arabic/Urdu,
-        # Cyrillic, Latin) always call LLM to avoid language collisions.
+        # Unique script + same as last turn → language can't have changed, reuse cache
         if script in _UNIQUE_SCRIPT_LANGUAGES and script == self._last_script:
             _log("LANG CACHED",    self.uid, f"unique script ({script}) → reusing {self._current_language}")
             return
 
-        self._current_language = initial
+        # For shared scripts keep the previously detected language as fallback
+        # so _current_language is never wrong while the LLM call is in-flight
+        if script not in _UNIQUE_SCRIPT_LANGUAGES:
+            # don't overwrite — previous language stays until LLM responds
+            pass
+        else:
+            self._current_language = script  # unique script = language name
         self._last_script = script
 
         if len(transcript.strip()) < 3:
