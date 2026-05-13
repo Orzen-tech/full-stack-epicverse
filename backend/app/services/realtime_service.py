@@ -444,6 +444,7 @@ class RealtimeSession:
         self._tts_done_ts: Optional[float] = None  # when TTS last finished (echo cooldown)
         self._current_language          = "English"  # language detected from latest STT transcript
         self._language_task: Optional[asyncio.Task] = None  # async LLM language detection
+        self._last_script               = ""         # Unicode script of last detected turn
 
     # ─────────────────────────────────────────────────────────────────────────
     # Language detection
@@ -451,17 +452,28 @@ class RealtimeSession:
 
     async def _detect_language_for_turn(self, transcript: str) -> None:
         """Detect the language of the current user turn and store in self._current_language.
-        Unicode ranges set a fast initial guess, but the LLM call always runs and
-        overwrites it — this handles Hindi vs Marathi, Arabic vs Urdu, romanized
-        languages, and all Latin-script languages accurately."""
-        # Fast initial guess so _current_language is never empty
-        initial = _detect_language(transcript)
-        self._current_language = initial if initial != "Latin" else "English"
+
+        Fast path: if the Unicode script matches the previous turn, reuse the cached
+        language — saves 150–400ms on every repeat turn in the same language.
+        LLM call only fires when the script changes or on the first turn.
+        """
+        script = _detect_language(transcript)  # e.g. "Tamil", "Latin", "Arabic"
+        initial = script if script != "Latin" else "English"
+
+        # Script unchanged from last turn — reuse cached language, skip LLM call
+        if script == self._last_script and self._current_language != "English" or \
+                script == self._last_script and script != "Latin":
+            _log("LANG CACHED",    self.uid, f"script unchanged ({script}) → reusing {self._current_language}")
+            return
+
+        self._current_language = initial
+        self._last_script = script
 
         if len(transcript.strip()) < 3:
             return
 
-        # Always call LLM — it's the only accurate source for all 100+ languages
+        # Script changed or first turn — call LLM for accurate identification
+        # (handles Hindi vs Marathi, Arabic vs Urdu, all Latin-script languages)
         try:
             client = get_openai_client()
             response = await client.chat.completions.create(
@@ -549,7 +561,7 @@ class RealtimeSession:
                     "type":                "server_vad",
                     "threshold":           0.7,
                     "prefix_padding_ms":   200,
-                    "silence_duration_ms": 500,
+                    "silence_duration_ms": 300,
                 },
                 "tools": [{
                     "type":        "function",
