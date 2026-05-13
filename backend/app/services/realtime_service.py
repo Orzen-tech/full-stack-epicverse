@@ -318,28 +318,52 @@ async def _normalize_number_async(value: str) -> int | None:
 # ── Language detector ─────────────────────────────────────────────────────────
 
 def _detect_language(text: str) -> str:
-    """Fast Unicode-range language detection. Returns 'Latin' for Latin-script languages
-    (English/French/Spanish/etc.) which need a slower LLM call to distinguish."""
+    """Fast Unicode-range script detection.
+
+    Returns a script-family name, not necessarily a language name.
+    Unique scripts (one language per script) are returned as the language name directly.
+    Shared scripts return the script family so the caller can decide to always LLM-detect.
+
+    Shared scripts (multiple languages, LLM required):
+      "Devanagari"  → Hindi / Marathi / Sanskrit / Nepali / Konkani
+      "ArabicScript" → Arabic / Urdu / Persian / Pashto
+      "Cyrillic"    → Russian / Ukrainian / Bulgarian / Serbian
+      "Latin"       → English / French / Spanish / German / Portuguese / etc.
+    """
     for ch in text:
         cp = ord(ch)
+        # ── Unique scripts (safe to cache) ──────────────────────────────────
         if 0x0B80 <= cp <= 0x0BFF: return "Tamil"
         if 0x0D00 <= cp <= 0x0D7F: return "Malayalam"
-        if 0x0900 <= cp <= 0x097F: return "Hindi"
-        if 0x0600 <= cp <= 0x06FF: return "Arabic"
-        if 0x4E00 <= cp <= 0x9FFF: return "Chinese"
-        if 0x3040 <= cp <= 0x30FF: return "Japanese"
-        if 0xAC00 <= cp <= 0xD7A3: return "Korean"
-        if 0x1100 <= cp <= 0x11FF: return "Korean"
-        if 0x0E00 <= cp <= 0x0E7F: return "Thai"
-        if 0x10A0 <= cp <= 0x10FF: return "Georgian"
-        if 0x0400 <= cp <= 0x04FF: return "Russian"
-        if 0x0370 <= cp <= 0x03FF: return "Greek"
-        if 0x0590 <= cp <= 0x05FF: return "Hebrew"
-        if 0x0980 <= cp <= 0x09FF: return "Bengali"
-        if 0x0A80 <= cp <= 0x0AFF: return "Gujarati"
         if 0x0C00 <= cp <= 0x0C7F: return "Telugu"
         if 0x0C80 <= cp <= 0x0CFF: return "Kannada"
+        if 0x0980 <= cp <= 0x09FF: return "Bengali"
+        if 0x0A80 <= cp <= 0x0AFF: return "Gujarati"
+        if 0x0B00 <= cp <= 0x0B7F: return "Odia"
+        if 0x0A00 <= cp <= 0x0A7F: return "Punjabi"
+        if 0x0E00 <= cp <= 0x0E7F: return "Thai"
+        if 0x10A0 <= cp <= 0x10FF: return "Georgian"
+        if 0x0370 <= cp <= 0x03FF: return "Greek"
+        if 0x0590 <= cp <= 0x05FF: return "Hebrew"
+        if 0xAC00 <= cp <= 0xD7A3: return "Korean"
+        if 0x1100 <= cp <= 0x11FF: return "Korean"
+        if 0x4E00 <= cp <= 0x9FFF: return "Chinese"
+        if 0x3040 <= cp <= 0x30FF: return "Japanese"
+        # ── Shared scripts (LLM always required) ────────────────────────────
+        if 0x0900 <= cp <= 0x097F: return "Devanagari"   # Hindi/Marathi/Nepali/Sanskrit
+        if 0x0600 <= cp <= 0x06FF: return "ArabicScript"  # Arabic/Urdu/Persian
+        if 0x0400 <= cp <= 0x04FF: return "Cyrillic"      # Russian/Ukrainian/Bulgarian
     return "Latin"
+
+
+# Scripts that map 1:1 to a single language — caching is safe after first LLM detection.
+# Shared scripts (Devanagari, ArabicScript, Cyrillic, Latin) are NOT in this set,
+# so they always call the LLM to avoid Hindi/Marathi and Arabic/Urdu collisions.
+_UNIQUE_SCRIPT_LANGUAGES = {
+    "Tamil", "Malayalam", "Telugu", "Kannada", "Bengali", "Gujarati",
+    "Odia", "Punjabi", "Thai", "Georgian", "Greek", "Hebrew",
+    "Korean", "Chinese", "Japanese",
+}
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -457,13 +481,14 @@ class RealtimeSession:
         language — saves 150–400ms on every repeat turn in the same language.
         LLM call only fires when the script changes or on the first turn.
         """
-        script = _detect_language(transcript)  # e.g. "Tamil", "Latin", "Arabic"
-        initial = script if script != "Latin" else "English"
+        script = _detect_language(transcript)  # e.g. "Tamil", "Devanagari", "Latin"
+        initial = script if script in _UNIQUE_SCRIPT_LANGUAGES else "English"
 
-        # Script unchanged from last turn — reuse cached language, skip LLM call
-        if script == self._last_script and self._current_language != "English" or \
-                script == self._last_script and script != "Latin":
-            _log("LANG CACHED",    self.uid, f"script unchanged ({script}) → reusing {self._current_language}")
+        # Cache only for unique scripts (Tamil, Malayalam, Telugu, etc.)
+        # Shared scripts (Devanagari=Hindi/Marathi, ArabicScript=Arabic/Urdu,
+        # Cyrillic, Latin) always call LLM to avoid language collisions.
+        if script in _UNIQUE_SCRIPT_LANGUAGES and script == self._last_script:
+            _log("LANG CACHED",    self.uid, f"unique script ({script}) → reusing {self._current_language}")
             return
 
         self._current_language = initial
