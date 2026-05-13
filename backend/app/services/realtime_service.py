@@ -451,20 +451,17 @@ class RealtimeSession:
 
     async def _detect_language_for_turn(self, transcript: str) -> None:
         """Detect the language of the current user turn and store in self._current_language.
-        Non-Latin scripts are detected instantly via Unicode ranges.
-        Latin-script languages (English, French, Spanish, German, etc.) are identified
-        with a gpt-4o-mini call so they don't all collapse to 'English'."""
-        lang = _detect_language(transcript)
-        if lang != "Latin":
-            # Non-Latin script — already known (Tamil, Arabic, Korean, etc.)
-            self._current_language = lang
-            _log("LANG DETECTED",  self.uid, f"script-based → {lang}")
+        Unicode ranges set a fast initial guess, but the LLM call always runs and
+        overwrites it — this handles Hindi vs Marathi, Arabic vs Urdu, romanized
+        languages, and all Latin-script languages accurately."""
+        # Fast initial guess so _current_language is never empty
+        initial = _detect_language(transcript)
+        self._current_language = initial if initial != "Latin" else "English"
+
+        if len(transcript.strip()) < 3:
             return
 
-        # Latin script — need LLM to distinguish English/French/Spanish/etc.
-        if len(transcript.strip()) < 3:
-            self._current_language = "English"
-            return
+        # Always call LLM — it's the only accurate source for all 100+ languages
         try:
             client = get_openai_client()
             response = await client.chat.completions.create(
@@ -475,7 +472,7 @@ class RealtimeSession:
                         "content": (
                             "Identify the language of the following text. "
                             "Reply with ONLY the language name in English "
-                            "(e.g. 'English', 'French', 'Spanish', 'German', 'Portuguese', 'Italian', 'Dutch', 'Swedish'). "
+                            "(e.g. 'English', 'Tamil', 'French', 'Urdu', 'Marathi', 'Korean', 'Spanish'). "
                             "Nothing else."
                         ),
                     },
@@ -484,12 +481,11 @@ class RealtimeSession:
                 max_tokens=10,
                 temperature=0,
             )
-            lang = (response.choices[0].message.content or "English").strip()
+            lang = (response.choices[0].message.content or self._current_language).strip()
             self._current_language = lang
-            _log("LANG DETECTED",  self.uid, f"LLM-based → {lang} | transcript='{transcript[:50]}'")
+            _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript='{transcript[:50]}'")
         except Exception as e:
-            _log("LANG DETECT ERR", self.uid, f"{e}")
-            self._current_language = "English"
+            _log("LANG DETECT ERR", self.uid, f"{e} — keeping {self._current_language}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # OpenAI connection
