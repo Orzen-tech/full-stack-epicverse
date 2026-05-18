@@ -73,8 +73,41 @@ def root():
     return {"message": "Welcome to the Game Guide AI Voice Agent Backend"}
 
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    import time
+    from app.services.db_pool import get_pool
+    from app.services.retriever import init_redis
+
+    result = {
+        "status": "ok",
+        "database": "unknown",
+        "redis": "unknown",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Check PostgreSQL
+    try:
+        pool = await get_pool()
+        t0 = time.monotonic()
+        await pool.fetchval("SELECT 1")
+        result["database"] = f"connected ({round((time.monotonic()-t0)*1000)}ms)"
+    except Exception as e:
+        result["database"] = f"error: {str(e)}"
+        result["status"] = "degraded"
+
+    # Check Redis
+    try:
+        redis = await init_redis()
+        if redis is None:
+            result["redis"] = "disabled or offline"
+        else:
+            t0 = time.monotonic()
+            await redis.ping()
+            result["redis"] = f"connected ({round((time.monotonic()-t0)*1000)}ms)"
+    except Exception as e:
+        result["redis"] = f"error: {str(e)}"
+
+    return result
 
 @app.get("/delete-account", response_class=HTMLResponse)
 def delete_account_page():

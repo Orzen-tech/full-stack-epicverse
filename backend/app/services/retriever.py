@@ -191,16 +191,17 @@ async def load_excel_data() -> None:
     }
 
     print("[BOOT] Pre-loading RAM Fallback Cache from Excel...")
-    
+
     count = 0
+    _dynamic_valid_chars: dict[str, set[int]] = {}
     for i in range(1, 8):
         file = f"mode {i}.xlsx"
         path = os.path.join(data_dir, file)
         mode_label = KANDA_MAP[i]
-        
+
         if not os.path.exists(path):
             continue
-            
+
         try:
             # Use pandas to read just the columns we need for the safety net
             df = pd.read_excel(path).replace({pd.NA: None})
@@ -208,13 +209,17 @@ async def load_excel_data() -> None:
                 try:
                     c_num = int(row.get('Character Card No.', 0)) if pd.notnull(row.get('Character Card No.')) else 0
                     a_num = int(row.get('Attribute Card No.', 0)) if pd.notnull(row.get('Attribute Card No.')) else 0
-                    
+
                     if c_num == 0 or a_num == 0:
                         continue
-                        
+
                     # Normalize for lookup
                     c_num, a_num = _normalize_card_numbers(c_num, a_num)
-                    
+
+                    # Track valid character cards per mode from actual data
+                    if 1 <= c_num <= 24:
+                        _dynamic_valid_chars.setdefault(mode_label, set()).add(c_num)
+
                     # Store in flat dictionary for O(1) fallback
                     cache_key = f"{mode_label}:{c_num}:{a_num}"
                     KNOWLEDGE_BASE_CACHE[cache_key] = {
@@ -232,12 +237,19 @@ async def load_excel_data() -> None:
         except Exception as e:
             print(f"[BOOT] Failed to load {file} into RAM cache: {e}")
 
+    # Replace hardcoded character sets with actual data from Excel
+    if _dynamic_valid_chars:
+        VALID_CHARACTERS_PER_MODE.clear()
+        VALID_CHARACTERS_PER_MODE.update(_dynamic_valid_chars)
+        total = sum(len(v) for v in _dynamic_valid_chars.values())
+        print(f"[BOOT] VALID_CHARACTERS_PER_MODE rebuilt from Excel: {total} characters across {len(_dynamic_valid_chars)} modes.")
+
     print(f"[BOOT] RAM Safety Net Ready: {count} combinations loaded.")
 
 
 async def ensure_card_search_schema() -> None:
     pool = await init_db_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=30.0) as conn:
         async with conn.transaction():
             # 1. Sanitize Duplicates (Keep most recent entry for each combo)
             await conn.execute('''
@@ -298,7 +310,7 @@ async def get_available_modes() -> list[str]:
     if pool is None:
         return []
     try:
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=5.0) as conn:
             rows = await conn.fetch(
                 """
                 SELECT DISTINCT gameplay_mode
@@ -397,7 +409,7 @@ async def get_segment_exact(character_card_number: int, attribute_card_no: int, 
     
     if pool is not None and not _db_pool_failed:
         try:
-            async with pool.acquire() as conn:
+            async with pool.acquire(timeout=5.0) as conn:
                 row = await conn.fetchrow(
                     EXACT_LOOKUP_SQL,
                     character_card_number,
@@ -448,7 +460,7 @@ async def semantic_search_segments(
     pool = await init_db_pool()
     if pool is None:
         return []
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=5.0) as conn:
         rows = await conn.fetch(
             SEMANTIC_SEARCH_SQL,
             vector,
@@ -503,7 +515,7 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
         # LOGIC RULE: Both numbers are character cards (1–24)
         if 1 <= c_num <= 24 and 1 <= k_num <= 24:
             return json.dumps({
-                "status": "Invalid",
+                "final_status": "Invalid",
                 "both_character": True,
                 "final_segment": "Both numbers are character cards, they are not a combo.",
                 "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two character cards cannot form a combination."
@@ -512,7 +524,7 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
         # LOGIC RULE: Both numbers are attribute cards (25–104)
         if 25 <= c_num <= 104 and 25 <= k_num <= 104:
             return json.dumps({
-                "status": "Invalid",
+                "final_status": "Invalid",
                 "both_attribute": True,
                 "final_segment": "Both numbers are attribute cards, they are not a combo.",
                 "revised_scholar_reason": "A combo must be one character card (1–24) and one attribute card (25–104). Two attribute cards cannot form a combination."
@@ -525,7 +537,7 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
         valid_chars = VALID_CHARACTERS_PER_MODE.get(mode_key)
         if valid_chars is not None and char_card not in valid_chars:
             return json.dumps({
-                "status": "Invalid",
+                "final_status": "Invalid",
                 "character_not_in_mode": True,
                 "final_segment": "Character card not present in this mode.",
                 "revised_scholar_reason": "This character has no role in the selected mode."
@@ -537,13 +549,13 @@ async def query_postgres_database(mode: str, character: str, attribute: str) -> 
 
     if exact is None:
         return json.dumps({
-            "status": "Invalid",
+            "final_status": "Invalid",
             "final_segment": "This combination (character/attribute) is not mentioned in the scriptures for this mode.",
             "revised_scholar_reason": "No scholarly reference exists for this specific combination in the current dataset."
         })
-    
+
     return json.dumps({
-        "status": exact.get("final_status", "Unknown"),
+        "final_status": exact.get("final_status", "Unknown"),
         "final_segment": str(exact.get("final_segment") or ""),
         "revised_scholar_reason": str(exact.get("revised_scholar_reason") or "")
     })
