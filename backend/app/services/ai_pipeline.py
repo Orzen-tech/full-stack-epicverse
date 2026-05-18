@@ -29,7 +29,7 @@ async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: s
 
 You are an AI assistant that answers combo validation questions using a PostgreSQL database.
 
-Users may ask questions using voice in any language (English, Tamil, Malayalam, French, or mixed languages).
+Users may ask questions using voice in any language (English, Tamil, Malayalam, French, or mixed languages, etc....).
 You must understand the intent and extract the numbers from the sentence.
 
 The AI must only return information that exists in the database and must not invent answers.

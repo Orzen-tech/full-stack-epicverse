@@ -365,6 +365,18 @@ _UNIQUE_SCRIPT_LANGUAGES = {
     "Korean", "Chinese", "Japanese",
 }
 
+# Languages the Realtime LLM may return that use Latin script.
+# Used to cross-validate detected_language against the transcript's Unicode script:
+# if the transcript is Latin but the LLM claims a non-Latin language, the LLM is
+# biased by conversation history and we fall back to transcript-based detection.
+_LATIN_SCRIPT_LANGUAGES = {
+    "English", "French", "Spanish", "German", "Portuguese", "Italian",
+    "Dutch", "Swedish", "Danish", "Norwegian", "Finnish", "Polish",
+    "Czech", "Slovak", "Romanian", "Hungarian", "Turkish", "Indonesian",
+    "Malay", "Vietnamese", "Swahili", "Afrikaans", "Catalan", "Croatian",
+    "Slovenian", "Estonian", "Latvian", "Lithuanian", "Filipino", "Tagalog",
+}
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -394,6 +406,9 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 
 3. Only when you have BOTH numbers: call query_database_for_combo.
    Pass character and attribute as digit strings only (e.g. character="1", attribute="29").
+   ALWAYS pass detected_language = the language you heard in the user's audio this turn
+   (e.g. "Kannada", "Tamil", "Hindi", "Marathi", "English", "French").
+   Detect this from the AUDIO, not from the transcript text — romanized transcripts are unreliable.
 
 4. If the tool result contains "ask_to_repeat": true — the card numbers could not be understood.
    Ask the user to clearly say both card numbers again in the SAME language they spoke.
@@ -414,7 +429,7 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 - The tool result always contains a "respond_in_language" field (e.g. "Tamil", "French", "English").
   This is the EXACT language the user just spoke, detected from their audio transcript.
   You MUST respond in that exact language. This field overrides everything else. No exceptions.
-- For MODE 2 (why/how follow-up with no tool call): detect language directly from the current user utterance. Each turn is independent — do NOT carry over the language from previous turns.
+- For MODE 2 (why/how follow-up with no tool call): detect the language from your AUDIO perception of the current utterance — exactly the same way you fill detected_language in MODE 1. Do NOT use the transcript text; it may be romanized or script-ambiguous. Respond in that language only.
 - Never mix languages in a single response.
 - The avatar_response and revised_scholar_reason fields are always stored in English.
   Always translate them into respond_in_language before speaking — never output English to a non-English user.
@@ -497,7 +512,7 @@ class RealtimeSession:
             self._current_language = script  # unique script = language name
         self._last_script = script
 
-        if len(transcript.strip()) < 3:
+        if not transcript.strip():
             return
 
         # Script changed or first turn — call LLM for accurate identification
@@ -570,7 +585,7 @@ class RealtimeSession:
     async def _setup_session(self):
         _log("SESSION SETUP", self.uid,
              f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
-             f"stt=whisper-1 | silence=400ms | threshold=0.5")
+             f"stt=whisper-1 | silence=300ms | threshold=0.7")
         payload = {
             "type": "session.update",
             "session": {
@@ -601,8 +616,9 @@ class RealtimeSession:
                             "mode":      {"type": "string", "description": "Gameplay mode e.g. 'OriginArc (Balakanda)'"},
                             "character": {"type": "string", "description": "Character name or card number"},
                             "attribute": {"type": "string", "description": "Attribute card number (25+)"},
+                            "detected_language": {"type": "string", "description": "The language you heard the user speak in this turn, detected from audio (e.g. 'Kannada', 'Tamil', 'Hindi', 'English', 'French'). Always pass this."},
                         },
-                        "required": ["mode", "character", "attribute"],
+                        "required": ["mode", "character", "attribute", "detected_language"],
                     },
                 }],
                 "tool_choice": "auto",
@@ -646,6 +662,29 @@ class RealtimeSession:
         target_mode = _resolve_db_mode(ai_mode) if ai_mode else self.db_mode
         char        = str(arguments.get("character", "?"))
         attribute   = str(arguments.get("attribute", "?"))
+        # Primary: language from audio as heard by the Realtime LLM (most accurate)
+        # Fallback: language from our transcript-based detection pipeline
+        llm_language = (arguments.get("detected_language") or "").strip()
+        if llm_language:
+            # Cross-validate: if the transcript is Latin-script (English, French, etc.)
+            # but the LLM claims a non-Latin language (Hindi, Arabic, etc.), the LLM is
+            # biased by its own prior responses in conversation history — ignore it and
+            # wait for the transcript-based detection instead.
+            transcript_script = self._last_script
+            if transcript_script == "Latin" and llm_language not in _LATIN_SCRIPT_LANGUAGES:
+                _log("LANG CONFLICT", self.uid,
+                     f"LLM audio→{llm_language} conflicts with transcript script=Latin — using transcript detection")
+                if self._language_task and not self._language_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(self._language_task), timeout=2.0)
+                    except Exception:
+                        pass
+                llm_language = ""  # discard LLM detection, keep transcript-based result
+                _log("LANG RESOLVED", self.uid, f"transcript-detected → {self._current_language}")
+            else:
+                self._current_language = llm_language
+                _log("LANG FROM LLM", self.uid, f"audio-detected → {llm_language}")
+        # else: _current_language stays as whatever _detect_language_for_turn found
 
         _log_sep(self.uid, "DATABASE LOOKUP")
         _log("TOOL CALL RECEIVED",  self.uid,
@@ -700,7 +739,7 @@ class RealtimeSession:
 
             if isinstance(result, dict):
                 is_error = "error" in result or result.get("character_not_in_mode") is True
-                status = result.get("final_status") or result.get("status", "")
+                status = result.get("final_status", "")
                 if is_error:
                     _log("DB NO MATCH", self.uid,
                          f"combo NOT found | query took {elapsed_ms}ms | {result.get('error')}")
@@ -725,17 +764,18 @@ class RealtimeSession:
                 result["avatar_response"] = avatar_msg
                 _log("AVATAR RESPONSE", self.uid, f"\"{avatar_msg}\"")
 
-                # Wait for language detection to finish (started at STT complete).
-                # This runs in parallel with the DB query so adds near-zero latency.
-                if self._language_task and not self._language_task.done():
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(self._language_task), timeout=2.0
-                        )
-                    except Exception:
-                        pass
+                # If LLM didn't pass detected_language, wait for our fallback task
+                if not llm_language:
+                    if self._language_task and not self._language_task.done():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(self._language_task), timeout=2.0
+                            )
+                        except Exception:
+                            pass
+                source = "llm-audio" if llm_language else "transcript-fallback"
                 result["respond_in_language"] = self._current_language
-                _log("LANG INJECTED",  self.uid, f"respond_in_language={self._current_language}")
+                _log("LANG INJECTED",  self.uid, f"respond_in_language={self._current_language} source={source}")
 
             output_str = (
                 json.dumps(result, cls=_SafeJsonEncoder)
@@ -806,7 +846,6 @@ class RealtimeSession:
                         _log("AUDIO CAPTURING",  self.uid,
                              "Flutter sending PCM16 16kHz mono chunks")
 
-                    resampled = self._resample_16k_to_24k(raw)
                     self._audio_chunks_sent         += 1
                     self._audio_bytes_sent          += len(raw)
                     self._audio_appended_since_commit = True
@@ -815,12 +854,12 @@ class RealtimeSession:
                     if self._audio_chunks_sent % 50 == 0:
                         kb = round(self._audio_bytes_sent / 1024, 1)
                         _log("AUDIO STREAMING",  self.uid,
-                             f"chunks={self._audio_chunks_sent} bytes={kb}KB → resampled 16k→24k → forwarded to OpenAI")
+                             f"chunks={self._audio_chunks_sent} bytes={kb}KB → forwarded to OpenAI")
 
                     await self.openai_ws.send(
                         json.dumps({
                             "type":  "input_audio_buffer.append",
-                            "audio": base64.b64encode(resampled).decode(),
+                            "audio": base64.b64encode(raw).decode(),
                         })
                     )
 
@@ -864,12 +903,11 @@ class RealtimeSession:
                             # leaving the buffer stuck. Silence padding gives VAD
                             # the window it needs to detect end-of-speech.
                             if self._audio_appended_since_commit:
-                                silence_16k = bytes(int(16000 * 0.50 * 2))  # 500ms PCM16 @ 16kHz
-                                silence_24k = self._resample_16k_to_24k(silence_16k)
+                                silence = bytes(int(24000 * 0.50 * 2))  # 500ms PCM16 @ 24kHz
                                 try:
                                     await self.openai_ws.send(json.dumps({
                                         "type":  "input_audio_buffer.append",
-                                        "audio": base64.b64encode(silence_24k).decode(),
+                                        "audio": base64.b64encode(silence).decode(),
                                     }))
                                     _log("SILENCE PADDING", self.uid,
                                          "500ms silence appended → VAD will detect end-of-speech")
