@@ -962,10 +962,6 @@ class RealtimeSession:
 
                 etype = event.get("type", "")
 
-                # ── TEMP DEBUG ───────────────────────────────────────────────
-                _log("OAIRAW", self.uid, f"event={etype}")
-                # ─────────────────────────────────────────────────────────────
-
                 # ══ SESSION ══════════════════════════════════════════════════
 
                 if etype == "session.created":
