@@ -552,7 +552,6 @@ class RealtimeSession:
         t0 = time.monotonic()
         extra_headers = {
             "Authorization": f"Bearer {settings.OPENAI_API_KEY.strip()}",
-            "OpenAI-Beta":   "realtime=v1",
         }
         try:
             self.openai_ws = await asyncio.wait_for(
@@ -589,23 +588,13 @@ class RealtimeSession:
         payload = {
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
+                "type": "realtime",
                 "instructions": (
                     SYSTEM_INSTRUCTIONS
                     + f"\n\nCURRENT SESSION MODE: {self.db_mode}\n"
                       f"You MUST always pass exactly '{self.db_mode}' as the mode parameter "
                       f"when calling query_database_for_combo. Do not translate, shorten, or modify this value."
                 ),
-                "voice": "alloy",
-                "input_audio_format":  "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type":                "server_vad",
-                    "threshold":           0.7,
-                    "prefix_padding_ms":   200,
-                    "silence_duration_ms": 300,
-                },
                 "tools": [{
                     "type":        "function",
                     "name":        "query_database_for_combo",
@@ -973,6 +962,10 @@ class RealtimeSession:
 
                 etype = event.get("type", "")
 
+                # ── TEMP DEBUG ───────────────────────────────────────────────
+                _log("OAIRAW", self.uid, f"event={etype}")
+                # ─────────────────────────────────────────────────────────────
+
                 # ══ SESSION ══════════════════════════════════════════════════
 
                 if etype == "session.created":
@@ -1120,11 +1113,13 @@ class RealtimeSession:
 
                 # ══ AI TRANSCRIPT ══════════════════════════════════════════════
 
-                elif etype == "response.audio_transcript.delta":
+                elif etype in ("response.audio_transcript.delta",
+                               "response.output_audio_transcript.delta"):
                     # Partial AI text — skip to avoid log spam
                     pass
 
-                elif etype == "response.audio_transcript.done":
+                elif etype in ("response.audio_transcript.done",
+                               "response.output_audio_transcript.done"):
                     transcript = event.get("transcript", "").strip()
                     if transcript:
                         lang = _detect_language(transcript)
@@ -1137,7 +1132,8 @@ class RealtimeSession:
 
                 # ══ TTS AUDIO ══════════════════════════════════════════════════
 
-                elif etype == "response.audio.delta":
+                elif etype in ("response.audio.delta",
+                               "response.output_audio.delta"):
                     audio_b64 = event.get("delta", "")
                     if audio_b64:
                         if not self._tts_streaming:
@@ -1161,7 +1157,8 @@ class RealtimeSession:
                             pass
                     continue  # don't forward JSON event
 
-                elif etype == "response.audio.done":
+                elif etype in ("response.audio.done",
+                               "response.output_audio.done"):
                     if self._tts_streaming:
                         self._tts_streaming = False
                         self._tts_done_ts   = time.monotonic()
