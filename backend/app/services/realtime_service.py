@@ -484,6 +484,7 @@ class RealtimeSession:
         self._current_language          = "English"  # language detected from latest STT transcript
         self._language_task: Optional[asyncio.Task] = None  # async LLM language detection
         self._last_script               = ""         # Unicode script of last detected turn
+        self._openai_reconnecting       = False       # True during the ~2s OpenAI reconnect window
 
     # ─────────────────────────────────────────────────────────────────────────
     # Language detection
@@ -845,12 +846,17 @@ class RealtimeSession:
                         _log("AUDIO STREAMING",  self.uid,
                              f"chunks={self._audio_chunks_sent} bytes={kb}KB → forwarded to OpenAI")
 
-                    await self.openai_ws.send(
-                        json.dumps({
-                            "type":  "input_audio_buffer.append",
-                            "audio": base64.b64encode(raw).decode(),
-                        })
-                    )
+                    if self._openai_reconnecting:
+                        continue  # drop audio during reconnect window (user must speak again)
+                    try:
+                        await self.openai_ws.send(
+                            json.dumps({
+                                "type":  "input_audio_buffer.append",
+                                "audio": base64.b64encode(raw).decode(),
+                            })
+                        )
+                    except Exception:
+                        pass  # reconnect in progress; _relay_from_openai will restore the session
 
                 # ── Text/JSON messages ──────────────────────────────────────
                 elif "text" in message:
@@ -933,7 +939,11 @@ class RealtimeSession:
                         _log("CLIENT MSG",       self.uid,
                              f"conversation item created by client")
 
-                    await self.openai_ws.send(message["text"])
+                    if not self._openai_reconnecting:
+                        try:
+                            await self.openai_ws.send(message["text"])
+                        except Exception:
+                            pass  # reconnect in progress
 
         except Exception as e:
             _log("CLIENT RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
@@ -945,10 +955,53 @@ class RealtimeSession:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _relay_from_openai(self):
-        try:
-            async for raw in self.openai_ws:
+        # Outer loop: reconnects to OpenAI whenever the connection drops
+        # (OpenAI Realtime sessions have a 30-minute hard limit).
+        while self._active:
+            try:
+              await self._run_openai_relay_inner()
+            except Exception as e:
                 if not self._active:
                     break
+                _log("OPENAI RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
+
+            if not self._active:
+                break
+
+            # OpenAI closed the connection — try to reconnect transparently.
+            _log("OPENAI RECONNECT", self.uid,
+                 "OpenAI session closed (30-min limit or network drop) — reconnecting in 2s")
+            self._openai_reconnecting = True
+            await asyncio.sleep(2.0)
+            if not self._active:
+                break
+
+            connected = await self._connect_to_openai()
+            if not connected:
+                _log("OPENAI RECONNECT FAIL", self.uid, "could not reconnect — closing session")
+                self._active = False
+                try:
+                    await self.client_ws.send_text(json.dumps({
+                        "type": "error",
+                        "message": "AI service connection lost. Please restart the session.",
+                    }))
+                except Exception:
+                    pass
+                break
+
+            await self._setup_session()
+            self._openai_reconnecting = False
+            # Reset language state — fresh OpenAI session has no conversation history
+            self._last_script = ""
+            _log("OPENAI RECONNECTED", self.uid, "reconnected — session restored, language state reset")
+
+        self._active = False  # ensure set on any exit path
+
+    async def _run_openai_relay_inner(self):
+        """Process events from OpenAI until the WebSocket closes."""
+        async for raw in self.openai_ws:
+                if not self._active:
+                    return
 
                 # Raw bytes (shouldn't happen with text protocol, but guard)
                 if isinstance(raw, bytes):
@@ -1199,11 +1252,6 @@ class RealtimeSession:
 
                 # Forward all remaining events to client
                 await self.client_ws.send_text(raw)
-
-        except Exception as e:
-            _log("OPENAI RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
-        finally:
-            self._active = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Cross-instance session watchdog
