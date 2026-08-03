@@ -16,6 +16,7 @@ import '../../core/network/api_config.dart';
 import 'login_screen.dart';
 import 'legal_content_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/errors/error_handler.dart';
 
 
 class CompanionReadyScreen extends StatefulWidget {
@@ -482,12 +483,27 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       try {
         debugPrint("CompanionReady: Connecting to: ${ApiConfig.baseUrl}");
         debugPrint("CompanionReady: Starting Handshake for ${widget.gameMode}...");
-        await webSocketService.connect(game_mode: widget.gameMode)
-            .timeout(const Duration(seconds: 10));
+        // Read user's preferred language from local storage and send it to
+        // the backend AI session so it responds in the correct language.
+        final prefs = await SharedPreferences.getInstance();
+        final userLanguage = prefs.getString('primaryLanguage') ?? 'English';
+        debugPrint("CompanionReady: User language → $userLanguage");
+        await webSocketService.connect(
+          game_mode: widget.gameMode,
+          language: userLanguage,
+        ).timeout(const Duration(seconds: 10));
         debugPrint("CompanionReady: Handshake SUCCESSFUL");
-      } catch (e) {
+      } catch (e, st) {
         debugPrint("CompanionReady: Handshake FAILED: $e");
-        if (mounted) setState(() => _statusText = "Connection Failed: $e\n(Is Ngrok Online?)");
+        if (mounted) {
+          setState(() => _statusText = "Connection Failed");
+          ErrorHandler.handleError(
+            e,
+            stackTrace: st,
+            context: context,
+            screenName: 'CompanionReadyScreen',
+          );
+        }
         return;
       }
     }

@@ -15,6 +15,7 @@ import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
 import 'faq_screen.dart';
 import 'feedback_screen.dart';
+import '../../core/errors/error_handler.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -488,13 +489,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   MaterialPageRoute(builder: (_) => const WelcomeScreen()),
                   (route) => false,
                 );
-              } catch (e) {
+              } catch (e, st) {
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Failed to schedule deletion: $e'),
-                      backgroundColor: Colors.red,
-                    ),
+                  ErrorHandler.handleError(
+                    e,
+                    stackTrace: st,
+                    context: context,
+                    screenName: 'SettingsScreen',
                   );
                 }
               }

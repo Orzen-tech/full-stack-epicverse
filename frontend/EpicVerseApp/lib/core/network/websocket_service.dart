@@ -34,7 +34,7 @@ class WebSocketService {
   Stream<bool> get connectionState => _connectionStateController.stream;
   Stream<void> get sessionKicked => _sessionKickedController.stream;
 
-  Future<void> connect({String? hostOrUrl, bool? isListening, String? game_mode}) async {
+  Future<void> connect({String? hostOrUrl, bool? isListening, String? game_mode, String? language}) async {
     debugPrint('[EpicVerse][WS] connect() called mode=${game_mode ?? _currentMode}');
     if (_isConnected) return;
     if (_isConnecting) {
@@ -75,7 +75,7 @@ class WebSocketService {
     final listenFlag = isListening ?? false;
     // Token is sent via the Authorization handshake header (NOT in the URL),
     // so it does not leak into Cloud Run / load balancer / proxy access logs.
-    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag';
+    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag&language=${Uri.encodeComponent(language ?? 'English')}';
 
     Uri wsUri = Uri.parse('${ApiConfig.wsUrl}?$queryParams');
     if (hostOrUrl != null && hostOrUrl.isNotEmpty) {

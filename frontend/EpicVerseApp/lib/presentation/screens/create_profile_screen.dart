@@ -14,6 +14,7 @@ import '../../core/network/api_config.dart';
 import '../../core/network/session_manager.dart';
 import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
+import '../../core/errors/error_handler.dart';
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
   const CreateProfileScreen({super.key});
@@ -356,15 +357,22 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
           (route) => false,
         );
       }
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('[EpicVerse][REG] _completeRegistration error: $e');
-      _showError("Registration failed: $e");
+      if (mounted) {
+        ErrorHandler.handleError(
+          e,
+          stackTrace: st,
+          context: context,
+          screenName: 'CreateProfileScreen',
+        );
+      }
     }
   }
 
   void _showError(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: AppColors.error));
+    ErrorHandler.showErrorSnackBar(message, context: context);
   }
 
   @override

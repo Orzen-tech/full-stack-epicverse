@@ -7,6 +7,7 @@ import '../../core/constants/app_colors.dart';
 import '../../core/network/api_config.dart';
 import '../widgets/network_background.dart';
 import 'welcome_screen.dart';
+import '../../core/errors/error_handler.dart';
 
 class OtpVerificationScreen extends StatefulWidget {
   final String? email;
@@ -138,11 +139,20 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
           widget.onVerified();
         }
       }
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('[EpicVerse][OTP] Verify error: $e');
-      setState(() {
-        _errorMessage = e is FirebaseAuthException ? e.message : "Invalid or expired code.";
-      });
+      if (mounted) {
+        ErrorHandler.handleError(
+          e,
+          stackTrace: st,
+          context: context,
+          screenName: 'OtpVerificationScreen',
+          showSnackBar: false,
+        );
+        setState(() {
+          _errorMessage = "Invalid or expired verification code. Please try again.";
+        });
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
