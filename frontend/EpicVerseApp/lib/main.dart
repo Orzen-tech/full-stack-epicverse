@@ -4,33 +4,55 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 import 'core/theme/app_theme.dart';
 import 'core/network/websocket_service.dart';
+import 'core/widgets/network_banner_wrapper.dart';
+import 'core/services/logger_service.dart';
 import 'presentation/screens/splash_screen.dart';
 import 'presentation/screens/welcome_screen.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  await SentryFlutter.init(
+    (options) {
+      options.dsn = 'https://afe194a04c6b9f969e6a9f39a9b99299@o4511507517341696.ingest.us.sentry.io/4511822514421760';
+      options.sendDefaultPii = true;
+      options.tracesSampleRate = 1.0;
+    },
+    appRunner: () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-  try {
-    await Firebase.initializeApp();
-    print("✅ [FIREBASE] Successfully initialized!");
-  } catch (e) {
-    print("❌ [FIREBASE-ERROR] Failed to initialize: $e");
-  }
+      // Flutter Uncaught Errors -> LoggerService & Sentry
+      FlutterError.onError = (FlutterErrorDetails details) {
+        FlutterError.presentError(details);
+        LoggerService.logError(
+          details.exception,
+          stackTrace: details.stack,
+          screenName: 'Global/FlutterError',
+        );
+      };
 
-  try {
-    webSocketService.connect();
-  } catch (e) {
-    print("❌ [SOCKET-ERROR] $e");
-  }
+      try {
+        await Firebase.initializeApp();
+        LoggerService.logInfo('Firebase successfully initialized!');
+      } catch (e, st) {
+        LoggerService.logError(e, stackTrace: st, customReason: 'Firebase initialization failed');
+      }
 
-  runApp(
-    const ProviderScope(
-      child: EpicVerseApp(),
-    ),
+      try {
+        webSocketService.connect();
+      } catch (e, st) {
+        LoggerService.logError(e, stackTrace: st, customReason: 'Initial WebSocket connection failed');
+      }
+
+      runApp(
+        const ProviderScope(
+          child: EpicVerseApp(),
+        ),
+      );
+    },
   );
 }
 
@@ -96,6 +118,11 @@ class _EpicVerseAppState extends State<EpicVerseApp> {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.epicTheme,
       navigatorKey: navigatorKey,
+      builder: (context, child) {
+        return NetworkBannerWrapper(
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: const SplashScreen(),
     );
   }

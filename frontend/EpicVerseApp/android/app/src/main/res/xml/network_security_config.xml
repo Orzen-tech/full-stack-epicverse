@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="true">epicverse-backend-721191424605.asia-south1.run.app</domain>
+        <pin-set expiration="2027-12-31">
+            <!-- Google Trust Services Root R1 -->
+            <pin digest="SHA-256">hxq455JWVdaLwVjbLPE+FYRjID7OlLz508wZa/CaVHI=</pin>
+            <!-- Google Trust Services Root R2 -->
+            <pin digest="SHA-256">VfdgK4cFi2/4E2jhFwHXdGlmfsXsDNlMJ+XZlvCa+eI=</pin>
+            <!-- Let's Encrypt ISRG Root X1 -->
+            <pin digest="SHA-256">C5+UgZ5Ay27wYY4nxzs/iikQ7a9giiX8ni3fHDvVzVo=</pin>
+        </pin-set>
+    </domain-config>
+</network-security-config>

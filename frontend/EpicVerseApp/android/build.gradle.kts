@@ -69,10 +69,19 @@ subprojects {
 
 
         if (project.extensions.findByName("android") != null) {
-
             val android = project.extensions.getByName("android") as com.android.build.gradle.BaseExtension
-
             
+            // Fix for namespace missing in older packages under AGP 8+
+            if (android.namespace == null) {
+                val manifestFile = project.file("src/main/AndroidManifest.xml")
+                var packageName: String? = null
+                if (manifestFile.exists()) {
+                    val content = manifestFile.readText()
+                    val match = Regex("package=\"([^\"]+)\"").find(content)
+                    packageName = match?.groupValues?.get(1)
+                }
+                android.namespace = packageName ?: "com.kriyora.fallback.${project.name.replace("-", "_")}"
+            }
 
             android.compileSdkVersion(36)
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_jailbreak_detection/flutter_jailbreak_detection.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
 import 'otp_verification_screen.dart';
@@ -62,7 +63,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
     )..repeat();
 
     _controller.forward();
-    _checkAuth();
+    _checkRootAndProceed();
   }
 
   @override
@@ -70,6 +71,61 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
     _controller.dispose();
     _spinController.dispose();
     super.dispose();
+  }
+
+  /// Checks if the device is rooted/jailbroken before proceeding.
+  /// If rooted, shows a non-dismissible security warning dialog.
+  Future<void> _checkRootAndProceed() async {
+    bool isRooted = false;
+    try {
+      isRooted = await FlutterJailbreakDetection.jailbroken;
+    } catch (_) {
+      // If detection fails, fail safe — assume not rooted
+      isRooted = false;
+    }
+
+    if (!mounted) return;
+
+    if (isRooted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            backgroundColor: const Color(0xFF1B0C2D),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: Color(0xFFFF4C4C), width: 1.5),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.security, color: Color(0xFFFF4C4C), size: 24),
+                SizedBox(width: 10),
+                Text(
+                  'Security Alert',
+                  style: TextStyle(
+                    color: Color(0xFFFF4C4C),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+              ],
+            ),
+            content: const Text(
+              'This device appears to be rooted or jailbroken.\n\n'
+              'EpicVerse cannot run on rooted or jailbroken devices to protect '
+              'your account security and sensitive data.',
+              style: TextStyle(color: Colors.white70, fontSize: 14, height: 1.5),
+            ),
+          ),
+        ),
+      );
+      return; // Stop execution — do not proceed to auth check
+    }
+
+    // Device is safe — proceed normally
+    _checkAuth();
   }
 
   Future<void> _checkAuth() async {

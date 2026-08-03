@@ -13,6 +13,7 @@ import '../../core/network/session_manager.dart';
 import 'welcome_screen.dart';
 import 'otp_verification_screen.dart';
 import 'create_profile_screen.dart';
+import '../../core/errors/error_handler.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -84,6 +85,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           // Update local state with rich backend data immediately
           final fullUser = UserModel.fromJson(res.data);
           ref.read(userProvider.notifier).setUser(fullUser);
+          // Persist language locally for WebSocket session handshake
+          await prefs.setString('primaryLanguage', fullUser.primaryLanguage ?? 'English');
 
           // Block login if OTP was never verified (app closed mid-registration)
           final emailVerified = res.data['email_verified'] ?? false;
@@ -179,18 +182,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // Background sync
       _syncUserInBackground(firebaseUser.uid, loggedInUser);
 
-    } on FirebaseAuthException catch (e) {
-      debugPrint('[EpicVerse][LOGIN] FirebaseAuthException code=${e.code} msg=${e.message}');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message ?? 'Login failed'), backgroundColor: Colors.redAccent),
-      );
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('[EpicVerse][LOGIN] Login error: $e');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString()), backgroundColor: Colors.redAccent),
-      );
+      if (mounted) {
+        ErrorHandler.handleError(
+          e,
+          stackTrace: st,
+          context: context,
+          screenName: 'LoginScreen',
+        );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
