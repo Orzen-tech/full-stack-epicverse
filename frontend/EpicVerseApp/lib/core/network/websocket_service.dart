@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -7,6 +8,7 @@ import 'package:web_socket_channel/io.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'api_config.dart';
 import 'session_manager.dart';
+import 'ssl_pinning_service.dart';
 
 class WebSocketService {
   static final WebSocketService _instance = WebSocketService._internal();
@@ -84,12 +86,17 @@ class WebSocketService {
 
     try {
       debugPrint('[EpicVerse][WS] Opening channel uri=$wsUri');
+      // Use a pinned HttpClient so WebSocket TLS is validated at the Dart level.
+      // network_security_config.xml does NOT cover WebSocket connections.
+      final HttpClient pinnedHttpClient =
+          SslPinningService.createPinnedWebSocketHttpClient();
       _channel = IOWebSocketChannel.connect(
         wsUri,
         headers: {
           ...ApiConfig.headers,
           'Authorization': 'Bearer $idToken',
         },
+        customClient: pinnedHttpClient,
       );
       
       _channel!.stream.listen(

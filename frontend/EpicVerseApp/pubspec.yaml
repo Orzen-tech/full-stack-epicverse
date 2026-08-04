@@ -53,6 +53,7 @@ dependencies:
   connectivity_plus: ^6.1.0
   shared_preferences: ^2.5.4
   flutter_pcm_sound: ^3.3.3
+  crypto: ^3.0.6
 
 
 dev_dependencies:
