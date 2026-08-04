@@ -2,19 +2,19 @@ import 'package:dio/dio.dart';
 import '../errors/error_handler.dart';
 import '../errors/error_mapper.dart';
 import 'api_config.dart';
+import 'ssl_pinning_service.dart';
 
 class ApiClient {
   late final Dio _dio;
 
   ApiClient({String? baseUrl}) {
-    _dio = Dio(
-      BaseOptions(
-        baseUrl: baseUrl ?? ApiConfig.apiUrl,
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 15),
-        sendTimeout: const Duration(seconds: 15),
-        contentType: 'application/json',
-      ),
+    // Use pinned Dio — enforces SSL certificate validation at the Dart level,
+    // independent of network_security_config.xml (which only covers OS layer).
+    _dio = SslPinningService.createPinnedDio(
+      baseUrl: baseUrl ?? ApiConfig.apiUrl,
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 15),
+      sendTimeout: const Duration(seconds: 15),
     );
 
     _dio.interceptors.add(
@@ -28,7 +28,7 @@ class ApiClient {
         onError: (DioException e, handler) {
           // Map and log technical error globally
           final mappedError = ErrorMapper.fromException(e);
-          
+
           // Log to Console & Sentry via ErrorHandler
           ErrorHandler.handleError(
             mappedError,
