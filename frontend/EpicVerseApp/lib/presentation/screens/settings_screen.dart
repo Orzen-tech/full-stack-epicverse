@@ -167,6 +167,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     const SizedBox(height: 24),
                     const Divider(color: Colors.white24),
                     const SizedBox(height: 24),
+                    _buildMfaToggle(context, user),
+                    const SizedBox(height: 24),
+                    const Divider(color: Colors.white24),
+                    const SizedBox(height: 24),
                     _buildSettingsOption(
                       icon: Icons.privacy_tip_outlined,
                       title: 'Privacy Policy',
@@ -231,6 +235,58 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildMfaToggle(BuildContext context, user) {
+    final isEnabled = user?.mfaEnabled ?? false;
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.1)),
+      ),
+      child: SwitchListTile(
+        secondary: Icon(Icons.verified_user_outlined, color: AppColors.primaryGold),
+        title: const Text(
+          'Two-Factor Authentication',
+          style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+        ),
+        subtitle: Text(
+          isEnabled ? 'Email OTP required on login' : 'Tap to enable extra security',
+          style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+        ),
+        value: isEnabled,
+        activeThumbColor: AppColors.primaryGold,
+        onChanged: (value) => _updateMfa(value),
+      ),
+    );
+  }
+
+  Future<void> _updateMfa(bool enabled) async {
+    final user = ref.read(userProvider);
+    if (user == null) return;
+    try {
+      final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
+      await _dio.post(
+        '${ApiConfig.apiUrl}/user/update-mfa',
+        data: FormData.fromMap({'mfa_enabled': enabled}),
+        options: Options(headers: {
+          ...ApiConfig.headers,
+          if (idToken != null) 'Authorization': 'Bearer $idToken',
+        }),
+      );
+      ref.read(userProvider.notifier).setUser(user.copyWith(mfaEnabled: enabled));
+    } catch (e) {
+      debugPrint('Error updating MFA: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Failed to update MFA setting'),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildSettingsOption({

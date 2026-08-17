@@ -15,6 +15,7 @@ import '../../core/network/session_manager.dart';
 import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
 import '../../core/errors/error_handler.dart';
+import '../../core/utils/password_validator.dart';
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
   const CreateProfileScreen({super.key});
@@ -286,7 +287,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
-      debugPrint('[EpicVerse][REG] Firebase user created uid=${cred.user?.uid}');
+      debugPrint('[EpicVerse][REG] Firebase user created successfully');
       await _completeRegistration(cred, inviteCode);
     } on FirebaseAuthException catch (e) {
       debugPrint('[EpicVerse][REG] FirebaseAuthException code=${e.code}');
@@ -327,7 +328,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
     try {
       // Sync user — consumes (marks used) the invite code.
-      debugPrint('[EpicVerse][REG] Step 3: POST /sync-user uid=${user.uid}');
+      debugPrint('[EpicVerse][REG] Step 3: POST /sync-user');
       await _dio.post('${ApiConfig.apiUrl}/sync-user', data: {
         "firebase_id": user.uid,
         "display_name": model.displayName,
@@ -421,8 +422,8 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                             ),
                           ),
                           validator: (v) {
-                            if (v == null || v.isEmpty) return 'Required';
-                            if (v.length < 6) return 'Minimum 6 characters';
+                            final result = PasswordValidator.validate(v);
+                            if (result != null) return result;
                             return null;
                           },
                         ),

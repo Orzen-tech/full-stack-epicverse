@@ -15,6 +15,7 @@ class OtpVerificationScreen extends StatefulWidget {
   final String? verificationId;
   final VoidCallback onVerified;
   final VoidCallback? onBack;
+  final bool isMfaVerification;
 
   const OtpVerificationScreen({
     super.key,
@@ -23,6 +24,7 @@ class OtpVerificationScreen extends StatefulWidget {
     this.verificationId,
     required this.onVerified,
     this.onBack,
+    this.isMfaVerification = false,
   });
 
   @override
@@ -101,7 +103,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     String otp = _controllers.map((c) => c.text).join();
     if (otp.length < 6) return;
 
-    debugPrint('[EpicVerse][OTP] Verify tapped (auto) length=${otp.length}');
+    debugPrint('[EpicVerse][OTP] Verify tapped (auto)');
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -120,7 +122,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         widget.onVerified();
       } else if (widget.email != null) {
         // --- CUSTOM EMAIL VERIFICATION ---
-        debugPrint('[EpicVerse][OTP] POST /auth/verify-otp identifier=${widget.email}');
+        debugPrint('[EpicVerse][OTP] POST /auth/verify-otp');
         final dio = Dio();
         final formData = FormData.fromMap({
           'identifier': widget.email,
@@ -170,7 +172,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         final dio = Dio();
         final user = FirebaseAuth.instance.currentUser;
         final idToken = await user?.getIdToken();
-        debugPrint('[EpicVerse][OTP] POST /auth/send-otp (resend) bearer=${idToken != null}');
+        debugPrint('[EpicVerse][OTP] POST /auth/send-otp (resend)');
         final formData = FormData.fromMap({'identifier': widget.email});
         final res = await dio.post(
           '${ApiConfig.apiUrl}/auth/send-otp',
@@ -224,18 +226,24 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
-                      isPhone ? Icons.phone_android_outlined : Icons.mark_email_read_outlined, 
-                      size: 80, 
+                      widget.isMfaVerification
+                        ? Icons.security_outlined
+                        : (isPhone ? Icons.phone_android_outlined : Icons.mark_email_read_outlined),
+                      size: 80,
                       color: AppColors.primaryGold
                     ),
                     const SizedBox(height: 24),
                     Text(
-                      isPhone ? 'Verify Phone' : 'Verify Email',
+                      widget.isMfaVerification
+                        ? 'Two-Factor Authentication'
+                        : (isPhone ? 'Verify Phone' : 'Verify Email'),
                       style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      'We sent a 6-digit code to\n$identifier',
+                      widget.isMfaVerification
+                        ? 'A security code has been sent to\n$identifier'
+                        : 'We sent a 6-digit code to\n$identifier',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 16),
                     ),

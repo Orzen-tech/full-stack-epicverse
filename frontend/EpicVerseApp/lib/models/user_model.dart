@@ -11,6 +11,7 @@ class UserModel {
   final String? profilePicture;
   final String? inviteCode;
   final String? sessionId;
+  final bool mfaEnabled;
 
   UserModel({
     required this.id,
@@ -24,6 +25,7 @@ class UserModel {
     this.profilePicture,
     this.inviteCode,
     this.sessionId,
+    this.mfaEnabled = false,
   });
 
   factory UserModel.fromJson(Map<String, dynamic> json) {
@@ -43,6 +45,7 @@ class UserModel {
       profilePicture: json['profile_picture'] ?? json['profilePicture'],
       inviteCode: json['invite_code'] ?? json['inviteCode'],
       sessionId: json['session_id'] ?? json['sessionId'],
+      mfaEnabled: json['mfa_enabled'] ?? json['mfaEnabled'] ?? false,
     );
   }
 
@@ -59,6 +62,7 @@ class UserModel {
       'profile_picture': profilePicture,
       'invite_code': inviteCode,
       'session_id': sessionId,
+      'mfa_enabled': mfaEnabled,
     };
   }
 
@@ -71,6 +75,7 @@ class UserModel {
     String? activeArc,
     int? level,
     String? profilePicture,
+    bool? mfaEnabled,
   }) {
     return UserModel(
       id: id,
@@ -82,6 +87,9 @@ class UserModel {
       activeArc: activeArc ?? this.activeArc,
       level: level ?? this.level,
       profilePicture: profilePicture ?? this.profilePicture,
+      inviteCode: inviteCode,
+      sessionId: sessionId,
+      mfaEnabled: mfaEnabled ?? this.mfaEnabled,
     );
   }
 }

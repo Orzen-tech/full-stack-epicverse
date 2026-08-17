@@ -33,7 +33,7 @@ from app.services.user_db import (
     validate_invite_code, mark_invite_code_used,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
-    verify_session, update_session_id,
+    verify_session, update_session_id, update_mfa,
 )
 from app.api.dependencies import get_current_user
 
@@ -294,6 +294,17 @@ async def fetch_user(firebase_id: str):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+@router.post("/user/update-mfa")
+async def update_user_mfa(mfa_enabled: bool = Form(...), current_user: dict = Depends(get_current_user)):
+    """Toggles Multi-Factor Authentication (MFA) status for the current user."""
+    uid = current_user.get("uid")
+    success = await update_mfa(uid, mfa_enabled)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update MFA status")
+    return {"status": "success", "message": f"MFA status updated to {mfa_enabled}"}
+
 
 @router.websocket("/ws/realtime")
 async def websocket_realtime(
