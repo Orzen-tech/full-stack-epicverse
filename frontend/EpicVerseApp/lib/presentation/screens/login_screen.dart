@@ -40,7 +40,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
 
-    debugPrint('[EpicVerse][LOGIN] Sign-In tapped email=${_emailController.text.trim()}');
+    debugPrint('[EpicVerse][LOGIN] Sign-In tapped');
     setState(() => _isLoading = true);
 
     try {
@@ -53,7 +53,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
       final firebaseUser = credential.user;
       if (firebaseUser == null) throw Exception("Login failed");
-      debugPrint('[EpicVerse][LOGIN] Firebase auth OK uid=${firebaseUser.uid}');
+      debugPrint('[EpicVerse][LOGIN] Firebase auth OK');
 
       // 2. Optimistic UI with Session Tracking
       final sessionId = await SessionManager.getSessionId();
@@ -74,7 +74,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // 4. Check if Backend Profile Exists (Production Ready Sign-In Step)
       bool profileExists = false;
       try {
-        debugPrint('[EpicVerse][LOGIN] GET /user/${firebaseUser.uid}');
+        debugPrint('[EpicVerse][LOGIN] GET /user profile check');
         final res = await _dio.get(
           '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
           options: Options(headers: await ApiConfig.authHeaders()),
@@ -109,10 +109,62 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             );
             return;
           }
+
+          // MFA interception: if user has MFA enabled, require OTP before granting access
+          final mfaEnabled = res.data['mfa_enabled'] ?? false;
+          if (mfaEnabled) {
+            debugPrint('[EpicVerse][LOGIN] mfa_enabled=true → sending MFA OTP');
+            try {
+              final idToken = await firebaseUser.getIdToken();
+              await _dio.post(
+                '${ApiConfig.apiUrl}/auth/send-otp',
+                data: FormData.fromMap({'identifier': firebaseUser.email}),
+                options: Options(headers: {...ApiConfig.headers, 'Authorization': 'Bearer $idToken'}),
+              );
+            } catch (e) {
+              debugPrint('[EpicVerse][LOGIN] MFA OTP send failed: $e');
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Failed to send MFA verification code. Please try again.'),
+                    backgroundColor: Colors.redAccent,
+                  ),
+                );
+              }
+              return;
+            }
+            if (!mounted) return;
+            final navigator = Navigator.of(context);
+            navigator.pushReplacement(
+              MaterialPageRoute(
+                builder: (_) => OtpVerificationScreen(
+                  email: firebaseUser.email ?? '',
+                  isMfaVerification: true,
+                  onVerified: () async {
+                    // Finalize login state only after MFA passes
+                    final sessionId = await SessionManager.getSessionId();
+                    try {
+                      await _dio.post(
+                        '${ApiConfig.apiUrl}/auth/update-session',
+                        data: FormData.fromMap({'session_id': sessionId}),
+                        options: Options(headers: await ApiConfig.authHeaders()),
+                      );
+                    } catch (_) {}
+                    navigator.pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const DashboardScreen()),
+                      (route) => false,
+                    );
+                  },
+                ),
+              ),
+            );
+            return;
+          }
         }
       } catch (e) {
         debugPrint("User not found in backend: Proceeding to profile creation flow.");
       }
+
 
       // 5. Verification Guard (Only for first-time profile creation)
       if (!profileExists) {
@@ -120,7 +172,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         
         // Trigger OTP via Backend
         try {
-           debugPrint('[EpicVerse][LOGIN] Profile missing → POST /auth/send-otp (bearer)');
+           debugPrint('[EpicVerse][LOGIN] Profile missing → POST /auth/send-otp');
            final idToken = await firebaseUser.getIdToken();
            final formData = FormData.fromMap({'identifier': firebaseUser.email});
            final otpRes = await _dio.post(
@@ -167,7 +219,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           data: FormData.fromMap({'session_id': sessionId}),
           options: Options(headers: await ApiConfig.authHeaders()),
         );
-        debugPrint('[EpicVerse][LOGIN] session updated sessionId=$sessionId');
+        debugPrint('[EpicVerse][LOGIN] session updated');
       } catch (e) {
         debugPrint('[EpicVerse][LOGIN] update-session failed (non-fatal): $e');
       }
