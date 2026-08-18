@@ -51,6 +51,10 @@ build_latest.log
 # Sensitive data — never commit
 backend/users.db
 *.db
+
+# Firebase config — contains API keys, never commit to public repo
+**/GoogleService-Info.plist
+**/google-services.json
 files.zip
 ~$*.xlsx
 ~$*.xls

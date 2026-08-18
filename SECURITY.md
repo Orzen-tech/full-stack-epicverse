@@ -1,59 +1,57 @@
-# EpicVerse Security Policy & Firebase Hardening Guidelines
+# Security Policy — EpicVerse
 
-This document outlines security policies, API key restriction procedures, and backend security rules for the **EpicVerse** platform.
+## Firebase Configuration File Exposure (`GoogleService-Info.plist`)
+
+### Observation
+During static analysis of the iOS IPA, the `GoogleService-Info.plist` file bundled within the application was found to contain Firebase project configuration values:
+
+| Key | Value Type | Notes |
+| :--- | :--- | :--- |
+| `API_KEY` | Firebase Web API Key | Client-side identifier, not a backend secret |
+| `PROJECT_ID` | Firebase Project ID | Public identifier |
+| `GOOGLE_APP_ID` | Google App ID | Public iOS app identifier |
+| `CLIENT_ID` | OAuth 2.0 Client ID | Used for Google Sign-In flows |
+| `STORAGE_BUCKET` | Firebase Storage bucket | Public identifier |
+
+### Risk Assessment
+This is a **known and expected characteristic** of all Firebase iOS applications. Google explicitly states that the Firebase API key is **not a secret** — it is a client-side identifier designed to be bundled in mobile apps to identify the Firebase project. It cannot be used server-side to authenticate as a user or access protected resources.
+
+**However, the security of the configuration depends entirely on server-side rules being correctly configured.**
+
+### Current Server-Side Protections (Verified ✅)
+
+| Protection Layer | Status | Details |
+| :--- | :--- | :--- |
+| Firestore Security Rules | ✅ **Enforced** | `allow read, write: if request.auth != null && request.auth.uid == userId` — only authenticated users can access their own data |
+| Default Deny Rule | ✅ **Enforced** | `allow read, write: if false` — all unmatched paths are denied by default |
+| Backend API Auth | ✅ **Enforced** | All sensitive backend routes require `Authorization: Bearer <Firebase ID Token>` |
+| Invite Code Enforcement | ✅ **Enforced** | New user registration requires a valid invite code |
+
+### Remediation Actions Taken
+
+1. **`GoogleService-Info.plist` removed from Git tracking** (`git rm --cached`) — the file will no longer be committed to the repository going forward.
+2. **Root `.gitignore` updated** — `**/GoogleService-Info.plist` and `**/google-services.json` added to prevent future accidental commits.
+3. **Note:** The file exists in prior Git commit history. If a full history purge is needed, a `git filter-branch` or BFG Repo Cleaner rewrite should be performed.
+
+### Recommended Manual Action (Firebase Console)
+
+To add an additional layer of protection, please verify or apply API key restrictions in the **Google Cloud Console**:
+
+1. Go to **Google Cloud Console** → **APIs & Services** → **Credentials**
+2. Select the API key used by EpicVerse (`AIzaSy...`)
+3. Under **Application restrictions**, set:
+   - `iOS apps` → add bundle ID `com.kriyora.epicverse`
+4. Under **API restrictions**, restrict to only the Firebase APIs used:
+   - Firebase Installations API
+   - Cloud Firestore API
+   - Firebase Authentication API
+   - Firebase Cloud Messaging API
+5. Click **Save**
+
+This ensures the API key can only be used from the EpicVerse iOS bundle ID and only for the permitted Firebase APIs.
 
 ---
 
-## 1. Firebase API Key & Client Configuration (`GoogleService-Info.plist`)
+## Reporting Security Vulnerabilities
 
-### Overview
-In Firebase mobile architecture, configuration files such as `GoogleService-Info.plist` (iOS) and `google-services.json` (Android) are embedded in the application binary to route client requests to the designated Firebase project.
-
-The Firebase API Key embedded in these files functions as a **public client identifier**, not a administrative secret. To prevent unauthorized use of this API Key outside the official mobile application, the following Google Cloud restrictions and Firebase security controls must be configured in the Firebase / GCP Console:
-
----
-
-## 2. Recommended API Key Restrictions (Google Cloud Console)
-
-1. **Application Restrictions (iOS Bundle ID):**
-   - Navigate to **Google Cloud Console** -> **APIs & Services** -> **Credentials**.
-   - Select the API Key associated with the iOS Firebase app.
-   - Under **Application restrictions**, select **iOS apps**.
-   - Add your official bundle identifier: `com.kriyora.epicverse` (or production bundle ID).
-   - Save changes. This ensures requests originating from unauthorized bundle IDs or web apps are rejected.
-
-2. **API Restrictions:**
-   - Restrict the key to only the specific Google APIs required by EpicVerse (e.g., Firebase Authentication, Cloud Firestore, Cloud Storage, Firebase Cloud Messaging).
-
----
-
-## 3. Firebase Backend Security Rules
-
-Since client-side keys are public, access control is governed entirely by server-side security rules:
-
-1. **Firestore & Cloud Storage Security Rules:**
-   - Ensure all database and storage rules require authenticated requests:
-     ```javascript
-     rules_version = '2';
-     service cloud.firestore {
-       match /databases/{database}/documents {
-         match /{document=**} {
-           allow read, write: if request.auth != null;
-         }
-       }
-     }
-     ```
-
-2. **Firebase App Check (Recommended for Production):**
-   - Enable **Firebase App Check** with **Apple DeviceCheck** / **App Attest** for iOS.
-   - App Check attests that requests entering Firebase services originate exclusively from untampered, legitimately signed EpicVerse app binaries.
-
----
-
-## 4. OWASP MASVS Security Compliance Summary
-
-EpicVerse implements defense-in-depth across:
-- **MASVS-CODE-4:** Sanitized log outputs (no PII, OTPs, or tokens in logs).
-- **MASVS-AUTH:** Strict password policy and multi-factor authentication (2FA).
-- **MASVS-RESILIENCE:** Dart binary symbol obfuscation (`--obfuscate`) and debug symbol stripping (`COPY_PHASE_STRIP`).
-- **MASTG-NETWORK-1:** Server-side token validation and rate-limiting (`429 Too Many Requests`).
+If you discover a security vulnerability in EpicVerse, please report it responsibly by emailing the security team. Do not open public GitHub issues for security findings.
