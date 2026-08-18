@@ -1,17 +1,36 @@
-# mltiverse_app
+# EpicVerse Mobile Application (Flutter)
 
-A new Flutter project.
+EpicVerse is an AI-powered voice companion mobile application built with Flutter.
 
-## Getting Started
+---
 
-This project is a starting point for a Flutter application.
+## Security & Production Distribution Guidelines
 
-A few resources to get you started if this is your first Flutter project:
+### OWASP MASVS / MASTG Binary Protection Compliance
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+1. **FairPlay DRM Encryption (`cryptid = 1`):**
+   - Official release builds distributed via Apple App Store / TestFlight are automatically FairPlay-encrypted (`cryptid = 1`) by Apple's backend upon upload.
+   - Development or local Ad-Hoc builds (`cryptid = 0`) are for internal testing only.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+2. **Dart Code Obfuscation & Symbol Stripping:**
+   To protect proprietary application logic against reverse engineering, all production release builds must be compiled with Dart symbol obfuscation:
+   ```bash
+   # Automated build script
+   ./scripts/build_production_ipa.sh
+
+   # Manual command
+   flutter build ipa --release --obfuscate --split-debug-info=build/symbols
+   ```
+
+---
+
+## Development Setup
+
+```bash
+# Install dependencies
+flutter pub get
+
+# Run application locally
+flutter run
+```
+
