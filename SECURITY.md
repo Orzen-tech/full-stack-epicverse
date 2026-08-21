@@ -1,5 +1,15 @@
 # Security Policy — EpicVerse
 
+## Firebase API Key Restrictions (Verified ✅ — 21 Aug 2026)
+
+| API Key | Application Restriction | API Scope Restriction | Status |
+| :--- | :--- | :--- | :--- |
+| iOS key (auto created by Firebase) | ✅ iOS apps — `com.kriyora.epicverse` | ✅ 25 Firebase APIs | **Fully Restricted** |
+| Android key (auto created by Firebase) | ⚠️ None set | ✅ 25 Firebase APIs | Recommend adding Android bundle restriction |
+| Browser key (auto created by Firebase) | ⚠️ None set | ✅ 25 Firebase APIs | For browser/web use only |
+
+---
+
 ## Firebase Configuration File Exposure (`GoogleService-Info.plist`)
 
 ### Observation
