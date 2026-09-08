@@ -15,6 +15,7 @@ import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
 import 'faq_screen.dart';
 import 'feedback_screen.dart';
+import 'change_password_screen.dart';
 import '../../core/errors/error_handler.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -169,6 +170,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     const SizedBox(height: 24),
                     _buildMfaToggle(context, user),
                     const SizedBox(height: 24),
+                    _buildSettingsOption(
+                      icon: Icons.lock_outline,
+                      title: 'Security / Change Password',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
                     const Divider(color: Colors.white24),
                     const SizedBox(height: 24),
                     _buildSettingsOption(
@@ -271,7 +281,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         '${ApiConfig.apiUrl}/user/update-mfa',
         data: FormData.fromMap({'mfa_enabled': enabled}),
         options: Options(headers: {
-          ...ApiConfig.headers,
           if (idToken != null) 'Authorization': 'Bearer $idToken',
         }),
       );

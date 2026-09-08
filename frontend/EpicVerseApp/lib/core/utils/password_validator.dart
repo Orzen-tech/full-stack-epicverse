@@ -15,7 +15,7 @@ class PasswordValidator {
     if (!RegExp(r'[0-9]').hasMatch(value)) {
       return 'Must contain at least one number';
     }
-    if (!RegExp(r'[!@#\$%\^&\*\(\)_\+\-\=\[\]\{\};:\'\"\\|,.<>\/?~`]+').hasMatch(value)) {
+      if (!RegExp(r'''[!@#$%^&*()_+\-=\[\]{};:'"\\|,.<>/?~`]+''').hasMatch(value)) {
       return 'Must contain at least one special character';
     }
     
