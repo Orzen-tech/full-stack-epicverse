@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'app_exception.dart';
 
 class ErrorMapper {
@@ -21,7 +22,12 @@ class ErrorMapper {
       return _mapFirebaseAuthException(exception);
     }
 
-    // 3. Handle Network & Socket Exceptions
+    // 3. Handle Platform Exceptions
+    if (exception is PlatformException) {
+      return _mapPlatformException(exception);
+    }
+
+    // 4. Handle Network & Socket Exceptions
     if (exception is SocketException) {
       return const AppException(
         userMessage: 'No internet connection.',
@@ -29,7 +35,7 @@ class ErrorMapper {
       );
     }
 
-    // 4. Handle Async Timeout Exceptions
+    // 5. Handle Async Timeout Exceptions
     if (exception is TimeoutException) {
       return const AppException(
         userMessage: 'Request timed out. Please try again.',
@@ -53,6 +59,25 @@ class ErrorMapper {
       type: AppExceptionType.unknown,
       originalException: exception,
     );
+  }
+
+  static AppException _mapPlatformException(PlatformException exception) {
+    switch (exception.code) {
+      case 'camera_access_denied':
+        return AppException(
+          userMessage: 'Camera access was denied. Please allow camera access to take a photo.',
+          originalError: exception.message,
+          type: AppExceptionType.authorization,
+          originalException: exception,
+        );
+      default:
+        return AppException(
+          userMessage: exception.message ?? 'Something went wrong. Please try again.',
+          originalError: exception.message,
+          type: AppExceptionType.unknown,
+          originalException: exception,
+        );
+    }
   }
 
   static AppException _mapDioException(DioException error) {

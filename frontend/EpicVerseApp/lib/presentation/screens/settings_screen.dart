@@ -8,8 +8,10 @@ import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/api_config.dart';
+import '../../core/errors/error_mapper.dart';
 import 'login_screen.dart';
 import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
@@ -425,8 +427,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 title: const Text('Take Photo', style: TextStyle(color: AppColors.textPrimary)),
                 onTap: () async {
                   Navigator.pop(context);
-                  final XFile? image = await picker.pickImage(source: ImageSource.camera, imageQuality: 50);
-                  if (image != null) await _updateProfilePhoto(image.path);
+                  try {
+                    final XFile? image = await picker.pickImage(source: ImageSource.camera, imageQuality: 50);
+                    if (image != null) await _updateProfilePhoto(image.path);
+                  } on PlatformException catch (e) {
+                    final mapped = ErrorMapper.fromException(e);
+                    if (mounted) {
+                      ErrorHandler.showWarningSnackBar(mapped.userMessage, context: context);
+                    }
+                  } catch (e) {
+                    if (mounted) {
+                      ErrorHandler.showWarningSnackBar('Unable to open camera right now. Please try again.', context: context);
+                    }
+                  }
                 },
               ),
               ListTile(
