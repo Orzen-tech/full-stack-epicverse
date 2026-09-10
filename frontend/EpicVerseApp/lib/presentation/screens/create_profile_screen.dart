@@ -16,6 +16,7 @@ import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/utils/password_validator.dart';
+import '../widgets/password_requirements.dart';
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
   const CreateProfileScreen({super.key});
@@ -421,11 +422,17 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                               onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                             ),
                           ),
+                          // Live-refresh the requirements checklist and the
+                          // submit button as the user types.
+                          onChanged: (_) => setState(() {}),
                           validator: (v) {
                             final result = PasswordValidator.validate(v);
                             if (result != null) return result;
                             return null;
                           },
+                        ),
+                        PasswordRequirementsChecklist(
+                          password: _passwordController.text,
                         ),
                         const SizedBox(height: 20),
                         _buildFieldLabel('CONFIRM PASSWORD'),
@@ -442,6 +449,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                               onPressed: () => setState(() => _obscureConfirmPassword = !_obscureConfirmPassword),
                             ),
                           ),
+                          onChanged: (_) => setState(() {}),
                           validator: (v) {
                             if (v == null || v.isEmpty) return 'Required';
                             if (v != _passwordController.text) return 'Passwords do not match';
@@ -519,18 +527,34 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     border: OutlineInputBorder(borderRadius: BorderRadius.circular(15)),
   );
 
-  Widget _buildSubmitButton() => GestureDetector(
-    onTap: _isLoading ? null : _submitForm,
-    child: Container(
-      width: double.infinity,
-      height: 60,
-      decoration: BoxDecoration(color: AppColors.primaryGold, borderRadius: BorderRadius.circular(15)),
-      alignment: Alignment.center,
-      child: _isLoading
-          ? const CircularProgressIndicator(color: Colors.black)
-          : const Text('GET STARTED', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-    ),
-  );
+  Widget _buildSubmitButton() {
+    // Gate the button on the password policy (client-side UX only — the
+    // existing form validators and Firebase still enforce the policy on
+    // submit). Other required fields keep their own in-flow checks in
+    // _submitForm.
+    final password = _passwordController.text;
+    final passwordReady = PasswordValidator.meetsPolicy(password) &&
+        password == _confirmPasswordController.text;
+    final enabled = !_isLoading && passwordReady;
+
+    return GestureDetector(
+      onTap: enabled ? _submitForm : null,
+      child: Container(
+        width: double.infinity,
+        height: 60,
+        decoration: BoxDecoration(
+          color: enabled
+              ? AppColors.primaryGold
+              : AppColors.primaryGold.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(15),
+        ),
+        alignment: Alignment.center,
+        child: _isLoading
+            ? const CircularProgressIndicator(color: Colors.black)
+            : const Text('GET STARTED', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+      ),
+    );
+  }
 
   Widget _buildFieldLabel(String l) => Align(
     alignment: Alignment.centerLeft,
