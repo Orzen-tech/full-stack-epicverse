@@ -220,43 +220,50 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24.0),
-            child: Stack(
-              children: [
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      widget.isMfaVerification
-                        ? Icons.security_outlined
-                        : (isPhone ? Icons.phone_android_outlined : Icons.mark_email_read_outlined),
-                      size: 80,
-                      color: AppColors.primaryGold
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      widget.isMfaVerification
-                        ? 'Two-Factor Authentication'
-                        : (isPhone ? 'Verify Phone' : 'Verify Email'),
-                      style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      widget.isMfaVerification
-                        ? 'A security code has been sent to\n$identifier'
-                        : 'We sent a 6-digit code to\n$identifier',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 16),
-                    ),
-                    const SizedBox(height: 48),
-                    _buildOtpInput(),
-                    if (_isVerified) _buildStatusText("valid code", Colors.greenAccent)
-                    else if (_errorMessage != null) _buildStatusText(_errorMessage!, Colors.redAccent),
-                    const SizedBox(height: 32),
-                    _buildActionButtons(),
-                  ],
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: Stack(
+                    children: [
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            widget.isMfaVerification
+                              ? Icons.security_outlined
+                              : (isPhone ? Icons.phone_android_outlined : Icons.mark_email_read_outlined),
+                            size: 80,
+                            color: AppColors.primaryGold
+                          ),
+                          const SizedBox(height: 24),
+                          Text(
+                            widget.isMfaVerification
+                              ? 'Two-Factor Authentication'
+                              : (isPhone ? 'Verify Phone' : 'Verify Email'),
+                            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            widget.isMfaVerification
+                              ? 'A security code has been sent to\n$identifier'
+                              : 'We sent a 6-digit code to\n$identifier',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 16),
+                          ),
+                          const SizedBox(height: 48),
+                          _buildOtpInput(),
+                          if (_isVerified) _buildStatusText("valid code", Colors.greenAccent)
+                          else if (_errorMessage != null) _buildStatusText(_errorMessage!, Colors.redAccent),
+                          const SizedBox(height: 32),
+                          _buildActionButtons(),
+                        ],
+                      ),
+                      _buildBackButton(),
+                    ],
+                  ),
                 ),
-                _buildBackButton(),
-              ],
+              ),
             ),
           ),
         ),
