@@ -75,3 +75,14 @@ tmp/
 *.log
 *.csv
 keys.txt
+
+# Signing certificates — never commit
+**/upload_certificate.pem
+
+# Invite code lists — never commit
+**/EpicVerse_Invite*.xlsx
+**/EpicVerse_*Invites.xlsx
+
+# Audit / debug artifacts
+backend/audit_results.json
+backend/scripts/db_dump.txt
