@@ -174,7 +174,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     const SizedBox(height: 24),
                     _buildSettingsOption(
                       icon: Icons.lock_outline,
-                      title: 'Security / Change Password',
+                      title: 'Change Password',
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),

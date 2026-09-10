@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/utils/password_validator.dart';
 import '../widgets/network_background.dart';
+import '../widgets/password_requirements.dart';
 
 class ChangePasswordScreen extends StatefulWidget {
   const ChangePasswordScreen({super.key});
@@ -183,6 +184,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                   controller: _newPasswordController,
                   obscureText: _obscureNewPassword,
                   enabled: !_isLoading,
+                  onChanged: (_) => setState(() {}),
                   validator: _validateNewPassword,
                   style: const TextStyle(color: AppColors.textPrimary),
                   decoration: _decoration(
@@ -191,11 +193,15 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                     () => setState(() => _obscureNewPassword = !_obscureNewPassword),
                   ),
                 ),
+                PasswordRequirementsChecklist(
+                  password: _newPasswordController.text,
+                ),
                 const SizedBox(height: 22),
                 TextFormField(
                   controller: _confirmPasswordController,
                   obscureText: _obscureConfirmPassword,
                   enabled: !_isLoading,
+                  onChanged: (_) => setState(() {}),
                   validator: _validateConfirmation,
                   style: const TextStyle(color: AppColors.textPrimary),
                   decoration: _decoration(
@@ -208,7 +214,11 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                 SizedBox(
                   height: 52,
                   child: ElevatedButton(
-                    onPressed: _isLoading ? null : _changePassword,
+                    onPressed: (_isLoading ||
+                            !PasswordValidator.meetsPolicy(_newPasswordController.text) ||
+                            _newPasswordController.text != _confirmPasswordController.text)
+                        ? null
+                        : _changePassword,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primaryGold,
                       foregroundColor: Colors.black,
