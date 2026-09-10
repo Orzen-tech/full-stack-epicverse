@@ -90,7 +90,12 @@ class _VerificationPendingScreenState extends State<VerificationPendingScreen> {
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(24.0),
-            child: Column(
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: IntrinsicHeight(
+                    child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Icon(Icons.mark_email_read_rounded, size: 80, color: AppColors.primaryGold),
@@ -172,6 +177,10 @@ class _VerificationPendingScreenState extends State<VerificationPendingScreen> {
                   child: const Text('Back to Login', style: TextStyle(color: AppColors.textMuted)),
                 ),
               ],
+            ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
