@@ -16,7 +16,7 @@ if (keyPropertiesFile.exists()) {
 
 android {
     namespace = "com.kriyora.epicverse"
-    compileSdk = 35 // Stick to 35 for stability with AGP 8.6.0
+    compileSdk = 36 // Android 16 — required by Play Console target API policy (AGP 8.13.2)
     
     // Build tools will be automatically selected based on compileSdk if omitted
     // buildToolsVersion = "35.0.0" 
@@ -36,7 +36,7 @@ android {
     defaultConfig {
         applicationId = "com.kriyora.epicverse"
         minSdk = 29
-        targetSdk = 35 // Match compileSdk
+        targetSdk = 36 // Match compileSdk
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
