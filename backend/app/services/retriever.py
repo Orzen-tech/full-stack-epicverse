@@ -497,13 +497,13 @@ def _extract_card_numbers(query: str) -> tuple[int, int] | None:
 # Valid character card numbers per mode — sourced from Excel data files.
 # Any character card NOT in this set for the selected mode triggers the "wrong mode" response.
 VALID_CHARACTERS_PER_MODE: dict[str, set[int]] = {
-    "OriginArc (Balakanda)":        {1, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24},
-    "CrownShift (AyodhyaKanda)":    {1, 2, 3, 5, 6, 8, 9, 10, 19, 24},
-    "WildRun (AranyaKanda)":        {1, 2, 3, 5, 11, 12, 15, 23},
-    "GlowLine (KishkindhaKanda)":   {1, 2, 3, 4, 15, 17, 18, 21},
-    "lankaLeap (SundaraKanda)":     {2, 4, 11, 13, 14, 18, 20, 21},
-    "WarRoom (YuddhaKanda)":        {1, 3, 4, 11, 13, 14, 18, 20, 21, 22},
-    "AfterLight (UttaraKanda)":     {1, 2, 3, 4, 5, 6, 13},
+    "OriginArc (Balakanda)":        {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "CrownShift (AyodhyaKanda)":    {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "WildRun (AranyaKanda)":        {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "GlowLine (KishkindhaKanda)":   {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "lankaLeap (SundaraKanda)":     {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "WarRoom (YuddhaKanda)":        {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
+    "AfterLight (UttaraKanda)":     {1, 2, 3,4, 5, 6, 7, 8, 9, 10,11,12,13,14,15,16,17,18,19,20,21,22, 23, 24},
 }
 
 
