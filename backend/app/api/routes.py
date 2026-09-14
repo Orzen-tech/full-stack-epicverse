@@ -413,7 +413,7 @@ async def process_voice_audio(
             raise HTTPException(status_code=400, detail="Could not recognize speech.")
             
         # Steps 3, 4, 5: AI Processing Pipeline (use uid as session key so each user has own history)
-        ai_result = await run_ai_pipeline(recognized_text, game_mode=game_mode, session_id=current_user.get("uid", session_id))
+        ai_result = await run_ai_pipeline(recognized_text, game_mode=game_mode, session_id=current_user.get("uid", session_id), detected_language=user_lang)
         final_text = ai_result.get("final_response")
         
         # Step 6: Text-To-Speech Synthesis (OpenAI TTS)

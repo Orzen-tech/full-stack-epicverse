@@ -655,24 +655,22 @@ class RealtimeSession:
         # Fallback: language from our transcript-based detection pipeline
         llm_language = (arguments.get("detected_language") or "").strip()
         if llm_language:
-            # Cross-validate: if the transcript is Latin-script (English, French, etc.)
-            # but the LLM claims a non-Latin language (Hindi, Arabic, etc.), the LLM is
-            # biased by its own prior responses in conversation history — ignore it and
-            # wait for the transcript-based detection instead.
+            # The Realtime model heard the actual audio, which is a stronger signal
+            # than a Unicode-script guess over the (often romanized) transcript text,
+            # so its detected_language is trusted directly.
+            #
+            # A Latin-script transcript alongside a non-Latin detected_language is
+            # NOT treated as a conflict/override — Whisper commonly romanizes Tamil/
+            # Hindi/other Indic speech, so this combination is expected and correct
+            # far more often than it indicates the LLM being biased by conversation
+            # history. We still log it (without overriding) so a genuine history-bias
+            # regression would be visible if it ever recurs.
             transcript_script = self._last_script
             if transcript_script == "Latin" and llm_language not in _LATIN_SCRIPT_LANGUAGES:
-                _log("LANG CONFLICT", self.uid,
-                     f"LLM audio→{llm_language} conflicts with transcript script=Latin — using transcript detection")
-                if self._language_task and not self._language_task.done():
-                    try:
-                        await asyncio.wait_for(asyncio.shield(self._language_task), timeout=2.0)
-                    except Exception:
-                        pass
-                llm_language = ""  # discard LLM detection, keep transcript-based result
-                _log("LANG RESOLVED", self.uid, f"transcript-detected → {self._current_language}")
-            else:
-                self._current_language = llm_language
-                _log("LANG FROM LLM", self.uid, f"audio-detected → {llm_language}")
+                _log("LANG CONFLICT (not overridden)", self.uid,
+                     f"LLM audio→{llm_language} vs transcript script=Latin — trusting LLM audio detection")
+            self._current_language = llm_language
+            _log("LANG FROM LLM", self.uid, f"audio-detected → {llm_language}")
         # else: _current_language stays as whatever _detect_language_for_turn found
 
         _log_sep(self.uid, "DATABASE LOOKUP")

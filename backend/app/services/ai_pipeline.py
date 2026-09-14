@@ -16,14 +16,34 @@ class _SafeJsonEncoder(json.JSONEncoder):
         return str(obj)
 
 
-async def run_ai_pipeline(text: str, game_mode: str | None = None, session_id: str = "default") -> dict:
-    """Uses OpenAI Function Calling with conversation memory (Redis-backed, in-memory fallback)."""
+async def run_ai_pipeline(
+    text: str,
+    game_mode: str | None = None,
+    session_id: str = "default",
+    detected_language: str | None = None,
+) -> dict:
+    """Uses OpenAI Function Calling with conversation memory (Redis-backed, in-memory fallback).
+
+    detected_language, when provided, is the STT engine's own language guess
+    (e.g. Whisper's verbose_json `language` field) for the current audio turn.
+    It is passed to the model as a hint so the reply's language matches what
+    was actually detected upstream, rather than the model re-guessing purely
+    from the transcript text.
+    """
     stored = await session_store.get_session_data(session_id)
     all_msgs: list = stored.get("messages", [])
 
     # Keep only the last 10 messages for context so we don't blow up token limits
     context_msgs = all_msgs[-10:]
-    
+
+    detected_language_hint = (
+        f"\nThe speech-to-text engine detected the spoken language of this turn as "
+        f"'{detected_language}'. Treat this as a strong hint for which language to "
+        f"respond in, unless the visible text of the query clearly indicates a "
+        f"different language.\n"
+        if detected_language else ""
+    )
+
     # 1. Provide the exact SYSTEM ROLE instructions
     system_prompt = f"""SYSTEM ROLE
 
@@ -82,7 +102,7 @@ PROCESSING RULES
    - "Lore-accurate no-show. This character simply doesn't exist in this mode."
 9. If no matching row exists but the character does exist in the mode, tell the user that specific combination is not valid.
 
-IMPORTANT: You MUST detect the language of the CURRENT user query and respond in that EXACT same language. 
+IMPORTANT: You MUST detect the language of the CURRENT user query and respond in that EXACT same language. {detected_language_hint}
 1. If the current query is in English (e.g., "Why?", "How?"), respond ONLY in English.
 2. If the current query is in Tamil (e.g., "ஏன்?", "எப்படி?"), respond ONLY in Tamil.
 3. If the current query is in Malayalam, respond ONLY in Malayalam. 

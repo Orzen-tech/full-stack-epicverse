@@ -8,10 +8,14 @@ async def synthesize_speech(text: str, language_code: str) -> bytes:
     # 'alloy' is a great neutral voice. Others: 'echo', 'fable', 'onyx', 'nova', 'shimmer'
     voice_name = "alloy"
     
-    # Optionally map certain target languages to specific voices for character flavor
-    if language_code.startswith("es") or language_code.startswith("zh"):
+    # Optionally map certain target languages to specific voices for character flavor.
+    # Whisper's verbose_json `language` field returns full names ("spanish",
+    # "chinese", "tamil", "hindi"), not ISO codes — match on both so this works
+    # whether the caller passes Whisper's format or a 2-letter code.
+    lang_lower = (language_code or "").lower()
+    if lang_lower in ("spanish", "es") or lang_lower in ("chinese", "zh"):
         voice_name = "nova"
-    elif language_code.startswith("ta") or language_code.startswith("hi"):
+    elif lang_lower in ("tamil", "ta") or lang_lower in ("hindi", "hi"):
         voice_name = "shimmer"
         
     response = await client.audio.speech.create(
