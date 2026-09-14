@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -25,11 +27,18 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
   String? _message;
   bool _messageIsError = false;
 
+  // "Forgot Password?" (sends a reset email to the signed-in user's own
+  // Firebase account email) — independent of the change-password form.
+  bool _isSendingReset = false;
+  int _resetCooldownSeconds = 0;
+  Timer? _resetCooldownTimer;
+
   @override
   void dispose() {
     _currentPasswordController.dispose();
     _newPasswordController.dispose();
     _confirmPasswordController.dispose();
+    _resetCooldownTimer?.cancel();
     super.dispose();
   }
 
@@ -86,6 +95,92 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
       _message = message;
       _messageIsError = isError;
     });
+  }
+
+  void _startResetCooldown([int seconds = 60]) {
+    _resetCooldownTimer?.cancel();
+    setState(() => _resetCooldownSeconds = seconds);
+    _resetCooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _resetCooldownSeconds--;
+        if (_resetCooldownSeconds <= 0) timer.cancel();
+      });
+    });
+  }
+
+  /// Lets the user reset their password via Firebase's normal email-link
+  /// flow when they can't remember their current password — without ever
+  /// bypassing re-authentication for the Change Password action itself.
+  /// Always uses the signed-in user's own account email; never a
+  /// user-typed address.
+  Future<void> _handleForgotPassword() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final email = FirebaseAuth.instance.currentUser?.email;
+    if (email == null || email.isEmpty) {
+      _showMessage('Please sign in again before resetting your password.', true);
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1B0C2D),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Reset Password', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: Text(
+          "We'll send a password reset link to your registered email:\n$email",
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Send', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isSendingReset = true);
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (!mounted) return;
+      _startResetCooldown();
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: const Color(0xFF1B0C2D),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Check Your Email', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          content: Text(
+            'Password reset link sent to your registered email:\n$email',
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('OK', style: TextStyle(color: AppColors.primaryGold, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      // Never surface raw FirebaseAuthException detail to the user.
+      if (mounted) {
+        _showMessage('Something went wrong sending the reset email. Please try again.', true);
+      }
+    } finally {
+      if (mounted) setState(() => _isSendingReset = false);
+    }
   }
 
   String? _required(String? value) {
@@ -179,7 +274,25 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                     () => setState(() => _obscureCurrentPassword = !_obscureCurrentPassword),
                   ),
                 ),
-                const SizedBox(height: 22),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: (_isLoading || _isSendingReset || _resetCooldownSeconds > 0)
+                        ? null
+                        : _handleForgotPassword,
+                    child: Text(
+                      _resetCooldownSeconds > 0
+                          ? 'Forgot Password? (${_resetCooldownSeconds}s)'
+                          : 'Forgot Password?',
+                      style: const TextStyle(
+                        color: AppColors.primaryGold,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
                 TextFormField(
                   controller: _newPasswordController,
                   obscureText: _obscureNewPassword,
