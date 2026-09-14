@@ -72,9 +72,10 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       duration: const Duration(milliseconds: 8000), // Much slower idle breathing
     )..repeat();
     
-    // Initialize Professional PCM Sound Engine (24kHz Mono Int16)
-    _initPcmSound();
-    
+    // Professional PCM Sound Engine (24kHz Mono Int16) — deferred to after the
+    // first frame (see _postInitHandshake) so its native platform-channel
+    // audio-setup call can't stall the screen's first paint.
+
     // Lazy Handshake: Connection is now triggered ONLY by Mic Click
     _statusText = "Tap mic to start";
     _isConnected = false;
@@ -170,6 +171,15 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     _postInitHandshake();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // precacheImage needs the widget's InheritedWidget dependencies (asset
+    // bundle, media query) resolved, which didChangeDependencies guarantees
+    // — initState does not.
+    _precacheLogo();
+  }
+
   // --- Animation Handlers (Production-Ready) ---
   void _startTalking() {
     if (!mounted || _isTalking) return;
@@ -252,9 +262,18 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // --- Core Lifecycle Handlers ---
   void _postInitHandshake() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initWakeWord(); 
+      await _initPcmSound();
+      await _initWakeWord();
       // Auto-start of voice turn has been disabled
     });
+  }
+
+  // Defensive fallback: ModeSelectionScreen already precaches this asset
+  // before navigating here (the primary fix for the logo pop-in glitch).
+  // This covers any future entry path into this screen that skips that step.
+  void _precacheLogo() {
+    if (!mounted) return;
+    precacheImage(const AssetImage('assets/images/epicverse_companion_logo.webp'), context);
   }
 
   // Audio Playback Queue to prevent skipping/cutting sentences 👂🎧
@@ -656,6 +675,10 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                              'assets/images/epicverse_companion_logo.webp',
                              width: 280,
                              fit: BoxFit.contain,
+                             frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                               debugPrint('[LOGO-DIAG] frameBuilder frame=$frame sync=$wasSynchronouslyLoaded t=${DateTime.now().millisecondsSinceEpoch}');
+                               return child;
+                             },
                            ),
                            const SizedBox(),
                          ],

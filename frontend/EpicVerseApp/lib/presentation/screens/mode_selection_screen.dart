@@ -10,6 +10,15 @@ class ModeSelectionScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Warm the Companion screen's logo into Flutter's image cache while the
+    // user is still choosing a mode, so it's already decoded by the time
+    // CompanionReadyScreen's first frame paints (fixes a visible pop-in).
+    // Safe to call on every build — precacheImage no-ops once cached.
+    debugPrint('[LOGO-DIAG] precache START t=${DateTime.now().millisecondsSinceEpoch}');
+    precacheImage(const AssetImage('assets/images/epicverse_companion_logo.webp'), context).then((_) {
+      debugPrint('[LOGO-DIAG] precache DONE t=${DateTime.now().millisecondsSinceEpoch}');
+    });
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: NetworkBackground(
