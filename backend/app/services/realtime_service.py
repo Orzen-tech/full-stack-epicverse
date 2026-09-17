@@ -390,6 +390,13 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 - Do NOT respond to silence, breathing, background noise, or any audio that is not a clear question.
 - Do NOT respond to incomplete utterances or single words that are not card numbers.
 - Remain completely silent until the user clearly asks a combo question or a why/how follow-up.
+- Filler words, acknowledgements, and transition phrases are NOT a why/how request and NOT
+  a combo check. Examples: "next", "ok", "okay", "got it", "continue", "alright", "so",
+  "hmm", "yes", "no" (said alone, not answering a direct question you just asked). If the
+  user says one of these (in any language) with no card numbers and no explicit request for
+  a reason/explanation, say NOTHING — do not repeat the previous avatar_response, do not
+  re-explain the previous reason, do not start a new combo check. Silence is the correct
+  output far more often than speech.
 
 ━━━ MODE 1 — COMBO CHECK (user asks if X and Y is a combo) ━━━
 1. Extract TWO card numbers from what the user said.
@@ -418,6 +425,11 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
    - If the user spoke ANY other language: translate the avatar_response into that exact language, then speak only the translation. No English. No mixing.
 
 ━━━ MODE 2 — REASON (user asks "why" or "how" after a combo check) ━━━
+0. ENTRY CONDITION — be strict here. Only enter MODE 2 if the user's utterance is an
+   explicit request for a reason/explanation (e.g. "why", "why not", "how come", "explain",
+   "how is that", or the clear equivalent in another language). A vague continuation word
+   ("next", "ok", "so", "and", silence, filler) does NOT qualify — see the SILENCE RULE
+   above and say nothing instead.
 1. Do NOT call the tool again.
 2. Find the "revised_scholar_reason" field from the MOST RECENT tool result in the conversation.
 3. Detect the language the user just spoke in.
@@ -433,6 +445,22 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 - Never mix languages in a single response.
 - The avatar_response and revised_scholar_reason fields are always stored in English.
   Always translate them into respond_in_language before speaking — never output English to a non-English user.
+
+━━━ LANGUAGE STABILITY (read carefully — this prevents random language flips) ━━━
+- Default language is ENGLISH at the start of every session.
+- Maintain one "current session language" across turns. Once you have responded in a
+  language, KEEP responding in that same language until the user clearly switches.
+- A language switch is ONLY triggered by a clear, complete sentence spoken in a different
+  language. A single word, a short fragment, a number, a name, or common gaming/app
+  terminology (e.g. "combo", "mode", "score", "next") is NEVER evidence of a language
+  switch — treat these as language-neutral, regardless of how they sound.
+  Example: if the user says just "combo" or "combo one", do NOT switch language. Ask for
+  the second number (MODE 1, step 2) in the CURRENT SESSION LANGUAGE, not a new guess.
+- If you are not confident about the language of the current utterance (it's too short,
+  ambiguous, or could be misheard), stay in the current session language. Never guess.
+- This stability rule applies to EVERY spoken response you generate, not just tool results
+  — including asking for a missing second number, asking the user to repeat themselves,
+  and any other utterance where no "respond_in_language" field is available yet.
 
 ━━━ CRITICAL — NO HALLUCINATION ━━━
 - NEVER say "valid" or "invalid" without first calling query_database_for_combo. No exceptions.
@@ -484,6 +512,8 @@ class RealtimeSession:
         self._current_language          = "English"  # language detected from latest STT transcript
         self._language_task: Optional[asyncio.Task] = None  # async LLM language detection
         self._last_script               = ""         # Unicode script of last detected turn
+        self._cooldown_audio_buffer: list[bytes] = []  # mic bytes captured during echo cooldown — flushed, not lost
+        self._mic_ready_task: Optional[asyncio.Task] = None  # schedules the mic_ready client event
 
     # ─────────────────────────────────────────────────────────────────────────
     # Language detection
@@ -537,8 +567,21 @@ class RealtimeSession:
                 temperature=0,
             )
             lang = (response.choices[0].message.content or self._current_language).strip()
-            self._current_language = lang
-            _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript='{transcript[:50]}'")
+
+            # STABILITY GUARD: a single short/ambiguous word ("combo", a lone
+            # number, a name) is not reliable evidence of a language switch —
+            # gpt-4o-mini will happily call "combo" Hindi or French out of
+            # context. Only accept a switch away from the locked language when
+            # the utterance has at least two words, or the guess is English
+            # (the safe default), or it agrees with what we already have.
+            word_count = len(transcript.strip().split())
+            if word_count < 2 and lang != "English" and lang != self._current_language:
+                _log("LANG SWITCH BLOCKED", self.uid,
+                     f"single-word/ambiguous utterance '{transcript}' guessed {lang} "
+                     f"— keeping locked language {self._current_language}")
+            else:
+                self._current_language = lang
+                _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript='{transcript[:50]}'")
         except Exception as e:
             _log("LANG DETECT ERR", self.uid, f"{e} — keeping {self._current_language}")
 
@@ -584,7 +627,7 @@ class RealtimeSession:
     async def _setup_session(self):
         _log("SESSION SETUP", self.uid,
              f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
-             f"stt=whisper-1 | silence=300ms | threshold=0.7")
+             f"stt=whisper-1 | silence=400ms | threshold=0.5")
         payload = {
             "type": "session.update",
             "session": {
@@ -595,6 +638,25 @@ class RealtimeSession:
                       f"You MUST always pass exactly '{self.db_mode}' as the mode parameter "
                       f"when calling query_database_for_combo. Do not translate, shorten, or modify this value."
                 ),
+                # Explicit VAD tuning — previously unset, meaning the session ran on
+                # whatever OpenAI's undocumented default happened to be. That made
+                # end-of-speech detection unpredictable (e.g. cutting off a user
+                # mid-utterance between the two spoken card numbers). These values
+                # match what the project's own docs always claimed were configured.
+                "audio": {
+                    "input": {
+                        "turn_detection": {
+                            "type":                "server_vad",
+                            "threshold":           0.5,
+                            "prefix_padding_ms":   200,
+                            "silence_duration_ms": 400,
+                            "create_response":     True,
+                        },
+                    },
+                    "output": {
+                        "voice": "alloy",
+                    },
+                },
                 "tools": [{
                     "type":        "function",
                     "name":        "query_database_for_combo",
@@ -799,6 +861,40 @@ class RealtimeSession:
     # Client → OpenAI relay
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def _append_audio_to_openai(self, raw: bytes) -> None:
+        """Sends one PCM chunk to OpenAI and updates turn accounting/throughput logs.
+        Shared by the live mic path and the cooldown-buffer flush so both are
+        counted and logged identically."""
+        self._audio_chunks_sent         += 1
+        self._audio_bytes_sent          += len(raw)
+        self._audio_appended_since_commit = True
+
+        if self._audio_chunks_sent % 50 == 0:
+            kb = round(self._audio_bytes_sent / 1024, 1)
+            _log("AUDIO STREAMING",  self.uid,
+                 f"chunks={self._audio_chunks_sent} bytes={kb}KB → forwarded to OpenAI")
+
+        await self.openai_ws.send(
+            json.dumps({
+                "type":  "input_audio_buffer.append",
+                "audio": base64.b64encode(raw).decode(),
+            })
+        )
+
+    async def _notify_mic_ready(self) -> None:
+        """Waits out the echo cooldown, then tells the client it's safe to record
+        again. The Flutter client should keep the mic button disabled from the
+        moment TTS starts until this event arrives, instead of re-enabling it
+        immediately and racing the server-side echo guard."""
+        try:
+            await asyncio.sleep(_TTS_ECHO_COOLDOWN)
+            await self.client_ws.send_text(json.dumps({"type": "mic_ready"}))
+            _log("MIC READY SENT", self.uid, "echo cooldown elapsed — client may open mic")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            _log("MIC READY ERR", self.uid, f"{type(e).__name__}: {e}")
+
     async def _relay_from_client(self):
         try:
             while self._active:
@@ -815,13 +911,29 @@ class RealtimeSession:
                 if "bytes" in message:
                     raw = message["bytes"]
 
-                    # Drop mic audio while AI is speaking — prevents mic from
-                    # capturing speaker output and feeding it back as user input.
+                    # Real echo risk while TTS is actively playing — the client
+                    # should have force-stopped its own mic by now, but if bytes
+                    # still arrive here they are almost certainly speaker replay,
+                    # not user speech. Drop these outright.
+                    if self._tts_streaming:
+                        continue
+
+                    # Echo cooldown: a short safety margin after TTS ends, in case
+                    # of speaker tail/room echo. This used to silently DISCARD any
+                    # mic audio that arrived in this window — if the user tapped
+                    # the mic and spoke their second card number right after the
+                    # AI finished asking for it, that audio vanished with zero
+                    # feedback ("stopped listening"). Now we buffer it instead and
+                    # flush it the instant the cooldown ends, so nothing the user
+                    # actually said is lost.
                     in_cooldown = (
                         self._tts_done_ts is not None
                         and (time.monotonic() - self._tts_done_ts) < _TTS_ECHO_COOLDOWN
                     )
-                    if self._tts_streaming or in_cooldown:
+                    if in_cooldown:
+                        self._cooldown_audio_buffer.append(raw)
+                        if len(self._cooldown_audio_buffer) > 200:  # ~16s cap — safety valve only
+                            self._cooldown_audio_buffer.pop(0)
                         continue
 
                     if not self._mic_streaming:
@@ -833,22 +945,16 @@ class RealtimeSession:
                         _log("AUDIO CAPTURING",  self.uid,
                              "Flutter sending PCM16 16kHz mono chunks")
 
-                    self._audio_chunks_sent         += 1
-                    self._audio_bytes_sent          += len(raw)
-                    self._audio_appended_since_commit = True
+                    if self._cooldown_audio_buffer:
+                        buffered = self._cooldown_audio_buffer
+                        self._cooldown_audio_buffer = []
+                        _log("COOLDOWN FLUSH",   self.uid,
+                             f"cooldown ended — forwarding {len(buffered)} buffered chunk(s) "
+                             f"captured while the echo guard was active")
+                        for chunk in buffered:
+                            await self._append_audio_to_openai(chunk)
 
-                    # Log throughput every 50 chunks (~4 seconds of audio)
-                    if self._audio_chunks_sent % 50 == 0:
-                        kb = round(self._audio_bytes_sent / 1024, 1)
-                        _log("AUDIO STREAMING",  self.uid,
-                             f"chunks={self._audio_chunks_sent} bytes={kb}KB → forwarded to OpenAI")
-
-                    await self.openai_ws.send(
-                        json.dumps({
-                            "type":  "input_audio_buffer.append",
-                            "audio": base64.b64encode(raw).decode(),
-                        })
-                    )
+                    await self._append_audio_to_openai(raw)
 
                 # ── Text/JSON messages ──────────────────────────────────────
                 elif "text" in message:
@@ -878,6 +984,10 @@ class RealtimeSession:
                                     await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
                                 except Exception:
                                     pass
+                                # Discard anything captured during cooldown too — the
+                                # user's turn ended before the cooldown was over, so
+                                # this fragment shouldn't bleed into the next turn.
+                                self._cooldown_audio_buffer = []
                                 self._audio_appended_since_commit = False
                                 self._mic_streaming   = False
                                 self._audio_chunks_sent = 0
@@ -1162,6 +1272,15 @@ class RealtimeSession:
                         self._tts_done_ts   = time.monotonic()
                         _log("TTS AUDIO DONE",   self.uid,
                              f"audio stream complete | chunks_streamed={self._tts_chunk_count} | echo_cooldown={_TTS_ECHO_COOLDOWN}s")
+
+                        # Tell the client exactly when it's safe to open the mic
+                        # again, instead of leaving the mic button tappable the
+                        # whole time and hoping the user doesn't tap during the
+                        # echo-cooldown window. The client should keep the mic
+                        # button disabled until this arrives.
+                        if self._mic_ready_task and not self._mic_ready_task.done():
+                            self._mic_ready_task.cancel()
+                        self._mic_ready_task = asyncio.create_task(self._notify_mic_ready())
 
                 elif etype == "response.text.delta":
                     pass  # text-only delta — skip
