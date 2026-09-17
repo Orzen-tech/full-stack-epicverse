@@ -52,6 +52,13 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   late bool _isConnected;
   Timer? _recordingTimer;
 
+  // Mic is locked while the AI is speaking and during the brief server-side
+  // echo cooldown after it finishes — unlocked by the backend's "mic_ready"
+  // event. This replaces guessing when it's "probably" safe to record again,
+  // which is what let the user's own audio get silently dropped mid-utterance.
+  bool _micLocked = false;
+  Timer? _micLockFailsafe;
+
   @override
   void initState() {
     super.initState();
@@ -100,16 +107,24 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       if (!mounted) return;
       
       try {
-        if (message is String) {
-          final data = jsonDecode(message);
-          
+        // websocket_service already decodes JSON text frames into a Map before
+        // broadcasting them, so `message is String` here never actually matched
+        // — every JSON event (response.done, error, transcripts, etc.) was
+        // silently skipping this whole block. Accept both shapes.
+        if (message is String || message is Map) {
+          final data = message is String ? jsonDecode(message) : message;
+
           if (data['type'] == 'response.done') {
             debugPrint('[EpicVerse][AI] response.done → LLM finished speaking');
-            _stopTalking(); 
+            _stopTalking();
           } else if (data['type'] == 'error') {
             debugPrint('[EpicVerse][AI] error event: ${data['message'] ?? data}');
             _stopTalking();
             _handleSystemError(data);
+          } else if (data['type'] == 'mic_ready') {
+            debugPrint('[EpicVerse][MIC] mic_ready — echo cooldown elapsed, unlocking mic');
+            _micLockFailsafe?.cancel();
+            if (mounted) setState(() => _micLocked = false);
           } else if (data['type'] == 'response.audio_transcript.delta' || data['type'] == 'transcript') {
             debugPrint('[EpicVerse][AI] transcript delta: ${data['delta'] ?? data['text']}');
           } else if (data['type'] == 'input_audio_buffer.speech_started') {
@@ -196,10 +211,23 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       debugPrint('[EpicVerse][MIC] Mic force-stopped — AI speaking');
     }
 
+    // Lock the mic button until the backend confirms the echo cooldown has
+    // elapsed (mic_ready). Failsafe: if that event is ever lost (dropped
+    // packet, etc.), unlock anyway after a generous timeout so the mic can
+    // never get stuck disabled for the rest of the session.
+    _micLockFailsafe?.cancel();
+    _micLockFailsafe = Timer(const Duration(seconds: 4), () {
+      if (mounted && _micLocked) {
+        debugPrint('[EpicVerse][MIC] mic_ready never arrived — failsafe unlock');
+        setState(() => _micLocked = false);
+      }
+    });
+
     _waveController.duration = const Duration(milliseconds: 800); // Fast!
     _waveController.repeat();
     setState(() {
       _isTalking = true;
+      _micLocked = true;
       _statusText = "Speaking...";
       _speechVibrationController.repeat(reverse: true);
     });
@@ -282,8 +310,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   void _handleIncomingMessage(dynamic message) {
     try {
-      if (message is String) {
-        final data = jsonDecode(message);
+      if (message is String || message is Map) {
+        final data = message is String ? jsonDecode(message) : message;
         if (data['type'] == 'mode_change' && data['newMode'] != null) {
           debugPrint("Mode switched by AI to: ${data['newMode']}");
           webSocketService.updateMode(data['newMode']);
@@ -488,7 +516,12 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   Future<void> _startVoiceTurn([int timeoutSeconds = 5]) async {
     debugPrint('[EpicVerse][MIC] Mic tapped → _startVoiceTurn(timeout=${timeoutSeconds}s)');
-    
+
+    if (_micLocked) {
+      debugPrint('[EpicVerse][MIC] Ignored — still in echo cooldown, waiting for mic_ready');
+      return;
+    }
+
     // Check AI Consent
     final consented = await _checkAndShowConsent();
     if (!consented) {
@@ -606,7 +639,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     wakeWordService.dispose();
-    
+    _micLockFailsafe?.cancel();
+
     // Cancel service subscriptions
     _connSub?.cancel();
     _statusSub?.cancel();
@@ -810,9 +844,12 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                         alignment: Alignment.bottomCenter,
                         child: GestureDetector(
                           onTap: () => _isRecording ? _stopRecording() : _startVoiceTurn(10),
-                          onLongPressStart: (_) => _startVoiceTurn(60),
+                          onLongPressStart: (_) => _micLocked ? null : _startVoiceTurn(60),
                           onLongPressEnd: (_) => _stopRecording(),
-                          child: TweenAnimationBuilder<double>(
+                          child: AnimatedOpacity(
+                            opacity: _micLocked ? 0.4 : 1.0,
+                            duration: const Duration(milliseconds: 200),
+                            child: TweenAnimationBuilder<double>(
                             tween: Tween<double>(begin: 1.0, end: _isRecording ? 1.4 : 1.0),
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.elasticOut,
@@ -878,6 +915,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                                 ),
                               );
                             },
+                          ),
                           ),
                         ),
                       ),
