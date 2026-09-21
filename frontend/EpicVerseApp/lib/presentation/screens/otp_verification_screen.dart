@@ -99,7 +99,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
   }
 
   Future<void> _verifyOtp() async {
-    if (_isVerified) return;
+    if (_isVerified || _isLoading) return;
     String otp = _controllers.map((c) => c.text).join();
     if (otp.length < 6) return;
 
@@ -144,13 +144,20 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     } catch (e, st) {
       debugPrint('[EpicVerse][OTP] Verify error: $e');
       if (mounted) {
-        ErrorHandler.handleError(
-          e,
-          stackTrace: st,
-          context: context,
-          screenName: 'OtpVerificationScreen',
-          showSnackBar: false,
-        );
+        // An HTTP 400 from /auth/verify-otp means the backend correctly
+        // rejected a wrong or expired code — expected user-input validation,
+        // not an application fault. Don't report it to Sentry; still report
+        // anything else (network errors, 5xx, malformed responses, etc.).
+        final isExpectedInvalidOtp = e is DioException && e.response?.statusCode == 400;
+        if (!isExpectedInvalidOtp) {
+          ErrorHandler.handleError(
+            e,
+            stackTrace: st,
+            context: context,
+            screenName: 'OtpVerificationScreen',
+            showSnackBar: false,
+          );
+        }
         setState(() {
           _errorMessage = "Invalid or expired verification code. Please try again.";
         });
