@@ -41,6 +41,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   Timer? _talkingTimeout;
   bool _isTalking = false; // Tracks if AI is speaking
   double _currentVolume = 0.0;
+  DateTime _lastVolumeRebuild = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _audioFinishTime = DateTime.now();
 
   // Service Subscriptions
@@ -115,8 +116,13 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           final data = message is String ? jsonDecode(message) : message;
 
           if (data['type'] == 'response.done') {
-            debugPrint('[EpicVerse][AI] response.done → LLM finished speaking');
-            _stopTalking();
+            debugPrint('[EpicVerse][AI] response.done → LLM finished sending audio');
+            // The server sends audio faster than it plays, so response.done arrives while
+            // speech is still playing. Only stop now if nothing is left to play; otherwise
+            // the playback-length timer (_talkingTimeout) ends the talking state on time.
+            if (!_audioFinishTime.isAfter(DateTime.now())) {
+              _stopTalking();
+            }
           } else if (data['type'] == 'error') {
             debugPrint('[EpicVerse][AI] error event: ${data['message'] ?? data}');
             _stopTalking();
@@ -269,15 +275,18 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     // Normalized volume (thresholded for EpicVerse acoustics)
     double normalized = (rms / 4500.0).clamp(0.0, 1.0);
     
-    // Fast attack, smooth decay for visual fluidity
-    if (mounted) {
-      setState(() {
-        if (normalized > _currentVolume) {
-          _currentVolume = (_currentVolume * 0.2) + (normalized * 0.8);
-        } else {
-          _currentVolume = (_currentVolume * 0.8) + (normalized * 0.2);
-        }
-      });
+    // Fast attack, smooth decay for visual fluidity. The smoothing runs on every
+    // chunk, but the screen only rebuilds ~15 times a second — rebuilding the whole
+    // animated screen per audio chunk competes with audio playback on the UI thread.
+    if (normalized > _currentVolume) {
+      _currentVolume = (_currentVolume * 0.2) + (normalized * 0.8);
+    } else {
+      _currentVolume = (_currentVolume * 0.8) + (normalized * 0.2);
+    }
+    final now = DateTime.now();
+    if (mounted && now.difference(_lastVolumeRebuild).inMilliseconds >= 66) {
+      _lastVolumeRebuild = now;
+      setState(() {});
     }
   }
 
@@ -514,7 +523,25 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     return false;
   }
 
+  // Single-flight guard: a second tap/long-press while a turn is still starting
+  // (consent dialog, connecting, opening the recorder) must not start another
+  // recorder stream — that produced doubled/garbled audio.
+  bool _startingTurn = false;
+
   Future<void> _startVoiceTurn([int timeoutSeconds = 5]) async {
+    if (_startingTurn) {
+      debugPrint('[EpicVerse][MIC] Ignored — a voice turn is already starting');
+      return;
+    }
+    _startingTurn = true;
+    try {
+      await _startVoiceTurnImpl(timeoutSeconds);
+    } finally {
+      _startingTurn = false;
+    }
+  }
+
+  Future<void> _startVoiceTurnImpl(int timeoutSeconds) async {
     debugPrint('[EpicVerse][MIC] Mic tapped → _startVoiceTurn(timeout=${timeoutSeconds}s)');
 
     if (_micLocked) {
@@ -586,6 +613,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       ));
       
       debugPrint('[EpicVerse][MIC] Recorder started 24kHz PCM16 mono');
+      // Never leave a previous mic subscription running behind the new one.
+      await _micSubscription?.cancel();
       _micSubscription = stream.listen((data) {
         // [AUDIT] Binary relay certified
         webSocketService.sendMessage(data);
