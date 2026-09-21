@@ -472,6 +472,105 @@ SYSTEM_INSTRUCTIONS = """You are a strict rule-based response engine for a card 
 - If the question is unrelated to the game, say nothing.
 - Every combo check = two numbers + one fresh tool call. No exceptions."""
 
+# TEMPORARY testing override — appended to the instructions only when
+# settings.FORCE_ENGLISH_TEST_MODE is true. Leaves SYSTEM_INSTRUCTIONS untouched.
+_ENGLISH_ONLY_OVERRIDE = """
+
+━━━ ENGLISH-ONLY TEST MODE (HIGHEST PRIORITY — overrides every language rule above) ━━━
+- This session is in English-only testing mode. This section supersedes the LANGUAGE RULE,
+  LANGUAGE STABILITY rules, and any "respond_in_language" value.
+- ALWAYS respond and speak in ENGLISH ONLY, no matter what language the user speaks, what the
+  transcript looks like, what language earlier turns used, or what any tool field says.
+- Still understand the user's input in any language and still extract card numbers as usual.
+- Translate anything non-English into English before speaking. Never speak any other language.
+- Asking for a missing second number, asking the user to repeat, and every other spoken
+  response must also be in English.
+- Keep proper nouns (names, card or mode names) as they are. Do not mix languages."""
+
+
+# Appended to the instructions only when history pruning / reason-on-request is active
+# for this session. Leaves SYSTEM_INSTRUCTIONS untouched.
+_HISTORY_MODE_OVERRIDE = """
+
+━━━ REASON-ON-REQUEST (HIGHEST PRIORITY — replaces MODE 2 step 2 and any "most recent tool result" wording) ━━━
+- The query_database_for_combo result contains ONLY the verdict (final_status), avatar_response and
+  respond_in_language. It does NOT contain the reason. Never invent or recall a reason.
+- Give a reason ONLY when the user explicitly asks why / how / explain (see the MODE 2 entry condition
+  and the SILENCE RULE).
+- To do that, call get_combo_reason (no arguments). Do NOT call query_database_for_combo again for a
+  why/how question.
+- Speak the revised_scholar_reason field from the get_combo_reason result, following the existing
+  language rules. Nothing added, nothing removed.
+- If get_combo_reason returns an error (no previous combo), say nothing.
+- Never call get_combo_reason unless the user explicitly asked for a reason."""
+
+# Appended only when the response policy is active for this session.
+_RESPONSE_POLICY_OVERRIDE = """
+
+━━━ RESPONSE POLICY (HIGHEST PRIORITY — replaces the SILENCE RULE's "say nothing" wording) ━━━
+- You cannot stay silent by speaking. To stay silent, call the stay_silent tool (no arguments) and say
+  NOTHING: no words, no "(silence)", no "understood", no "ready".
+- Call stay_silent for: "next", "ok", "okay", "continue", "alright", "hmm", "yes"/"no" that is not an
+  answer to a question you asked, background noise, unclear or incomplete audio, and anything unrelated
+  to the game that is not friendly small talk.
+- Friendly small talk (a greeting, thanks, "how are you") is allowed: reply with ONE short, natural
+  sentence. Never explain or justify it.
+- Never speak before or while calling a tool. As soon as you have two card numbers, call
+  query_database_for_combo immediately, with no lead-in such as "got it" or "let me check".
+- Never repeat or confirm the card numbers you heard, never ask the user to confirm numbers you already
+  have, and never invite the next pair ("please provide the next pair", "I'm ready").
+- If a second card number is missing, ask for it in ONE short sentence.
+- Give a reason or explanation ONLY when the user explicitly asks why / how / explain. Everything else is
+  at most one short sentence."""
+
+_STAY_SILENT_TOOL = {
+    "type":        "function",
+    "name":        "stay_silent",
+    "description": (
+        "Use this instead of speaking when no spoken reply is wanted (fillers like 'next' or 'ok', "
+        "noise, unclear audio, off-topic). Say nothing after calling it."
+    ),
+    "parameters":  {"type": "object", "properties": {}, "required": []},
+}
+
+_REASON_TOOL = {
+    "type":        "function",
+    "name":        "get_combo_reason",
+    "description": (
+        "Returns the stored scholar reason for the most recent combo check. "
+        "Call ONLY when the user explicitly asks why/how/explain."
+    ),
+    "parameters":  {"type": "object", "properties": {}, "required": []},
+}
+
+
+def _select_items_to_prune(items: list[dict], keep_turns: int) -> list[str]:
+    """Returns ids of conversation items older than the last `keep_turns` user turns.
+
+    A turn starts at a user message item. Everything before the start of the
+    keep_turns-th most recent user message (assistant replies, tool calls and
+    tool outputs of older turns) is eligible for deletion.
+    """
+    keep_turns = max(1, keep_turns)
+    user_idx = [
+        i for i, it in enumerate(items)
+        if it.get("type") == "message" and it.get("role") == "user"
+    ]
+    if len(user_idx) <= keep_turns:
+        return []
+    cutoff = user_idx[-keep_turns]
+    return [it["id"] for it in items[:cutoff] if it.get("id")]
+
+
+def _rss_mb() -> float | None:
+    """Current resident memory of this process in MB (Linux), or None."""
+    try:
+        with open("/proc/self/statm") as f:
+            pages = int(f.read().split()[1])
+        return round(pages * 4096 / (1024 * 1024), 1)
+    except Exception:
+        return None
+
 
 class _SafeJsonEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -514,6 +613,63 @@ class RealtimeSession:
         self._last_script               = ""         # Unicode script of last detected turn
         self._cooldown_audio_buffer: list[bytes] = []  # mic bytes captured during echo cooldown — flushed, not lost
         self._mic_ready_task: Optional[asyncio.Task] = None  # schedules the mic_ready client event
+
+        # ── Phase 1: per-turn telemetry state ────────────────────────────────
+        self._session_start_ts          = time.monotonic()
+        self._turn_seq                  = 0      # bumped on each detected user utterance (VAD)
+        self._t_speech_stop: Optional[float]      = None
+        self._t_transcript: Optional[float]       = None
+        self._t_first_audio_turn: Optional[float] = None
+        self._tts_start_ts: Optional[float]       = None
+        self._stt_latency_ms: Optional[int]       = None
+        self._llm_ttfa_ms: Optional[int]          = None
+        self._tts_duration_ms: Optional[int]      = None
+
+        # ── Phase 2: bounded history + reason-on-request (fixed per session) ──
+        self._history_on                = self._history_mode_enabled()
+        self._policy_on                 = self._policy_mode_enabled()
+        self._conv_items: list[dict]    = []     # ordered items OpenAI holds for this session
+        self._last_combo: Optional[dict] = None  # full last combo result, kept server-side
+        self._pruned_total              = 0
+        self._prune_seq                 = 0
+
+    def _mode_enabled(self, mode: str, uids: str) -> bool:
+        mode = (mode or "off").strip().lower()
+        if mode == "all":
+            return True
+        if mode == "allowlist":
+            # Entries may be a full uid or a prefix (8+ chars) of it.
+            allowed = [u.strip() for u in (uids or "").split(",") if len(u.strip()) >= 8]
+            return any(self.uid.startswith(p) for p in allowed)
+        return False
+
+    def _history_mode_enabled(self) -> bool:
+        return self._mode_enabled(settings.HISTORY_PRUNING_MODE, settings.HISTORY_PRUNING_UIDS)
+
+    def _policy_mode_enabled(self) -> bool:
+        return self._mode_enabled(settings.RESPONSE_POLICY_MODE, settings.RESPONSE_POLICY_UIDS)
+
+    def _telemetry(self, event: str, **fields) -> None:
+        """One structured JSON log line. Never includes audio, transcripts, tokens or keys."""
+        if not settings.TELEMETRY_ENABLED:
+            return
+        rec = {
+            "telemetry":      event,
+            "session_id":     self.session_id[:12],
+            "turn_id":        f"{self.session_id[:8]}-{self._turn_seq}",
+            "session_age_s":  round(time.monotonic() - self._session_start_ts),
+            "active_sessions": len(_ACTIVE_SESSIONS),
+            "history_on":     self._history_on,
+            "conv_items":     len(self._conv_items),
+            "pruned_total":   self._pruned_total,
+            "rss_mb":         _rss_mb(),
+            "async_tasks":    len(asyncio.all_tasks()),
+        }
+        rec.update(fields)
+        try:
+            print("[TELEMETRY] " + json.dumps(rec, default=str), flush=True)
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Language detection
@@ -628,6 +784,13 @@ class RealtimeSession:
         _log("SESSION SETUP", self.uid,
              f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
              f"stt=whisper-1 | silence=400ms | threshold=0.5")
+        if settings.FORCE_ENGLISH_TEST_MODE:
+            _log("ENGLISH-ONLY TEST MODE", self.uid, "ACTIVE — responses forced to English")
+        if self._history_on:
+            _log("HISTORY PRUNING",        self.uid,
+                 f"ACTIVE — keep_turns={settings.HISTORY_KEEP_TURNS}, reason-on-request tool enabled")
+        if self._policy_on:
+            _log("RESPONSE POLICY",        self.uid, "ACTIVE — stay_silent tool, no preamble, concise style")
         payload = {
             "type": "session.update",
             "session": {
@@ -637,6 +800,9 @@ class RealtimeSession:
                     + f"\n\nCURRENT SESSION MODE: {self.db_mode}\n"
                       f"You MUST always pass exactly '{self.db_mode}' as the mode parameter "
                       f"when calling query_database_for_combo. Do not translate, shorten, or modify this value."
+                    + (_ENGLISH_ONLY_OVERRIDE if settings.FORCE_ENGLISH_TEST_MODE else "")
+                    + (_HISTORY_MODE_OVERRIDE if self._history_on else "")
+                    + (_RESPONSE_POLICY_OVERRIDE if self._policy_on else "")
                 ),
                 # Explicit VAD tuning — previously unset, meaning the session ran on
                 # whatever OpenAI's undocumented default happened to be. That made
@@ -671,7 +837,8 @@ class RealtimeSession:
                         },
                         "required": ["mode", "character", "attribute", "detected_language"],
                     },
-                }],
+                }] + ([_REASON_TOOL] if self._history_on else [])
+                   + ([_STAY_SILENT_TOOL] if self._policy_on else []),
                 "tool_choice": "auto",
             },
         }
@@ -704,7 +871,61 @@ class RealtimeSession:
     # Tool call → DB query
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def _handle_reason_tool(self, call_id: str) -> None:
+        """Returns the stored reason for the last combo (only registered when history mode is on)."""
+        last = self._last_combo
+        if not last or not last.get("reason"):
+            out = {"error": "no_previous_combo"}
+        else:
+            if self._language_task and not self._language_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._language_task), timeout=2.0)
+                except Exception:
+                    pass
+            out = {
+                "revised_scholar_reason": last["reason"],
+                "respond_in_language": (
+                    "English" if settings.FORCE_ENGLISH_TEST_MODE else self._current_language
+                ),
+            }
+        _log("REASON TOOL", self.uid, f"served={'error' if 'error' in out else 'reason'}")
+        try:
+            await self.openai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {
+                    "type":    "function_call_output",
+                    "call_id": call_id,
+                    "output":  json.dumps(out, cls=_SafeJsonEncoder),
+                },
+            }))
+            await self.openai_ws.send(json.dumps({"type": "response.create"}))
+        except Exception as e:
+            _log("TOOL SEND ERROR", self.uid, f"reason tool delivery failed: {e}")
+
+    async def _handle_stay_silent(self, call_id: str) -> None:
+        """Acknowledges the tool call but deliberately does NOT request a new response,
+        so the model produces no speech for this turn."""
+        _log("STAY SILENT", self.uid, "model chose silence — no response requested")
+        self._telemetry("stay_silent")
+        try:
+            await self.openai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {
+                    "type":    "function_call_output",
+                    "call_id": call_id,
+                    "output":  json.dumps({"status": "silent"}),
+                },
+            }))
+        except Exception as e:
+            _log("TOOL SEND ERROR", self.uid, f"stay_silent ack failed: {e}")
+
     async def _handle_tool_call(self, call_id: str, name: str, arguments: dict):
+        if name == "stay_silent" and self._policy_on:
+            await self._handle_stay_silent(call_id)
+            return
+        if name == "get_combo_reason" and self._history_on:
+            await self._handle_reason_tool(call_id)
+            return
         if name != "query_database_for_combo":
             _log("TOOL UNKNOWN", self.uid, f"unknown tool '{name}' — ignoring")
             return
@@ -823,8 +1044,23 @@ class RealtimeSession:
                         except Exception:
                             pass
                 source = "llm-audio" if llm_language else "transcript-fallback"
-                result["respond_in_language"] = self._current_language
+                result["respond_in_language"] = (
+                    "English" if settings.FORCE_ENGLISH_TEST_MODE else self._current_language
+                )
                 _log("LANG INJECTED",  self.uid, f"respond_in_language={self._current_language} source={source}")
+
+                if self._history_on:
+                    # Keep the full reason server-side; give the model only the verdict.
+                    reason_text = str(result.get("revised_scholar_reason") or "")
+                    self._last_combo = {"reason": reason_text, "status": status}
+                    slim = {
+                        k: result[k] for k in (
+                            "final_status", "avatar_response", "respond_in_language",
+                            "both_character", "both_attribute", "character_not_in_mode",
+                        ) if k in result
+                    }
+                    slim["has_reason"] = bool(reason_text)
+                    result = slim
 
             output_str = (
                 json.dumps(result, cls=_SafeJsonEncoder)
@@ -880,6 +1116,27 @@ class RealtimeSession:
                 "audio": base64.b64encode(raw).decode(),
             })
         )
+
+    async def _prune_history(self) -> None:
+        """Deletes conversation items older than the last HISTORY_KEEP_TURNS user turns."""
+        try:
+            ids = _select_items_to_prune(self._conv_items, settings.HISTORY_KEEP_TURNS)
+            if not ids:
+                return
+            for item_id in ids:
+                self._prune_seq += 1
+                await self.openai_ws.send(json.dumps({
+                    "type":     "conversation.item.delete",
+                    "event_id": f"prune-{self._prune_seq}",
+                    "item_id":  item_id,
+                }))
+            gone = set(ids)
+            self._conv_items = [it for it in self._conv_items if it["id"] not in gone]
+            self._pruned_total += len(ids)
+            _log("HISTORY PRUNED", self.uid,
+                 f"deleted={len(ids)} kept_items={len(self._conv_items)} total_pruned={self._pruned_total}")
+        except Exception as e:
+            _log("HISTORY PRUNE ERR", self.uid, f"{type(e).__name__}: {e}")
 
     async def _notify_mic_ready(self) -> None:
         """Waits out the echo cooldown, then tells the client it's safe to record
@@ -1107,8 +1364,13 @@ class RealtimeSession:
                         continue
                     _log("VAD SPEECH START",     self.uid,
                          f"voice activity detected | audio_offset={offset_ms}ms")
+                    self._turn_seq          += 1
+                    self._t_transcript       = None
+                    self._t_first_audio_turn = None
+                    self._stt_latency_ms = self._llm_ttfa_ms = self._tts_duration_ms = None
 
                 elif etype == "input_audio_buffer.speech_stopped":
+                    self._t_speech_stop = time.monotonic()
                     offset_ms = event.get("audio_end_ms", "?")
                     _log("VAD SPEECH END",       self.uid,
                          f"silence detected | audio_end={offset_ms}ms → committing buffer")
@@ -1124,6 +1386,20 @@ class RealtimeSession:
                     continue
 
                 # ══ STT ════════════════════════════════════════════════════════
+
+                elif etype == "conversation.item.added":
+                    # Track what OpenAI holds for this session (used by history pruning + telemetry).
+                    it = event.get("item", {}) or {}
+                    it_id = it.get("id")
+                    if it_id and not any(x["id"] == it_id for x in self._conv_items[-12:]):
+                        self._conv_items.append({
+                            "id":   it_id,
+                            "type": it.get("type"),
+                            "role": it.get("role"),
+                        })
+
+                elif etype == "conversation.item.deleted":
+                    continue  # internal bookkeeping from history pruning — not for the client
 
                 elif etype == "conversation.item.created":
                     item      = event.get("item", {})
@@ -1144,6 +1420,11 @@ class RealtimeSession:
                 elif etype == "conversation.item.input_audio_transcription.completed":
                     transcript = event.get("transcript", "").strip()
                     self._partial_transcript = ""
+                    self._t_transcript = time.monotonic()
+                    if self._t_speech_stop is not None:
+                        self._stt_latency_ms = round((self._t_transcript - self._t_speech_stop) * 1000)
+                        # Transcription often finishes AFTER the response, so report it on its own.
+                        self._telemetry("stt_done", stt_latency_ms=self._stt_latency_ms)
                     if transcript:
                         _log_sep(self.uid, "USER SPOKE")
                         _log("STT COMPLETE",     self.uid,
@@ -1247,6 +1528,12 @@ class RealtimeSession:
                         if not self._tts_streaming:
                             self._tts_streaming  = True
                             self._tts_chunk_count = 0
+                            self._tts_start_ts = time.monotonic()
+                            if self._t_first_audio_turn is None:
+                                self._t_first_audio_turn = self._tts_start_ts
+                                # What the user perceives: end of their speech -> first audio back.
+                                if self._t_speech_stop is not None:
+                                    self._llm_ttfa_ms = round((self._tts_start_ts - self._t_speech_stop) * 1000)
                             _log("TTS AUDIO START",  self.uid,
                                  "OpenAI audio stream → forwarding PCM24k to Flutter")
                             # Clear any mic audio already buffered before TTS started.
@@ -1270,6 +1557,8 @@ class RealtimeSession:
                     if self._tts_streaming:
                         self._tts_streaming = False
                         self._tts_done_ts   = time.monotonic()
+                        if self._tts_start_ts is not None:
+                            self._tts_duration_ms = round((self._tts_done_ts - self._tts_start_ts) * 1000)
                         _log("TTS AUDIO DONE",   self.uid,
                              f"audio stream complete | chunks_streamed={self._tts_chunk_count} | echo_cooldown={_TTS_ECHO_COOLDOWN}s")
 
@@ -1304,6 +1593,22 @@ class RealtimeSession:
                          f"total={usage.get('total_tokens','?')}")
                     _log_sep(self.uid, "TURN COMPLETE")
 
+                    out_items   = resp.get("output", []) or []
+                    has_tool_call = any((o or {}).get("type") == "function_call" for o in out_items)
+                    self._telemetry(
+                        "response_done",
+                        status=status,
+                        tokens_in=usage.get("input_tokens"),
+                        tokens_out=usage.get("output_tokens"),
+                        has_tool_call=has_tool_call,
+                        response_latency_ms=self._llm_ttfa_ms,
+                        tts_duration_ms=self._tts_duration_ms,
+                        audio_chunks=self._tts_chunk_count,
+                    )
+                    # Prune only when a whole turn is finished (not between a tool call and its answer).
+                    if self._history_on and not has_tool_call:
+                        await self._prune_history()
+
                 elif etype == "rate_limits.updated":
                     limits = event.get("rate_limits", [])
                     parts  = [f"{r['name']}={r['remaining']}/{r['limit']}" for r in limits]
@@ -1317,6 +1622,10 @@ class RealtimeSession:
                     err = event.get("error", {})
                     _log("OPENAI ERROR",         self.uid,
                          f"code={err.get('code','?')} | msg={err.get('message','?')}")
+                    if str(err.get("event_id", "")).startswith("prune-"):
+                        # A history-pruning delete failed (e.g. item already gone) — harmless,
+                        # and must not surface to the app as a session error.
+                        continue
 
                 # Forward all remaining events to client
                 await self.client_ws.send_text(raw)
@@ -1371,6 +1680,33 @@ class RealtimeSession:
     # ─────────────────────────────────────────────────────────────────────────
     # Session lifecycle
     # ─────────────────────────────────────────────────────────────────────────
+
+    async def _run_relays_bounded(self) -> None:
+        """Runs the relays until EITHER side ends, then cancels the rest.
+
+        asyncio.gather() waited for every task, so when the client left, the
+        OpenAI relay stayed blocked on its next event and run()'s cleanup never
+        executed until OpenAI itself closed the socket (orphaned sessions).
+        """
+        client_task   = asyncio.ensure_future(self._relay_from_client())
+        openai_task   = asyncio.ensure_future(self._relay_from_openai())
+        watchdog_task = asyncio.ensure_future(self._session_watchdog())
+        try:
+            done, _ = await asyncio.wait(
+                {client_task, openai_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in done:
+                if not t.cancelled() and t.exception() is not None:
+                    _log("RELAY ERROR", self.uid, f"{type(t.exception()).__name__}: {t.exception()}")
+            ended = "client" if client_task in done else "openai"
+            _log("RELAY ENDED", self.uid, f"{ended} side finished first — stopping remaining relays")
+        finally:
+            self._active = False
+            pending = [t for t in (client_task, openai_task, watchdog_task) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def run(self):
         login_status = "LOGGED IN" if self.uid != "anonymous" else "ANONYMOUS"
@@ -1439,15 +1775,24 @@ class RealtimeSession:
         # instance, our in-memory `_ACTIVE_SESSIONS` dict won't see it, but
         # the watchdog will detect the DB mismatch and self-close.
         try:
-            await asyncio.gather(
-                self._relay_from_client(),
-                self._relay_from_openai(),
-                self._session_watchdog(),
-            )
+            if settings.SESSION_LIFECYCLE_FIX:
+                await self._run_relays_bounded()
+            else:
+                await asyncio.gather(
+                    self._relay_from_client(),
+                    self._relay_from_openai(),
+                    self._session_watchdog(),
+                )
         except Exception as e:
             _log("SESSION ERROR",   self.uid, f"{type(e).__name__}: {e}")
         finally:
             self._active = False
+            self._telemetry("session_end", total_turns=self._turn_count)
+            if settings.SESSION_LIFECYCLE_FIX:
+                try:
+                    await self.client_ws.close()
+                except Exception:
+                    pass
             if self.openai_ws:
                 try:
                     await self.openai_ws.close()

@@ -28,6 +28,23 @@ class Settings(BaseSettings):
     OPENAI_REALTIME_MODEL: str = "gpt-4o-realtime-preview"
     EMBEDDING_MODEL: str = "text-embedding-ada-002"
 
+    # TEMPORARY testing switch: forces the realtime Companion to respond in English only.
+    # Set env FORCE_ENGLISH_TEST_MODE=false to restore the existing multilingual behavior.
+    FORCE_ENGLISH_TEST_MODE: bool = True
+
+    # Long-session hardening (each independently reversible via env var).
+    # Phase 1: bounded relay shutdown/cleanup + structured per-turn telemetry (no behavior change).
+    SESSION_LIFECYCLE_FIX: bool = True
+    TELEMETRY_ENABLED: bool = True
+    # Phase 2: keep the model's history short and hand out the combo reason only on request.
+    # off = existing behavior | allowlist = only uids in HISTORY_PRUNING_UIDS | all = every session
+    HISTORY_PRUNING_MODE: str = "off"
+    HISTORY_PRUNING_UIDS: str = ""      # comma-separated Firebase uids (allowlist mode)
+    HISTORY_KEEP_TURNS: int = 3
+    # Phase 3: response policy (stay_silent tool, no preamble, concise style). Same off/allowlist/all modes.
+    RESPONSE_POLICY_MODE: str = "off"
+    RESPONSE_POLICY_UIDS: str = ""      # comma-separated uids or 8+ char prefixes (allowlist mode)
+
     # Redis
     REDIS_URL: str = ""
     REDIS_LOOKUP_TTL_SECONDS: int = 3600    # 1 hour for exact combo lookups
