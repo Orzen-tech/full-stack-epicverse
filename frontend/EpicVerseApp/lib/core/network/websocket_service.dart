@@ -113,14 +113,14 @@ class WebSocketService {
           }
 
           if (message is List<int>) {
-             debugPrint('[EpicVerse][WS] AUDIO chunk in bytes=${message.length}');
+             if (kDebugMode) debugPrint('[EpicVerse][WS] AUDIO chunk in bytes=${message.length}');
              _messageController.add(Uint8List.fromList(message));
              return;
           }
 
           try {
             final data = jsonDecode(message);
-            debugPrint('[EpicVerse][WS] MSG in type=${data['type']} status=${data['status']}');
+            if (kDebugMode) debugPrint('[EpicVerse][WS] MSG in type=${data['type']} status=${data['status']}');
             
             // Check for Session Kick — backend sends {"type": "SESSION_KICKED"}
             if (data['type'] == 'SESSION_KICKED') {

@@ -124,6 +124,8 @@ class WakeWordService {
   Future<void> dispose() async {
     await stopListening();
     await _connSub?.cancel();
+    await _msgSubscription?.cancel();
+    _msgSubscription = null;
     // _audioRecorder.dispose(); // Do not dispose here; singleton needs it alive for mode changes
   }
 }
