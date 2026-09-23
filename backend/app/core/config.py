@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     # Phase 3: response policy (stay_silent tool, no preamble, concise style). Same off/allowlist/all modes.
     RESPONSE_POLICY_MODE: str = "off"
     RESPONSE_POLICY_UIDS: str = ""      # comma-separated uids or 8+ char prefixes (allowlist mode)
+    # Phase 6: ask the app to reconnect before OpenAI's 60-minute session limit and Cloud Run's
+    # 3600s request timeout cut the connection mid-conversation.
+    SESSION_RENEWAL_MODE: str = "off"   # off | allowlist | all
+    SESSION_RENEWAL_UIDS: str = ""
+    SESSION_RENEW_MINUTES: float = 50.0       # earliest renewal, when the session is idle
+    SESSION_RENEW_HARD_MINUTES: float = 57.0  # renew anyway (even if not idle) at this age
+    SESSION_RENEW_IDLE_SECONDS: float = 10.0  # "idle" = no mic/AI activity for this long
+    # Phase 4: label each spoken answer with a turn id so the app can tell old audio
+    # from new (e.g. after a reconnect) and never play a stale response over a fresh one.
+    # Purely additive JSON events — a client that doesn't know about them just ignores them,
+    # so this is safe to turn on even for older app builds.
+    STALE_AUDIO_PROTECTION_MODE: str = "off"   # off | allowlist | all
+    STALE_AUDIO_PROTECTION_UIDS: str = ""
 
     # Redis
     REDIS_URL: str = ""

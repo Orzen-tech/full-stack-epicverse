@@ -7,6 +7,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:audio_session/audio_session.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
@@ -27,7 +28,7 @@ class CompanionReadyScreen extends StatefulWidget {
   State<CompanionReadyScreen> createState() => _CompanionReadyScreenState();
 }
 
-class _CompanionReadyScreenState extends State<CompanionReadyScreen> with TickerProviderStateMixin {
+class _CompanionReadyScreenState extends State<CompanionReadyScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   late stt.SpeechToText _speech;
   bool _isListeningWakeWord = false;
   late String _statusText;
@@ -42,6 +43,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   bool _isTalking = false; // Tracks if AI is speaking
   double _currentVolume = 0.0;
   DateTime _lastVolumeRebuild = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _wasConnectedBefore = false;   // true once we've connected at least once (next connect = reconnect)
+  int? _activeAudioTurnId;            // set by response_audio_start/end when the backend sends them
   DateTime _audioFinishTime = DateTime.now();
 
   // Service Subscriptions
@@ -60,10 +63,22 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   bool _micLocked = false;
   Timer? _micLockFailsafe;
 
+  // Some mic presses capture no detectable speech at all (too short/quiet). In
+  // that case the backend sends back nothing whatsoever — not even a
+  // "stay silent" — so nothing would ever reset the status text. This is a
+  // safety net: if we don't hear back within a few seconds, reset on our own.
+  Timer? _thinkingFailsafe;
+
+  StreamSubscription<AudioInterruptionEvent>? _audioInterruptionSub;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _speech = stt.SpeechToText();
+    // Reconnect automatically after a dropped/renewed session while this screen is open.
+    webSocketService.autoReconnect = true;
+    _initAudioInterruptions();
 
     // Initialize Speech Vibration (Mouth Action)
     _speechVibrationController = AnimationController(
@@ -96,6 +111,14 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         setState(() => _isConnected = connected);
         if (connected) {
            _statusText = "Ready";
+           // A RECONNECT (not the very first connect) starts a brand-new backend
+           // session. Flush anything still queued in the native audio buffer from
+           // the previous connection so it can never bleed into the new session's
+           // answers — flutter_pcm_sound has no flush call, so drop and recreate it.
+           if (_wasConnectedBefore) {
+             _flushAudioPlayback();
+           }
+           _wasConnectedBefore = true;
         }
       }
     });
@@ -116,6 +139,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           final data = message is String ? jsonDecode(message) : message;
 
           if (data['type'] == 'response.done') {
+            _thinkingFailsafe?.cancel();
             debugPrint('[EpicVerse][AI] response.done → LLM finished sending audio');
             // The server sends audio faster than it plays, so response.done arrives while
             // speech is still playing. Only stop now if nothing is left to play; otherwise
@@ -123,10 +147,47 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
             if (!_audioFinishTime.isAfter(DateTime.now())) {
               _stopTalking();
             }
+            // Fallback: a turn that stayed silent (e.g. "next") never starts talking, so
+            // _stopTalking() above is a no-op and the status text would otherwise be stuck
+            // on "Thinking.../Checking rules..." forever. Reset it once the turn is over.
+            if (!_isTalking && mounted && _statusText != "Ready" && _statusText != "Listening...") {
+              setState(() => _statusText = "Ready");
+            }
+          } else if (data['type'] == 'response.output_item.added') {
+            // The backend already forwards this raw OpenAI event; use it to show what
+            // the AI is actually doing instead of a generic "Checking rules..." for
+            // everything, including turns where nothing is being checked at all.
+            final item = data['item'];
+            if (item is Map && item['type'] == 'function_call' && mounted) {
+              _thinkingFailsafe?.cancel();
+              switch (item['name']) {
+                case 'query_database_for_combo':
+                  setState(() => _statusText = "Checking rules...");
+                  break;
+                case 'get_combo_reason':
+                  setState(() => _statusText = "Finding the reason...");
+                  break;
+                case 'stay_silent':
+                  setState(() => _statusText = "Ready");
+                  break;
+              }
+            }
           } else if (data['type'] == 'error') {
             debugPrint('[EpicVerse][AI] error event: ${data['message'] ?? data}');
             _stopTalking();
             _handleSystemError(data);
+          } else if (data['type'] == 'response_audio_start') {
+            // Optional backend feature (may be absent on older/rolled-back backends).
+            // If a previous turn never got its matching end, flush before the new one —
+            // belt-and-braces against a stale/aborted turn's audio still being queued.
+            final incoming = data['turn_id'];
+            if (_activeAudioTurnId != null && _activeAudioTurnId != incoming) {
+              debugPrint('[EpicVerse][AUDIO] turn changed ($_activeAudioTurnId → $incoming) without an end — flushing');
+              _flushAudioPlayback();
+            }
+            _activeAudioTurnId = incoming;
+          } else if (data['type'] == 'response_audio_end') {
+            if (_activeAudioTurnId == data['turn_id']) _activeAudioTurnId = null;
           } else if (data['type'] == 'mic_ready') {
             debugPrint('[EpicVerse][MIC] mic_ready — echo cooldown elapsed, unlocking mic');
             _micLockFailsafe?.cancel();
@@ -205,6 +266,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   void _startTalking() {
     if (!mounted || _isTalking) return;
     debugPrint('[EpicVerse][AI] AI started talking');
+    _thinkingFailsafe?.cancel();
 
     // Immediately kill the mic when AI starts speaking — no "end" message sent
     // so the backend doesn't commit a buffer full of echo audio.
@@ -229,6 +291,14 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       }
     });
 
+    // Reset the playback-finish estimate to right now. Without this, any
+    // response whose real playback finished slightly faster than estimated
+    // leaves this clock permanently ahead of real time — and since it's only
+    // ever corrected in one direction (real time catching up to it), that gap
+    // compounds across every answer in the session until the wave never gets
+    // the signal to stop. Starting each answer fresh removes the drift.
+    _audioFinishTime = DateTime.now();
+
     _waveController.duration = const Duration(milliseconds: 800); // Fast!
     _waveController.repeat();
     setState(() {
@@ -244,6 +314,10 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     debugPrint('[EpicVerse][AI] AI stopped talking');
     _waveController.duration = const Duration(milliseconds: 4000); // Slow idle
     _waveController.repeat();
+    // Resync the playback-finish clock to now — see the matching note in
+    // _startTalking(). This is the other half of preventing the estimate from
+    // ever drifting permanently ahead of real time.
+    _audioFinishTime = DateTime.now();
     setState(() {
       _isTalking = false;
       _currentVolume = 0.0;
@@ -379,6 +453,27 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   Future<void> _processAudioQueue() async {
     // Legacy logic - Keep for backward compat or remove if unused 🧘
+  }
+
+  bool _isFlushingAudio = false;
+
+  /// Drops any audio still queued in the native player. flutter_pcm_sound has no
+  /// flush call, so this releases and recreates it — used right after a reconnect
+  /// (a brand-new backend session) and defensively if a turn boundary marker shows
+  /// a turn was abandoned without an end. A no-op if a flush is already in flight.
+  Future<void> _flushAudioPlayback() async {
+    if (_isFlushingAudio) return;
+    _isFlushingAudio = true;
+    try {
+      await FlutterPcmSound.release();
+      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      debugPrint('[EpicVerse][AUDIO] playback buffer flushed');
+    } catch (e) {
+      debugPrint('[EpicVerse][AUDIO] flush failed (non-fatal): $e');
+    } finally {
+      _isFlushingAudio = false;
+      _activeAudioTurnId = null;
+    }
   }
 
   Future<void> _initWakeWord() async {
@@ -632,6 +727,39 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   }
 
 
+  /// Configures the app as a voice-chat participant for Android/iOS audio focus,
+  /// and reacts when something else needs the mic/speaker (a phone call, another
+  /// app's audio, a voice assistant). Without this, the app has no idea it lost
+  /// the mic/speaker and can keep recording into a call or fight another app
+  /// for playback.
+  Future<void> _initAudioInterruptions() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.speech());
+      await _audioInterruptionSub?.cancel();
+      _audioInterruptionSub = session.interruptionEventStream.listen((event) {
+        if (!event.begin) return; // resuming is not automatic — the user taps the mic again
+        debugPrint('[EpicVerse][AUDIO] interruption began (call/other app) — stopping mic/playback');
+        if (_isRecording) _stopRecording();
+        if (_isTalking) _flushAudioPlayback().then((_) => _stopTalking());
+      });
+    } catch (e) {
+      debugPrint('[EpicVerse][AUDIO] audio session setup failed (non-fatal): $e');
+    }
+  }
+
+  /// Stops the mic/playback when the app leaves the foreground (backgrounded,
+  /// locked, or another app comes on top), so nothing keeps recording or
+  /// speaking while the screen isn't visible. Nothing restarts automatically —
+  /// the user taps the mic again once back in the app, same as opening it fresh.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) return;
+    debugPrint('[EpicVerse][LIFECYCLE] app backgrounded ($state) — stopping mic/playback');
+    if (_isRecording) _stopRecording();
+    if (_isTalking) _flushAudioPlayback().then((_) => _stopTalking());
+  }
+
   Future<void> _stopRecording() async {
     if (!_isRecording) return;
     debugPrint('[EpicVerse][MIC] _stopRecording');
@@ -651,7 +779,17 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     
     debugPrint('[EpicVerse][MIC] Sent {"type":"end"} → awaiting LLM');
     webSocketService.sendMessage('{"type": "end"}');
-    if (mounted) setState(() => _statusText = "Checking rules...");
+    // Neutral until we know what the AI is actually doing — the
+    // response.output_item.added handler switches this to "Checking rules...",
+    // "Finding the reason...", or straight back to "Ready" once it's known.
+    if (mounted) setState(() => _statusText = "Thinking...");
+    _thinkingFailsafe?.cancel();
+    _thinkingFailsafe = Timer(const Duration(seconds: 6), () {
+      if (mounted && _statusText == "Thinking...") {
+        debugPrint('[EpicVerse][MIC] no backend response at all — resetting status');
+        setState(() => _statusText = "Ready");
+      }
+    });
 
     // Optional: Keep connection alive until AI finishes speaking for smoother UX
     // We will call disconnect() in onPlayerComplete if we want a full lazy cycle.
@@ -663,11 +801,15 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _audioInterruptionSub?.cancel();
+    _thinkingFailsafe?.cancel();
     _speech.cancel();
     _micSubscription?.cancel();
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     wakeWordService.dispose();
+    webSocketService.autoReconnect = false;
     _micLockFailsafe?.cancel();
 
     // Cancel service subscriptions

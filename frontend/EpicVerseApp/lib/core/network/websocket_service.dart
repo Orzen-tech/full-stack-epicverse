@@ -1,14 +1,24 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding, AppLifecycleState;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'api_config.dart';
 import 'session_manager.dart';
 import 'ssl_pinning_service.dart';
+
+/// Delay before the next automatic reconnect attempt: exponential backoff
+/// (1s, 2s, 4s ... capped at 30s) plus up to 0.5s of jitter; a server-requested
+/// renewal reconnects almost immediately.
+int reconnectDelayMs(int attempt, {required bool immediate, double jitter01 = 0.0}) {
+  final baseSeconds = immediate ? 0.3 : math.min(30.0, math.pow(2, attempt).toDouble());
+  return ((baseSeconds + jitter01 * 0.5) * 1000).round();
+}
 
 class WebSocketService {
   static final WebSocketService _instance = WebSocketService._internal();
@@ -29,6 +39,17 @@ class WebSocketService {
   Completer<void>? _connectionCompleter;
   Timer? _reconnectTimer;
 
+  // ── Automatic reconnect (enabled by the Companion screen while it is open) ──
+  // Lets the app survive the 60-minute session/connection limit and brief network
+  // drops without the user having to tap again. Off by default so no other screen
+  // ever opens a voice session on its own.
+  bool autoReconnect = false;
+  bool _manualClose = false;       // disconnect() / mode change / kick: never auto-reconnect
+  bool _renewPending = false;      // server sent session_renew: reconnect right away
+  int _reconnectAttempts = 0;
+  static const int _maxReconnectAttempts = 6;
+  String? _lastLanguage;
+
   bool get isConnected => _isConnected;
   String get statusText => _statusText;
   Stream<dynamic> get messages => _messageController.stream;
@@ -47,6 +68,8 @@ class WebSocketService {
     if (game_mode != null) {
       _currentMode = game_mode;
     }
+    if (language != null) _lastLanguage = language;
+    _manualClose = false;
 
     _isConnecting = true;
     _connectionCompleter = Completer<void>();
@@ -104,6 +127,8 @@ class WebSocketService {
           if (!_isConnected) {
             _isConnected = true;
             _isConnecting = false;
+            _reconnectAttempts = 0;
+            _renewPending = false;
             debugPrint('[EpicVerse][WS] CONNECTED');
             _statusController.add('Connected');
             _connectionStateController.add(true);
@@ -125,10 +150,17 @@ class WebSocketService {
             // Check for Session Kick — backend sends {"type": "SESSION_KICKED"}
             if (data['type'] == 'SESSION_KICKED') {
                debugPrint('[EpicVerse][WS] SESSION_KICKED — another device took over');
-               _handleDisconnect();
+               _handleDisconnect(reconnect: false);
                _statusController.add('Logged out: Active elsewhere');
                _sessionKickedController.add(null);
                return;
+            }
+
+            // Server asks us to reconnect before the 60-minute session limit.
+            // It closes the socket right after; _handleDisconnect reconnects.
+            if (data['type'] == 'session_renew') {
+               debugPrint('[EpicVerse][WS] session_renew — will reconnect when the socket closes');
+               _renewPending = true;
             }
 
             if (data['type'] == 'connection_success') {
@@ -160,12 +192,39 @@ class WebSocketService {
   }
 
   void disconnect() {
+    _manualClose = true;
     _reconnectTimer?.cancel();
     _channel?.sink.close();
-    _handleDisconnect();
+    _handleDisconnect(reconnect: false);
   }
 
-  void _handleDisconnect() {
+  void _scheduleReconnect({bool immediate = false}) {
+    if (!autoReconnect || _manualClose || _isConnected || _isConnecting) return;
+    if (_reconnectTimer?.isActive ?? false) return;
+    // Don't open voice sessions for an app that isn't on screen; the next mic tap
+    // reconnects lazily as before.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    if (!immediate && _reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('[EpicVerse][WS] auto-reconnect gave up after $_reconnectAttempts attempts');
+      return;
+    }
+    final delayMs = reconnectDelayMs(_reconnectAttempts,
+        immediate: immediate, jitter01: math.Random().nextDouble());
+    if (!immediate) _reconnectAttempts++;
+    debugPrint('[EpicVerse][WS] reconnecting in ${delayMs}ms (attempt $_reconnectAttempts, renew=$immediate)');
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () async {
+      if (!autoReconnect || _manualClose || _isConnected || _isConnecting) return;
+      try {
+        await connect(language: _lastLanguage).timeout(const Duration(seconds: 20));
+      } catch (e) {
+        debugPrint('[EpicVerse][WS] auto-reconnect attempt failed: $e');
+        _scheduleReconnect();
+      }
+    });
+  }
+
+  void _handleDisconnect({bool reconnect = true}) {
     if (!(_connectionCompleter?.isCompleted ?? true)) {
        _connectionCompleter?.completeError('Handshake failed or was interrupted');
     }
@@ -177,6 +236,8 @@ class WebSocketService {
     _statusController.add('Disconnected');
     _channel = null;
     _isConnecting = false;
+
+    if (reconnect) _scheduleReconnect(immediate: _renewPending);
   }
 
   void sendMessage(dynamic message) {
