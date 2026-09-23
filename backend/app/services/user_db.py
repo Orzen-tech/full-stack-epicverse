@@ -95,7 +95,8 @@ async def save_user(user: UserRecord):
                 invite_code = COALESCE(users.invite_code, EXCLUDED.invite_code),
                 mfa_enabled = COALESCE(EXCLUDED.mfa_enabled, users.mfa_enabled)
         ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture,
-             user.invite_code.upper() if user.invite_code else None, user.mfa_enabled)
+             user.invite_code.upper() if user.invite_code else None,
+             user.mfa_enabled if user.mfa_enabled is not None else False)
     return True
 
 
