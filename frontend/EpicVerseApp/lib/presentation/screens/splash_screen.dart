@@ -178,9 +178,38 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               return;
             }
           }
+        } on DioException catch (e) {
+          if (e.response?.statusCode == 404) {
+            // Profile genuinely doesn't exist — signup was never completed.
+            // Do NOT let this into the Dashboard; send them back through
+            // the normal Login flow, which already knows how to resume
+            // an incomplete signup (OTP → Create Profile).
+            debugPrint('[EpicVerse][SPLASH] Profile not found (404) → incomplete signup, sign out');
+            await prefs.setBool('isLoggedIn', false);
+            if (!mounted) return;
+            Navigator.of(context).pushReplacement(
+              PageRouteBuilder(
+                transitionDuration: const Duration(milliseconds: 800),
+                pageBuilder: (context, animation, secondaryAnimation) => const WelcomeScreen(),
+                transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
+              ),
+            );
+            return;
+          }
+          debugPrint("Splash: Failed to fetch profile (non-404): $e");
+          // Transient network/server error — don't punish an existing,
+          // already-verified user for a momentary backend hiccup.
+          ref.read(userProvider.notifier).setUser(UserModel(
+            id: firebaseUser.uid,
+            displayName: firebaseUser.displayName ?? "Explorer",
+            email: firebaseUser.email ?? "",
+            primaryLanguage: 'English',
+            preferredLanguages: const ['English'],
+          ));
         } catch (e) {
-          debugPrint("Splash: Failed to fetch profile: $e");
-          // Fallback to basic firebase info if DB is offline (ensure all required fields are present)
+          debugPrint("Splash: Failed to fetch profile (unexpected): $e");
           ref.read(userProvider.notifier).setUser(UserModel(
             id: firebaseUser.uid,
             displayName: firebaseUser.displayName ?? "Explorer",

@@ -7,13 +7,14 @@ import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
 import 'dashboard_screen.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/session_manager.dart';
 import 'welcome_screen.dart';
 import 'otp_verification_screen.dart';
 import 'create_profile_screen.dart';
 import '../../core/errors/error_handler.dart';
+import '../../core/errors/app_exception.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -28,7 +29,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
-  final Dio _dio = Dio();
 
   @override
   void dispose() {
@@ -66,18 +66,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         sessionId: sessionId,
       );
 
-      // 3. Update Provider and Local Persistence
+      // 3. Update Provider (local persistence of isLoggedIn happens ONLY
+      // after we've confirmed a real backend profile exists below — never
+      // optimistically, so an incomplete signup can never look "logged in").
       ref.read(userProvider.notifier).setUser(loggedInUser);
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('isLoggedIn', true);
 
       // 4. Check if Backend Profile Exists (Production Ready Sign-In Step)
       bool profileExists = false;
       try {
         debugPrint('[EpicVerse][LOGIN] GET /user profile check');
-        final res = await _dio.get(
-          '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
-          options: Options(headers: await ApiConfig.authHeaders()),
+        final res = await apiClient.get(
+          '/user/${firebaseUser.uid}',
         );
         debugPrint('[EpicVerse][LOGIN] /user response status=${res.statusCode}');
         if (res.statusCode == 200) {
@@ -98,7 +98,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               MaterialPageRoute(
                 builder: (_) => OtpVerificationScreen(
                   email: firebaseUser.email ?? '',
-                  onVerified: () {
+                  onVerified: () async {
+                    await prefs.setBool('isLoggedIn', true);
                     navigator.pushAndRemoveUntil(
                       MaterialPageRoute(builder: (_) => const DashboardScreen()),
                       (route) => false,
@@ -115,11 +116,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           if (mfaEnabled) {
             debugPrint('[EpicVerse][LOGIN] mfa_enabled=true → sending MFA OTP');
             try {
-              final idToken = await firebaseUser.getIdToken();
-              await _dio.post(
-                '${ApiConfig.apiUrl}/auth/send-otp',
+              await apiClient.post(
+                '/auth/send-otp',
                 data: FormData.fromMap({'identifier': firebaseUser.email}),
-                options: Options(headers: {...ApiConfig.headers, 'Authorization': 'Bearer $idToken'}),
               );
             } catch (e) {
               debugPrint('[EpicVerse][LOGIN] MFA OTP send failed: $e');
@@ -144,12 +143,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     // Finalize login state only after MFA passes
                     final sessionId = await SessionManager.getSessionId();
                     try {
-                      await _dio.post(
-                        '${ApiConfig.apiUrl}/auth/update-session',
+                      await apiClient.post(
+                        '/auth/update-session',
                         data: FormData.fromMap({'session_id': sessionId}),
-                        options: Options(headers: await ApiConfig.authHeaders()),
                       );
                     } catch (_) {}
+                    await prefs.setBool('isLoggedIn', true);
                     navigator.pushAndRemoveUntil(
                       MaterialPageRoute(builder: (_) => const DashboardScreen()),
                       (route) => false,
@@ -161,8 +160,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             return;
           }
         }
-      } catch (e) {
-        debugPrint("User not found in backend: Proceeding to profile creation flow.");
+      } on AppException catch (e) {
+        if (e.type == AppExceptionType.notFound) {
+          debugPrint('[EpicVerse][LOGIN] Profile not found (404) → proceeding to signup flow');
+        } else {
+          // Network/timeout/server error — do NOT treat an existing user as new.
+          debugPrint('[EpicVerse][LOGIN] Profile check failed (non-404): $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Could not reach the server. Please check your connection and try again.'),
+                backgroundColor: Colors.redAccent,
+              ),
+            );
+          }
+          return;
+        }
       }
 
 
@@ -173,12 +186,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         // Trigger OTP via Backend
         try {
            debugPrint('[EpicVerse][LOGIN] Profile missing → POST /auth/send-otp');
-           final idToken = await firebaseUser.getIdToken();
            final formData = FormData.fromMap({'identifier': firebaseUser.email});
-           final otpRes = await _dio.post(
-             '${ApiConfig.apiUrl}/auth/send-otp',
+           final otpRes = await apiClient.post(
+             '/auth/send-otp',
              data: formData,
-             options: Options(headers: {...ApiConfig.headers, 'Authorization': 'Bearer $idToken'}),
            );
            debugPrint('[EpicVerse][LOGIN] /auth/send-otp status=${otpRes.statusCode}');
         } catch (e) {
@@ -214,17 +225,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // 6. Register this device's session so other devices get forced out
       try {
         final sessionId = await SessionManager.getSessionId();
-        await _dio.post(
-          '${ApiConfig.apiUrl}/auth/update-session',
+        await apiClient.post(
+          '/auth/update-session',
           data: FormData.fromMap({'session_id': sessionId}),
-          options: Options(headers: await ApiConfig.authHeaders()),
         );
         debugPrint('[EpicVerse][LOGIN] session updated');
       } catch (e) {
         debugPrint('[EpicVerse][LOGIN] update-session failed (non-fatal): $e');
       }
 
-      // 7. Resume Journey: Already has profile, skip directly to Dashboard
+      // 7. Resume Journey: Profile confirmed to exist — safe to persist login now.
+      await prefs.setBool('isLoggedIn', true);
       if (!mounted) return;
       debugPrint('[EpicVerse][LOGIN] Profile exists → Dashboard');
       Navigator.of(context).pushReplacement(
@@ -252,24 +263,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   /// Silently update/fetch the full profile from the backend server
   Future<void> _syncUserInBackground(String uid, UserModel fallback) async {
     try {
-      final response = await _dio.get(
-        '${ApiConfig.apiUrl}/user/$uid',
-        options: Options(headers: await ApiConfig.authHeaders()),
+      final response = await apiClient.get(
+        '/user/$uid',
       );
-      
+
       if (response.statusCode == 200) {
         final data = response.data;
         // Use the factory to ensure consistent field mapping (including profile_picture)
         final fullUser = UserModel.fromJson(data);
-        
+
         // Silently update the global state with rich backend data
         ref.read(userProvider.notifier).setUser(fullUser);
       }
     } catch (e) {
       // If user doesn't exist in backend, trigger initial sync
-      final syncHeaders = await ApiConfig.authHeaders();
-      _dio.post(
-        '${ApiConfig.apiUrl}/sync-user',
+      apiClient.post(
+        '/sync-user',
         data: {
           "uid": uid,
           "display_name": fallback.displayName,
@@ -278,7 +287,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           "profile_picture": null,
           "session_id": fallback.sessionId,
         },
-        options: Options(headers: syncHeaders),
       ).catchError((e) {
         debugPrint("Background sync failed: $e");
         return Response(requestOptions: RequestOptions(path: ''), statusCode: 500);

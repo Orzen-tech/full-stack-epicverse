@@ -12,6 +12,7 @@ import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
 import '../../core/network/api_config.dart';
 import '../../core/network/session_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
 import '../../core/errors/error_handler.dart';
@@ -353,6 +354,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       }
 
       ref.read(userProvider.notifier).setUser(model);
+      // Profile is now confirmed to exist in the backend — safe to persist
+      // login state (mirrors the same guard added to LoginScreen).
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('isLoggedIn', true);
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const DashboardScreen()),

@@ -42,7 +42,9 @@ Future<void> main() async {
       }
 
       try {
-        webSocketService.connect();
+        webSocketService.connect().catchError((e, st) {
+          LoggerService.logError(e, stackTrace: st, customReason: 'Initial WebSocket connection failed');
+        });
       } catch (e, st) {
         LoggerService.logError(e, stackTrace: st, customReason: 'Initial WebSocket connection failed');
       }
