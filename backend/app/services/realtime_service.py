@@ -510,16 +510,24 @@ _RESPONSE_POLICY_OVERRIDE = """
 ━━━ RESPONSE POLICY (HIGHEST PRIORITY — replaces the SILENCE RULE's "say nothing" wording) ━━━
 - You cannot stay silent by speaking. To stay silent, call the stay_silent tool (no arguments) and say
   NOTHING: no words, no "(silence)", no "understood", no "ready".
-- Call stay_silent for: "next", "ok", "okay", "continue", "alright", "hmm", "yes"/"no" that is not an
-  answer to a question you asked, background noise, unclear or incomplete audio, and anything unrelated
-  to the game that is not friendly small talk.
-- Friendly small talk (a greeting, thanks, "how are you") is allowed: reply with ONE short, natural
-  sentence. Never explain or justify it.
+- DEFAULT ACTION IS SILENCE. Every single turn, you must do exactly ONE of these four things — nothing
+  else is allowed, ever:
+    1. call query_database_for_combo (you clearly heard TWO card numbers this turn)
+    2. call get_combo_reason (the user explicitly asked why/how/explain this turn)
+    3. speak ONE short natural sentence (a genuine greeting or thanks, or asking for a missing second
+       number — but ONLY when you clearly heard exactly ONE card number in THIS SAME turn, spoken with
+       clear intent to check a combo)
+    4. call stay_silent — this is what you do for every turn that is not one of the three above,
+       with NO exceptions. That includes: "next", "ok", "okay", "continue", "alright", "hmm", any
+       yes/no that isn't answering a question you just asked, background noise, breathing, silence,
+       an unclear or empty-sounding turn, anything unrelated to the game, and — critically — a turn
+       where you did NOT clearly hear a number this time, even if you asked for a second number
+       earlier. Never repeat "what's the second number" on a turn that gave you nothing new to go on.
+       If you are ever unsure which of the four applies, choose stay_silent.
 - Never speak before or while calling a tool. As soon as you have two card numbers, call
   query_database_for_combo immediately, with no lead-in such as "got it" or "let me check".
 - Never repeat or confirm the card numbers you heard, never ask the user to confirm numbers you already
   have, and never invite the next pair ("please provide the next pair", "I'm ready").
-- If a second card number is missing, ask for it in ONE short sentence.
 - Give a reason or explanation ONLY when the user explicitly asks why / how / explain. Everything else is
   at most one short sentence."""
 
@@ -628,6 +636,13 @@ class RealtimeSession:
         # ── Phase 2: bounded history + reason-on-request (fixed per session) ──
         self._history_on                = self._history_mode_enabled()
         self._policy_on                 = self._policy_mode_enabled()
+
+        # ── Phase 6: proactive session renewal ───────────────────────────────
+        self._renew_on                  = self._mode_enabled(
+            settings.SESSION_RENEWAL_MODE, settings.SESSION_RENEWAL_UIDS)
+        self._last_activity_ts          = time.monotonic()  # last mic byte / AI audio / response event
+        self._stale_audio_on            = self._mode_enabled(
+            settings.STALE_AUDIO_PROTECTION_MODE, settings.STALE_AUDIO_PROTECTION_UIDS)
         self._conv_items: list[dict]    = []     # ordered items OpenAI holds for this session
         self._last_combo: Optional[dict] = None  # full last combo result, kept server-side
         self._pruned_total              = 0
@@ -1167,6 +1182,7 @@ class RealtimeSession:
                 # ── Audio bytes (mic stream) ────────────────────────────────
                 if "bytes" in message:
                     raw = message["bytes"]
+                    self._last_activity_ts = time.monotonic()
 
                     # Real echo risk while TTS is actively playing — the client
                     # should have force-stopped its own mic by now, but if bytes
@@ -1448,6 +1464,7 @@ class RealtimeSession:
                 # ══ LLM RESPONSE ══════════════════════════════════════════════
 
                 elif etype == "response.created":
+                    self._last_activity_ts = time.monotonic()
                     resp_id = event.get("response", {}).get("id", "?")
                     _log_sep(self.uid, "LLM PROCESSING")
                     _log("LLM THINKING",         self.uid,
@@ -1529,6 +1546,7 @@ class RealtimeSession:
                             self._tts_streaming  = True
                             self._tts_chunk_count = 0
                             self._tts_start_ts = time.monotonic()
+                            self._last_activity_ts = self._tts_start_ts
                             if self._t_first_audio_turn is None:
                                 self._t_first_audio_turn = self._tts_start_ts
                                 # What the user perceives: end of their speech -> first audio back.
@@ -1536,6 +1554,14 @@ class RealtimeSession:
                                     self._llm_ttfa_ms = round((self._tts_start_ts - self._t_speech_stop) * 1000)
                             _log("TTS AUDIO START",  self.uid,
                                  "OpenAI audio stream → forwarding PCM24k to Flutter")
+                            if self._stale_audio_on:
+                                try:
+                                    await self.client_ws.send_text(json.dumps({
+                                        "type": "response_audio_start", "turn_id": self._turn_seq,
+                                    }))
+                                    _log("AUDIO TURN START", self.uid, f"turn_id={self._turn_seq}")
+                                except Exception:
+                                    pass
                             # Clear any mic audio already buffered before TTS started.
                             # This prevents audio captured during the LLM thinking phase
                             # from being transcribed as user input.
@@ -1561,6 +1587,14 @@ class RealtimeSession:
                             self._tts_duration_ms = round((self._tts_done_ts - self._tts_start_ts) * 1000)
                         _log("TTS AUDIO DONE",   self.uid,
                              f"audio stream complete | chunks_streamed={self._tts_chunk_count} | echo_cooldown={_TTS_ECHO_COOLDOWN}s")
+                        if self._stale_audio_on:
+                            try:
+                                await self.client_ws.send_text(json.dumps({
+                                    "type": "response_audio_end", "turn_id": self._turn_seq,
+                                }))
+                                _log("AUDIO TURN END",   self.uid, f"turn_id={self._turn_seq}")
+                            except Exception:
+                                pass
 
                         # Tell the client exactly when it's safe to open the mic
                         # again, instead of leaving the mic button tappable the
@@ -1681,6 +1715,42 @@ class RealtimeSession:
     # Session lifecycle
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def _renewal_watch(self) -> None:
+        """Asks the app to reconnect BEFORE the 60-minute session limit (OpenAI Realtime max
+        session, and Cloud Run's 3600s request timeout) cuts the connection mid-conversation.
+
+        Prefers a quiet moment: after SESSION_RENEW_MINUTES it waits until nothing has happened
+        for SESSION_RENEW_IDLE_SECONDS; at SESSION_RENEW_HARD_MINUTES it renews regardless.
+        Nothing needs carrying over — every combo check is stateless."""
+        if not self._renew_on:
+            return
+        soft = settings.SESSION_RENEW_MINUTES * 60
+        hard = settings.SESSION_RENEW_HARD_MINUTES * 60
+        idle_needed = settings.SESSION_RENEW_IDLE_SECONDS
+        try:
+            while self._active:
+                await asyncio.sleep(min(5.0, max(0.05, idle_needed / 2)))
+                now = time.monotonic()
+                age = now - self._session_start_ts
+                if age < soft:
+                    continue
+                idle = (not self._tts_streaming) and (now - self._last_activity_ts) >= idle_needed
+                if not (idle or age >= hard):
+                    continue
+                _log("SESSION RENEW", self.uid,
+                     f"age={round(age)}s idle={idle} — asking the app to reconnect")
+                self._telemetry("session_renew", idle=idle)
+                try:
+                    await self.client_ws.send_text(json.dumps({"type": "session_renew"}))
+                    await asyncio.sleep(0.3)
+                    await self.client_ws.close(code=1000)
+                except Exception:
+                    pass
+                self._active = False
+                return
+        except asyncio.CancelledError:
+            pass
+
     async def _run_relays_bounded(self) -> None:
         """Runs the relays until EITHER side ends, then cancels the rest.
 
@@ -1691,6 +1761,7 @@ class RealtimeSession:
         client_task   = asyncio.ensure_future(self._relay_from_client())
         openai_task   = asyncio.ensure_future(self._relay_from_openai())
         watchdog_task = asyncio.ensure_future(self._session_watchdog())
+        renewal_task  = asyncio.ensure_future(self._renewal_watch())
         try:
             done, _ = await asyncio.wait(
                 {client_task, openai_task}, return_when=asyncio.FIRST_COMPLETED
@@ -1702,7 +1773,7 @@ class RealtimeSession:
             _log("RELAY ENDED", self.uid, f"{ended} side finished first — stopping remaining relays")
         finally:
             self._active = False
-            pending = [t for t in (client_task, openai_task, watchdog_task) if not t.done()]
+            pending = [t for t in (client_task, openai_task, watchdog_task, renewal_task) if not t.done()]
             for t in pending:
                 t.cancel()
             if pending:
