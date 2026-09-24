@@ -3,10 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'core/theme/app_theme.dart';
 import 'core/network/websocket_service.dart';
+import 'core/network/ssl_pinning_service.dart';
 import 'core/widgets/network_banner_wrapper.dart';
 import 'core/services/logger_service.dart';
 import 'presentation/screens/splash_screen.dart';
@@ -24,6 +27,14 @@ Future<void> main() async {
     appRunner: () async {
       WidgetsFlutterBinding.ensureInitialized();
 
+      try {
+        // Must complete before any pinned Dio/WebSocket client is created
+        // (webSocketService.connect() below, and the apiClient singleton).
+        await SslPinningService.preload();
+      } catch (e, st) {
+        LoggerService.logError(e, stackTrace: st, customReason: 'SSL pin preload failed');
+      }
+
       // Flutter Uncaught Errors -> LoggerService & Sentry
       FlutterError.onError = (FlutterErrorDetails details) {
         FlutterError.presentError(details);
@@ -39,6 +50,23 @@ Future<void> main() async {
         LoggerService.logInfo('Firebase successfully initialized!');
       } catch (e, st) {
         LoggerService.logError(e, stackTrace: st, customReason: 'Firebase initialization failed');
+      }
+
+      try {
+        // Debug builds use the debug provider (a token registered in
+        // Firebase Console for testing); release builds use real device
+        // attestation. App Check starts in Monitor mode in Firebase Console
+        // — it logs requests but does not block anything yet.
+        // ignore: deprecated_member_use
+        await FirebaseAppCheck.instance.activate(
+          // ignore: deprecated_member_use
+          androidProvider: kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+          // ignore: deprecated_member_use
+          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
+        );
+        LoggerService.logInfo('App Check activated');
+      } catch (e, st) {
+        LoggerService.logError(e, stackTrace: st, customReason: 'App Check activation failed');
       }
 
       try {
