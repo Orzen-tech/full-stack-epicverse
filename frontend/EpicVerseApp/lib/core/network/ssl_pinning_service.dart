@@ -1,9 +1,8 @@
 import 'dart:io';
-import 'dart:convert';
-import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 /// Dart-level SSL pinning service.
 ///
@@ -13,69 +12,52 @@ import 'package:flutter/foundation.dart';
 ///   bypassed by Frida/SSL-bypass scripts on rooted devices.
 /// - This class enforces certificate validation inside the Dart process itself.
 ///
-/// Pinned Root CAs (SHA-256 of Subject Public Key Info, base64-encoded):
-/// - Google Trust Services Root R1  (used by Cloud Run / GCP services)
-/// - Google Trust Services Root R2  (backup Google root)
-/// - Let's Encrypt ISRG Root X1     (widely used, possible future CA)
+/// How pinning is enforced: rather than trusting the OS's full CA trust
+/// store (which happily accepts a MITM proxy's certificate once its CA is
+/// installed as "trusted" on the device — e.g. Burp Suite on a rooted test
+/// device), we build a [SecurityContext] that trusts ONLY the specific root
+/// CA certificates below. The TLS handshake itself then fails for any
+/// connection that doesn't chain up to one of these roots, regardless of
+/// what the OS trust store says.
 ///
 /// Root CAs are pinned instead of leaf certs because Cloud Run rotates its
 /// leaf certificate every ~90 days. Pinning roots prevents app breakage.
 class SslPinningService {
   SslPinningService._();
 
-  /// SHA-256 fingerprints of trusted Root CA Subject Public Key Info (SPKI),
-  /// base64-encoded. Add any additional trusted roots here.
-  static const List<String> _trustedPins = [
-    // Google Trust Services Root R1
-    'hxq455JWVdaLwVjbLPE+FYRjID7OlLz508wZa/CaVHI=',
-    // Google Trust Services Root R2
-    'VfdgK4cFi2/4E2jhFwHXdGlmfsXsDNlMJ+XZlvCa+eI=',
-    // Let's Encrypt ISRG Root X1
-    'C5+UgZ5Ay27wYY4nxzs/iikQ7a9giiX8ni3fHDvVzVo=',
+  static const List<String> _certAssets = [
+    'assets/certs/gts_root_r1.pem', // Google Trust Services Root R1 (legacy RSA hierarchy)
+    'assets/certs/gts_root_r2.pem', // Google Trust Services Root R2 (legacy RSA backup)
+    'assets/certs/gts_root_r4.pem', // Google Trust Services Root R4 — actual root behind
+                                     // Cloud Run's current "WE2" ECDSA intermediate, confirmed
+                                     // via openssl s_client against the live backend.
+    'assets/certs/isrg_root_x1.pem', // Let's Encrypt ISRG Root X1 (possible future CA)
   ];
 
-  /// Returns an [HttpClient] that validates certificate chains against
-  /// [_trustedPins]. The connection is rejected if none of the certs in the
-  /// chain match a pinned fingerprint.
-  ///
-  /// In debug mode, pinning is relaxed so developers can use proxies locally.
-  static HttpClient buildPinnedHttpClient() {
-    final client = HttpClient();
+  static SecurityContext? _pinnedContext;
 
-    if (kDebugMode) {
-      // Allow all certs in debug so devs can use Proxy/Charles locally.
-      // Remove or guard this block if you need to test pinning in debug too.
-      debugPrint('[SslPinning] DEBUG mode — pinning is relaxed');
-      return client;
+  /// Loads the pinned root certificates into a restricted [SecurityContext].
+  /// Must be awaited once at app startup, before any pinned Dio/WebSocket
+  /// client is created (release/profile builds only — see [_isPinningActive]).
+  static Future<void> preload() async {
+    if (!_isPinningActive) {
+      debugPrint('[SslPinning] DEBUG mode — pinning relaxed, skipping preload');
+      return;
     }
-
-    client.badCertificateCallback =
-        (X509Certificate cert, String host, int port) {
-      // Always reject unknown hosts (should not happen, but belt-and-braces)
-      debugPrint('[SslPinning] Validating cert for $host:$port');
-      return false; // returning false = reject the bad cert
-    };
-
-    return client;
+    final ctx = SecurityContext(withTrustedRoots: false);
+    for (final assetPath in _certAssets) {
+      final bytes = (await rootBundle.load(assetPath)).buffer.asUint8List();
+      ctx.setTrustedCertificatesBytes(bytes);
+    }
+    _pinnedContext = ctx;
+    debugPrint('[SslPinning] Preloaded ${_certAssets.length} pinned root CAs');
   }
 
-  /// Validates a certificate chain during a TLS handshake.
-  /// Called from [buildPinnedHttpClient]'s custom verification callback.
-  static bool _chainContainsTrustedPin(X509Certificate cert) {
-    // Compute SHA-256 of the DER-encoded cert (approximation of SPKI pin).
-    // For production-grade pinning, extract just the SPKI bytes from the cert.
-    final derBytes = cert.der;
-    final digest = sha256.convert(derBytes);
-    final pin = base64Encode(digest.bytes);
+  /// Debug builds relax pinning so developers can use a local proxy
+  /// (Charles/Burp) against a debug build. Release/profile builds enforce it.
+  static bool get _isPinningActive => !kDebugMode;
 
-    final trusted = _trustedPins.contains(pin);
-    if (!trusted) {
-      debugPrint('[SslPinning] REJECTED cert with pin=$pin');
-    }
-    return trusted;
-  }
-
-  /// Returns a [Dio] instance pre-configured with pinned [HttpClient].
+  /// Returns a [Dio] instance pre-configured with the pinned [HttpClient].
   /// Use this as the HTTP client for all API calls.
   static Dio createPinnedDio({
     required String baseUrl,
@@ -93,10 +75,9 @@ class SslPinningService {
       ),
     );
 
-    if (!kDebugMode) {
-      // Attach the pinned HttpClient adapter in release/profile mode only.
+    if (_isPinningActive) {
       (dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-        return _createValidatingHttpClient();
+        return _pinnedHttpClient();
       };
       debugPrint('[SslPinning] Dio: SSL pinning ACTIVE');
     } else {
@@ -106,44 +87,37 @@ class SslPinningService {
     return dio;
   }
 
-  /// Returns an [HttpClient] with a custom certificate-chain validator
-  /// that checks each cert in the chain against [_trustedPins].
-  static HttpClient _createValidatingHttpClient() {
-    final secCtx = SecurityContext(withTrustedRoots: true);
-    final client = HttpClient(context: secCtx);
-
-    client.badCertificateCallback =
-        (X509Certificate cert, String host, int port) {
-      // Returning false here means "reject this certificate".
-      // We always return false from badCertificateCallback, and instead
-      // do our pinning validation inside the normal TLS flow via
-      // HttpClient.findProxy / overrideHost approach.
-      // The OS still validates the full chain; we add an extra pin-check.
-      debugPrint('[SslPinning] badCertificateCallback for $host — REJECTING');
-      return false;
-    };
-
-    return client;
-  }
-
   /// Returns an [HttpClient] configured for use with [IOWebSocketChannel].
-  /// In release mode the client rejects any cert that fails OS chain validation
-  /// and blocks any proxy injection (badCertificateCallback always returns false).
+  /// In release mode the client's trust store is restricted to the pinned
+  /// root CAs, so any connection that doesn't chain to one of them fails
+  /// the handshake outright.
   static HttpClient createPinnedWebSocketHttpClient() {
-    if (kDebugMode) {
+    if (!_isPinningActive) {
       debugPrint('[SslPinning] WebSocket: pinning RELAXED (debug)');
       return HttpClient();
     }
-
-    final client = HttpClient();
-    client.badCertificateCallback =
-        (X509Certificate cert, String host, int port) {
-      debugPrint(
-          '[SslPinning] WebSocket cert REJECTED for $host (bad cert callback)');
-      return false; // never allow bad/unknown certs
-    };
-
     debugPrint('[SslPinning] WebSocket: pinning ACTIVE');
+    return _pinnedHttpClient();
+  }
+
+  static HttpClient _pinnedHttpClient() {
+    final ctx = _pinnedContext;
+    if (ctx == null) {
+      // preload() wasn't awaited before this client was needed — fail
+      // closed rather than silently falling back to the OS trust store.
+      throw StateError(
+        'SslPinningService.preload() must complete before creating a '
+        'pinned HttpClient in release/profile builds.',
+      );
+    }
+    final client = HttpClient(context: ctx);
+    // Belt-and-braces: the restricted trust store above is what actually
+    // enforces pinning. This callback is just a safety net and should
+    // never legitimately be reached.
+    client.badCertificateCallback = (cert, host, port) {
+      debugPrint('[SslPinning] REJECTED cert for $host:$port (not a pinned root)');
+      return false;
+    };
     return client;
   }
 }
