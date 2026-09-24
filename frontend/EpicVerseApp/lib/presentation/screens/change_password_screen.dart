@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 
 import '../../core/constants/app_colors.dart';
+import '../../core/network/api_client.dart';
 import '../../core/utils/password_validator.dart';
 import '../widgets/network_background.dart';
 import '../widgets/password_requirements.dart';
@@ -152,7 +154,12 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
 
     setState(() => _isSendingReset = true);
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      // Routed through the backend (rate-limited) instead of calling
+      // Firebase directly from the client.
+      await apiClient.post(
+        '/auth/send-password-reset',
+        data: FormData.fromMap({'identifier': email}),
+      );
       if (!mounted) return;
       _startResetCooldown();
       await showDialog<void>(

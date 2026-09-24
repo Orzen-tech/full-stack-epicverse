@@ -206,6 +206,14 @@ async def send_password_reset(identifier: str = Form(None), email: str = Form(No
     if not target or "@" not in target:
         raise HTTPException(status_code=422, detail="Valid email required")
 
+    allowed, retry_after = _otp_allowed(target.lower())
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please wait {retry_after // 60} minutes.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     try:
         from firebase_admin import auth as fb_auth
         reset_link = fb_auth.generate_password_reset_link(target)
