@@ -349,21 +349,26 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   }
                   setDialogState(() { sending = true; errorMsg = null; });
                   try {
-                    await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+                    // Routed through the backend (rate-limited) instead of
+                    // calling Firebase directly from the client.
+                    await apiClient.post(
+                      '/auth/send-password-reset',
+                      data: FormData.fromMap({'identifier': email}),
+                    );
                     if (ctx.mounted) Navigator.pop(ctx);
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Reset link sent! Check your inbox (and spam folder).'),
+                          content: Text('If an account exists for this email, a reset link has been sent. Check your inbox (and spam folder).'),
                           backgroundColor: Colors.green,
                           duration: Duration(seconds: 5),
                         ),
                       );
                     }
-                  } on FirebaseAuthException catch (e) {
-                    final msg = e.code == 'user-not-found'
-                        ? 'No account found with this email.'
-                        : e.message ?? 'Failed to send reset email.';
+                  } on AppException catch (e) {
+                    final msg = e.type == AppExceptionType.rateLimit
+                        ? e.userMessage
+                        : 'Failed to send reset email. Please try again.';
                     setDialogState(() { sending = false; errorMsg = msg; });
                   } catch (_) {
                     setDialogState(() { sending = false; errorMsg = 'An error occurred. Please try again.'; });
