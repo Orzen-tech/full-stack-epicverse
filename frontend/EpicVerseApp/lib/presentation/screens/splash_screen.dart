@@ -1,4 +1,7 @@
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_jailbreak_detection/flutter_jailbreak_detection.dart';
@@ -73,6 +76,33 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
     super.dispose();
   }
 
+  static const _integrityChannel = MethodChannel('epicverse/integrity');
+
+  /// Finding #4 hardening: a second, independent signal (ptrace-attachment
+  /// on Android via TracerPid, IOSSecuritySuite.amIDebugged() on iOS),
+  /// alongside the existing RootBeer/amIJailbroken() check. Deliberately
+  /// inactive in debug builds so normal `flutter run` development (which
+  /// itself attaches a debugger) is never blocked — the existing
+  /// root/jailbreak check above is NOT gated this way and stays active in
+  /// every build. Any failure here (channel missing, read error, etc.)
+  /// is treated as "unknown" and logged, never as "compromised" — this
+  /// must never be the reason a legitimate user gets blocked.
+  Future<bool> _isRuntimeInstrumented() async {
+    if (kDebugMode) return false;
+    try {
+      if (Platform.isAndroid) {
+        final tracerPid = await _integrityChannel.invokeMethod<int>('tracerPid');
+        return (tracerPid ?? -1) > 0;
+      } else if (Platform.isIOS) {
+        final debugged = await _integrityChannel.invokeMethod<bool>('amIDebugged');
+        return debugged ?? false;
+      }
+    } catch (e) {
+      debugPrint('[EpicVerse][INTEGRITY] Runtime-instrumentation check unavailable: $e');
+    }
+    return false;
+  }
+
   /// Checks if the device is rooted/jailbroken before proceeding.
   /// If rooted, shows a non-dismissible security warning dialog.
   Future<void> _checkRootAndProceed() async {
@@ -84,9 +114,11 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
       isRooted = false;
     }
 
+    final isInstrumented = await _isRuntimeInstrumented();
+
     if (!mounted) return;
 
-    if (isRooted) {
+    if (isRooted || isInstrumented) {
       showDialog(
         context: context,
         barrierDismissible: false,
