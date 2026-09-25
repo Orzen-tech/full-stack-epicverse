@@ -1,14 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!--
+      Pin-set corrected 2026-09-24: the previously-committed SPKI values
+      below did not match any certificate independently derivable from
+      the real root CAs (re-verified via two separate OpenSSL methods,
+      cross-checked, identical results both times). Reduced to the single
+      root actually presented by this domain today (GTS Root R4, confirmed
+      via `openssl s_client -showcerts` against the live endpoint). R1/R2/
+      ISRG Root X1 removed — no evidence they are in use, and no documented
+      Google rotation plan justifies pinning them as speculative backups.
+
+      GTS Root R4:
+        subject: C=US, O=Google Trust Services LLC, CN=GTS Root R4
+        issuer:  C=US, O=Google Trust Services LLC, CN=GTS Root R4 (self-signed)
+        SHA-256 cert fingerprint: 34:9D:FA:40:58:C5:E2:63:12:3B:39:8A:E7:95:57:3C:
+                                   4E:13:13:C8:3F:E6:8F:93:55:6C:D5:E8:03:1B:3C:7D
+        validity: 2016-06-22 to 2036-06-22
+    -->
     <domain-config>
         <domain includeSubdomains="true">epicverse-backend-721191424605.asia-south1.run.app</domain>
         <pin-set expiration="2027-12-31">
-            <!-- Google Trust Services Root R1 -->
-            <pin digest="SHA-256">hxq455JWVdaLwVjbLPE+FYRjID7OlLz508wZa/CaVHI=</pin>
-            <!-- Google Trust Services Root R2 -->
-            <pin digest="SHA-256">VfdgK4cFi2/4E2jhFwHXdGlmfsXsDNlMJ+XZlvCa+eI=</pin>
-            <!-- Let's Encrypt ISRG Root X1 -->
-            <pin digest="SHA-256">C5+UgZ5Ay27wYY4nxzs/iikQ7a9giiX8ni3fHDvVzVo=</pin>
+            <!-- GTS Root R4 — verified as the actual root in this domain's live chain -->
+            <pin digest="SHA-256">mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=</pin>
+        </pin-set>
+    </domain-config>
+    <!--
+      Firebase Auth pinning, added 2026-09-24 to close a gap where login/
+      signup/password-reset traffic (handled by the Firebase Auth SDK, not
+      our own Dio client) had no pinning at all. Same GTS Root R4 pin,
+      verified via `openssl s_client -showcerts` directly against both
+      domains below — identical chain to our own backend
+      (leaf *.googleapis.com -> WE2 intermediate -> GTS Root R4).
+      Exact-host only (includeSubdomains="false") — no subdomain of either
+      is used anywhere in this app.
+    -->
+    <domain-config>
+        <domain includeSubdomains="false">identitytoolkit.googleapis.com</domain>
+        <domain includeSubdomains="false">securetoken.googleapis.com</domain>
+        <pin-set expiration="2027-12-31">
+            <!-- GTS Root R4 — verified as the actual root in both domains' live chains -->
+            <pin digest="SHA-256">mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=</pin>
         </pin-set>
     </domain-config>
 </network-security-config>

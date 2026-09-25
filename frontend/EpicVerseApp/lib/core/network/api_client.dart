@@ -1,4 +1,6 @@
 import 'package:dio/dio.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../errors/error_handler.dart';
 import '../errors/error_mapper.dart';
 import 'api_config.dart';
@@ -23,6 +25,24 @@ class ApiClient {
           // Dynamically attach authorization header if user is authenticated
           final authHeaders = await ApiConfig.authHeaders();
           options.headers.addAll(authHeaders);
+
+          // App Check token — monitor-only signal for the backend (see
+          // Finding #4 remediation). Uses the SDK's own token caching
+          // (no forceRefresh), so this is a network call only on first
+          // use / near expiry, not on every request. A short timeout and
+          // broad catch ensure a slow or failed fetch never blocks or
+          // fails the actual API call — the header is simply omitted.
+          try {
+            final token = await FirebaseAppCheck.instance
+                .getToken()
+                .timeout(const Duration(seconds: 3));
+            if (token != null) {
+              options.headers['X-Firebase-AppCheck'] = token;
+            }
+          } catch (e) {
+            debugPrint('[ApiClient] App Check token unavailable (non-blocking): $e');
+          }
+
           return handler.next(options);
         },
         onError: (DioException e, handler) {
