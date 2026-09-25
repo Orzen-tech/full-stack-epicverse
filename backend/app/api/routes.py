@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from collections import defaultdict
@@ -36,6 +36,7 @@ from app.services.user_db import (
     verify_session, update_session_id, update_mfa,
 )
 from app.api.dependencies import get_current_user
+from app.services.app_check_monitor import log_app_check_status
 
 router = APIRouter()
 
@@ -94,6 +95,7 @@ async def _authorize_otp_request(invite_code: str | None, authorization: str | N
 
 @router.post("/auth/send-otp")
 async def send_otp(
+    request: Request,
     identifier: str = Form(None),
     email: str = Form(None),
     invite_code: str = Form(None),
@@ -104,6 +106,8 @@ async def send_otp(
     Authorization: caller must supply either a valid `invite_code` (signup)
     or a valid Firebase ID token in the Authorization header (login/resend).
     """
+    log_app_check_status(request, "send-otp")  # Monitor-only, see Finding #4
+
     identifier = identifier or email
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
@@ -137,19 +141,23 @@ async def send_otp(
 
 
 @router.post("/auth/verify-otp")
-async def verify_otp_route(identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
+async def verify_otp_route(request: Request, identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
     """Verifies an OTP for an existing Firebase user.
 
     NOTE: This endpoint never creates a Firebase user. The signup flow must
     create the Firebase user first (via `createUserWithEmailAndPassword` after
     invite validation). Refusing to auto-create here is the invite-bypass fix.
     """
+    log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
+
     identifier = identifier or email
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
 
-    is_valid = await verify_otp(identifier, otp)
-    if not is_valid:
+    result = await verify_otp(identifier, otp)
+    if result == 'too_many_attempts':
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new verification code.")
+    if result != 'success':
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
     # Mark email as verified in the users table

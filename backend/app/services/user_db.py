@@ -46,9 +46,11 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY,
                 otp TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                attempts INT NOT NULL DEFAULT 0
             )
         ''')
+        await conn.execute("ALTER TABLE user_otps ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0")
         # Schema must match the columns read by validate_invite_code() and
         # mark_invite_code_used() below. Production rows already have these
         # columns; this DDL only fires on a fresh DB (e.g. staging / DR).
@@ -246,11 +248,12 @@ async def save_otp(identifier: str, otp: str) -> bool:
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO user_otps (identifier, otp, created_at)
-                VALUES ($1, $2, CURRENT_TIMESTAMP)
+                INSERT INTO user_otps (identifier, otp, created_at, attempts)
+                VALUES ($1, $2, CURRENT_TIMESTAMP, 0)
                 ON CONFLICT (identifier) DO UPDATE SET
                     otp = EXCLUDED.otp,
-                    created_at = CURRENT_TIMESTAMP
+                    created_at = CURRENT_TIMESTAMP,
+                    attempts = 0
             ''', identifier.lower(), otp)
             return True
     except Exception as e:
@@ -258,22 +261,54 @@ async def save_otp(identifier: str, otp: str) -> bool:
         return False
 
 
-async def verify_otp(identifier: str, otp: str) -> bool:
+MAX_OTP_ATTEMPTS = 5
+
+
+async def verify_otp(identifier: str, otp: str) -> str:
+    """Verifies an OTP with concurrency-safe attempt tracking.
+
+    Returns 'success', 'invalid', or 'too_many_attempts'. The whole
+    check-then-act sequence runs inside one transaction with
+    `SELECT ... FOR UPDATE`, which row-locks this identifier for the
+    transaction's duration — a concurrent request for the same identifier
+    blocks at its own SELECT until this one commits, so two simultaneous
+    guesses can never both observe the same pre-increment attempt count.
+    """
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow('''
-                SELECT * FROM user_otps
-                WHERE identifier = $1 AND otp = $2
-                AND created_at > (NOW() - INTERVAL '1 minute')
-            ''', identifier.lower(), otp)
-            if row:
-                await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
-                return True
-            return False
+            async with conn.transaction():
+                row = await conn.fetchrow('''
+                    SELECT otp, attempts FROM user_otps
+                    WHERE identifier = $1 AND created_at > (NOW() - INTERVAL '1 minute')
+                    FOR UPDATE
+                ''', identifier.lower())
+
+                if not row:
+                    return 'invalid'
+
+                if row['attempts'] >= MAX_OTP_ATTEMPTS:
+                    # Already exhausted by a prior request — invalidate now.
+                    await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
+                    return 'too_many_attempts'
+
+                if row['otp'] == otp:
+                    await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
+                    return 'success'
+
+                new_attempts = row['attempts'] + 1
+                if new_attempts >= MAX_OTP_ATTEMPTS:
+                    await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
+                    return 'too_many_attempts'
+
+                await conn.execute(
+                    'UPDATE user_otps SET attempts = $2 WHERE identifier = $1',
+                    identifier.lower(), new_attempts
+                )
+                return 'invalid'
     except Exception as e:
         print(f"OTP Verification Error: {e}")
-        return False
+        return 'invalid'
 
 
 async def update_session_id(uid: str, session_id: str) -> bool:
