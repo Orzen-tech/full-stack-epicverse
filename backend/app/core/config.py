@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     SENDGRID_API_KEY: str = ""
     SENDGRID_FROM_EMAIL: str = "tech@kriyora.com"
 
+    # Cloud Scheduler -> /admin/purge-expired-deletions OIDC verification (F-03)
+    SCHEDULER_OIDC_AUDIENCE: str = ""
+    SCHEDULER_SERVICE_ACCOUNT_EMAIL: str = ""
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:

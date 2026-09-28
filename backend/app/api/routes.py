@@ -37,6 +37,7 @@ from app.services.user_db import (
 )
 from app.api.dependencies import get_current_user
 from app.services.app_check_monitor import log_app_check_status
+from app.api.scheduler_auth import verify_scheduler_oidc
 
 router = APIRouter()
 
@@ -523,12 +524,17 @@ async def admin_get_feedback(key: str = ""):
 
 
 @router.post("/admin/purge-expired-deletions")
-async def purge_expired_deletions_route():
+async def purge_expired_deletions_route(_: None = Depends(verify_scheduler_oidc)):
     """Hard-deletes all accounts whose 30-day grace period has elapsed.
 
-    Intended to be called by a scheduled job (e.g. Cloud Scheduler hitting
-    this endpoint daily). Removes purged uids from Firebase Auth in
-    addition to the SQL database.
+    Intended to be called by a scheduled job (Cloud Scheduler hitting this
+    endpoint daily). Removes purged uids from Firebase Auth in addition to
+    the SQL database.
+
+    Authorization (F-03): requires a Google-signed OIDC bearer token,
+    verified by `verify_scheduler_oidc`, whose audience and service-account
+    identity match the dedicated scheduler configuration. See
+    `app/api/scheduler_auth.py`.
     """
     purged_uids = await purge_expired_deletions()
     fb_results: list[dict] = []
