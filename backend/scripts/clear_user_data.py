@@ -1,8 +1,18 @@
 import asyncio
 import asyncpg
+import os
 
 # --- DATABASE CONFIG ---
-DATABASE_URL = "postgresql://REDACTED_PRODUCTION_CREDENTIAL_REMOVED"
+# DATABASE_URL must be provided via the environment (e.g. .env locally, or
+# Secret Manager in Cloud Run). This script no longer carries a hardcoded
+# production credential.
+_raw_url = os.getenv("DATABASE_URL")
+if not _raw_url:
+    raise SystemExit(
+        "DATABASE_URL environment variable is not set. "
+        "Refusing to run without an explicit database connection string."
+    )
+DATABASE_URL = _raw_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 async def main():
     print("[DB-PURGE] Starting Production User Data Wipe...")
