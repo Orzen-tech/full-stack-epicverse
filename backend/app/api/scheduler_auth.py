@@ -17,10 +17,10 @@ _TRUSTED_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 
 
 async def verify_scheduler_oidc(request: Request) -> None:
-    if not settings.SCHEDULER_OIDC_AUDIENCE or not settings.SCHEDULER_SERVICE_ACCOUNT_EMAIL:
+    if not settings.SCHEDULER_OIDC_AUDIENCE or not settings.SCHEDULER_SERVICE_ACCOUNT_ID:
         print(
             "[SCHEDULER-AUTH] Rejected: server missing "
-            "SCHEDULER_OIDC_AUDIENCE/SCHEDULER_SERVICE_ACCOUNT_EMAIL config",
+            "SCHEDULER_OIDC_AUDIENCE/SCHEDULER_SERVICE_ACCOUNT_ID config",
             flush=True,
         )
         raise HTTPException(status_code=503, detail="Scheduler authentication is not configured.")
@@ -49,12 +49,8 @@ async def verify_scheduler_oidc(request: Request) -> None:
         print("[SCHEDULER-AUTH] Rejected: unexpected issuer", flush=True)
         raise HTTPException(status_code=403, detail="Invalid token issuer.")
 
-    if not claims.get("email_verified", False):
-        print("[SCHEDULER-AUTH] Rejected: email not verified on token", flush=True)
-        raise HTTPException(status_code=403, detail="Unverified token identity.")
-
-    caller_email = claims.get("email", "")
-    if not caller_email or caller_email != settings.SCHEDULER_SERVICE_ACCOUNT_EMAIL:
+    caller_sub = claims.get("sub", "")
+    if not caller_sub or caller_sub != settings.SCHEDULER_SERVICE_ACCOUNT_ID:
         print("[SCHEDULER-AUTH] Rejected: identity mismatch", flush=True)
         raise HTTPException(status_code=403, detail="Unauthorized identity.")
 
