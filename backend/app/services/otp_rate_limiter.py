@@ -26,8 +26,10 @@ Design:
 """
 import asyncio
 import hashlib
+import ipaddress
 import socket
 import ssl
+from urllib.parse import urlparse
 
 from fastapi import Request
 
@@ -70,6 +72,40 @@ def _classify_redis_error(e: Exception) -> str:
         return "connection_error"
     return f"unclassified:{type(e).__name__}"
 
+
+def _classify_destination(redis_url: str) -> str:
+    """Classifies ONLY the general category of the configured Redis
+    destination (localhost / private_ip / public_ip / hostname /
+    unix_socket / unknown) — never logs the hostname, IP, port,
+    credentials, or any other part of the URL. Parsing/classification
+    only; the raw value never reaches a log line."""
+    try:
+        parsed = urlparse(redis_url)
+    except Exception:
+        return "unknown"
+
+    if parsed.scheme == "unix":
+        return "unix_socket"
+
+    host = parsed.hostname
+    if not host:
+        return "unknown"
+
+    if host == "localhost":
+        return "localhost"
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Not a literal IP address -> it's a DNS hostname.
+        return "hostname"
+
+    if ip.is_loopback:
+        return "localhost"
+    if ip.is_private:
+        return "private_ip"
+    return "public_ip"
+
 # Deliberately a separate client/connection from app.services.retriever's
 # redis_client: that module permanently disables itself
 # (_REDIS_ENABLED = False) after a single connection failure, which is the
@@ -109,7 +145,8 @@ async def _get_redis() -> "Redis | None":
         )
     except Exception as e:
         print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=from_url, category={_classify_redis_error(e)}), allowing request",
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=from_url, category={_classify_redis_error(e)}, "
+            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
             flush=True,
         )
         return None
@@ -118,7 +155,8 @@ async def _get_redis() -> "Redis | None":
         await client.ping()
     except Exception as e:
         print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=ping, category={_classify_redis_error(e)}), allowing request",
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=ping, category={_classify_redis_error(e)}, "
+            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
             flush=True,
         )
         return None
@@ -179,7 +217,8 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
         return True, 0
     except Exception as e:
         print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=command, category={_classify_redis_error(e)}), allowing request",
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=command, category={_classify_redis_error(e)}, "
+            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
             flush=True,
         )
         return True, 0
