@@ -7,7 +7,11 @@ import io
 import uuid
 import json
 
-# Simple in-memory OTP rate limiter: max 3 requests per 10 minutes per identifier
+# In-memory OTP rate limiter: max 3 requests per 10 minutes per identifier.
+# F-07: /auth/send-otp and /auth/send-email-otp now use the Redis-backed,
+# multi-instance-safe check_otp_send_allowed() instead (see
+# app/services/otp_rate_limiter.py). This in-memory limiter is kept only
+# for /auth/send-password-reset, which is out of scope for this change.
 _otp_rate: dict[str, list] = defaultdict(list)
 
 def _otp_allowed(identifier: str) -> tuple[bool, int]:
@@ -39,6 +43,7 @@ from app.api.dependencies import get_current_user
 from app.services.app_check_monitor import log_app_check_status
 from app.api.scheduler_auth import verify_scheduler_oidc
 from app.api.admin_auth import verify_admin_user
+from app.services.otp_rate_limiter import check_otp_send_allowed
 
 router = APIRouter()
 
@@ -131,7 +136,7 @@ async def send_otp(
 
     await _authorize_otp_request(invite_code, authorization)
 
-    allowed, retry_after = _otp_allowed(identifier.lower())
+    allowed, retry_after = await check_otp_send_allowed(identifier, request)
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -139,10 +144,10 @@ async def send_otp(
             headers={"Retry-After": str(retry_after)}
         )
 
-    import random
+    import secrets
     from app.services.email_service import send_otp_email
 
-    otp = str(random.randint(100000, 999999))
+    otp = str(secrets.randbelow(900000) + 100000)
     db_success = await save_otp(identifier, otp)
     if not db_success:
         raise HTTPException(status_code=500, detail="Database error while saving OTP")
@@ -263,20 +268,22 @@ async def send_password_reset(identifier: str = Form(None), email: str = Form(No
 
 @router.post("/auth/send-email-otp")
 async def send_email_otp_preregistration(
+    request: Request,
     identifier: str = Form(None),
     email: str = Form(None),
 ):
     """Open endpoint for pre-registration email verify. No invite code or token needed.
-    Rate-limited by the existing _otp_allowed limiter (3 per 10 min per email).
+    F-07: rate-limited by the Redis-backed check_otp_send_allowed() (3 per
+    10 min per email, plus a per-IP limit) instead of the in-memory limiter.
     """
-    import random
+    import secrets
     from app.services.email_service import send_otp_email
 
     target = (identifier or email or "").strip()
     if not target or "@" not in target:
         raise HTTPException(status_code=422, detail="Valid email required")
 
-    allowed, retry_after = _otp_allowed(target.lower())
+    allowed, retry_after = await check_otp_send_allowed(target, request)
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -284,7 +291,7 @@ async def send_email_otp_preregistration(
             headers={"Retry-After": str(retry_after)},
         )
 
-    otp = str(random.randint(100000, 999999))
+    otp = str(secrets.randbelow(900000) + 100000)
     await save_otp(target.lower(), otp)
     sent = await send_otp_email(target, otp)
     if not sent:
