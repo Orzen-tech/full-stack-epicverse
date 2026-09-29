@@ -29,8 +29,8 @@ from app.services.ai_pipeline import run_ai_pipeline
 from app.services.text_to_speech import synthesize_speech
 from app.services.storage import upload_to_gcs, log_interaction
 from app.services.user_db import (
-    save_user, UserRecord, get_user, save_otp, verify_otp,
-    validate_invite_code, mark_invite_code_used,
+    UserRecord, get_user, save_otp, verify_otp,
+    validate_invite_code, sync_user_with_invite_check,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
     verify_session, update_session_id, update_mfa,
@@ -53,14 +53,29 @@ async def validate_invite(code: str):
 
 @router.post("/sync-user")
 async def sync_user(user: UserRecord, current_user: dict = Depends(get_current_user)):
-    """Saves user info to the SQL database and marks invite code as used."""
+    """The sole path that may create a new SQL `users` row (F-06).
+
+    Existing SQL user: normal profile sync, no invite code required or
+    consumed. Genuinely new SQL user: a valid, unexpired, unexhausted
+    invite_code is mandatory — validated, consumed (current_uses
+    incremented, never deleted), and the row created, all atomically in
+    one transaction. See `sync_user_with_invite_check()`.
+    """
     if not user.get_uid():
         raise HTTPException(status_code=422, detail="firebase_id or uid is required")
     if current_user.get("uid") != user.get_uid():
         raise HTTPException(status_code=403, detail="Forbidden")
-    await save_user(user)
-    if user.invite_code:
-        await mark_invite_code_used(user.invite_code.upper(), user.get_uid())
+
+    result = await sync_user_with_invite_check(user)
+    if result["status"] == "rejected":
+        reason = result.get("reason")
+        detail = {
+            "invite_required": "A valid invite code is required to create a new account.",
+            "invalid_invite": "Invalid invite code.",
+            "expired_invite": "Invite code has expired.",
+            "exhausted_invite": "Invite code has already reached its usage limit.",
+        }.get(reason, "Invite code could not be validated.")
+        raise HTTPException(status_code=403, detail=detail)
     return {"status": "success", "message": "User synchronized"}
 
 async def _authorize_otp_request(invite_code: str | None, authorization: str | None) -> None:
@@ -145,9 +160,12 @@ async def send_otp(
 async def verify_otp_route(request: Request, identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
     """Verifies an OTP for an existing Firebase user.
 
-    NOTE: This endpoint never creates a Firebase user. The signup flow must
-    create the Firebase user first (via `createUserWithEmailAndPassword` after
-    invite validation). Refusing to auto-create here is the invite-bypass fix.
+    NOTE (F-06): this endpoint never creates a Firebase user, and never
+    writes a SQL `users` row either. The signup flow must create the
+    Firebase user first (via `createUserWithEmailAndPassword` after invite
+    validation), and `/sync-user` is the sole path that may create the SQL
+    row. Refusing to write here closes the invite-bypass this endpoint
+    previously allowed via an unconditional upsert.
     """
     log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
 
@@ -183,8 +201,10 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
                 )
             uid = fb_user.uid
 
-            # Upsert a minimal DB record so the user exists before profile completion
-            await save_user(UserRecord(firebase_id=uid, email=identifier))
+            # F-06: no SQL write here. /sync-user is the sole path that may
+            # create/update a `users` row (see sync_user_with_invite_check).
+            # This endpoint only confirms the Firebase account and mints a
+            # sign-in token.
 
             # Custom token lets Flutter sign in via FirebaseAuth.signInWithCustomToken()
             token_bytes = fb_auth.create_custom_token(uid)

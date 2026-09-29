@@ -102,6 +102,127 @@ async def save_user(user: UserRecord):
     return True
 
 
+class _InviteConsumptionRace(Exception):
+    """Internal-only signal: the guarded invite-consumption UPDATE
+    returned no row. Caught and translated to a safe, generic rejection —
+    never allowed to surface database details to the client."""
+
+
+async def sync_user_with_invite_check(user: UserRecord) -> dict:
+    """F-06: the sole path that may create a new `users` row.
+
+    Existing users: a normal profile sync — no invite required, none
+    consumed, regardless of what `invite_code` (if any) is in the request.
+
+    Genuinely new users: a valid, unexpired, unexhausted `invite_code` is
+    mandatory. Validation, row creation, and the invite's `current_uses`
+    increment all happen inside one transaction, so a rejected invite can
+    never leave a partially-created user, and a race can never consume
+    more uses than `max_uses` allows.
+
+    Concurrency:
+      - Same brand-new uid (two concurrent requests, e.g. a real signup and
+        the no-invite login fallback racing each other): serialized with a
+        transaction-scoped Postgres advisory lock
+        (`pg_advisory_xact_lock(hashtext(uid))`), taken *before* the
+        `users` row is even looked up. A plain `SELECT ... FOR UPDATE`
+        cannot serialize this case, since no row exists yet to lock for a
+        genuinely new uid.
+      - Same invite code, different uids: serialized with
+        `SELECT ... FROM invite_codes ... FOR UPDATE` on that specific
+        code row, so `current_uses` is read-then-incremented atomically.
+
+    Returns {"status": "existing"} | {"status": "created"} |
+    {"status": "rejected", "reason": "invite_required" | "invalid_invite"
+     | "expired_invite" | "exhausted_invite"}.
+    """
+    uid = user.get_uid()
+    if not uid:
+        raise ValueError("UserRecord must have firebase_id or uid")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            async with conn.transaction():
+                return await _sync_user_txn(conn, uid, user)
+        except _InviteConsumptionRace:
+            # The transaction already rolled back (including the INSERT)
+            # because this was raised inside conn.transaction(). Report it
+            # the same way an already-exhausted invite is reported — no
+            # database details reach the caller.
+            return {"status": "rejected", "reason": "exhausted_invite"}
+
+
+async def _sync_user_txn(conn, uid: str, user: UserRecord) -> dict:
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", uid)
+
+    existing = await conn.fetchrow("SELECT uid FROM users WHERE uid = $1", uid)
+
+    if existing:
+        # mfa_enabled preserves the exact (pre-existing) save_user()
+        # semantics: a request that omits it resets it to False rather
+        # than leaving it unchanged — the None -> False substitution
+        # happens in Python before the query runs, so this COALESCE never
+        # actually sees a NULL to fall back on. Not touched/fixed here —
+        # unrelated to F-06.
+        await conn.execute('''
+            UPDATE users SET
+                display_name = COALESCE($2, display_name),
+                email = COALESCE($3, email),
+                primary_language = COALESCE($4, primary_language),
+                profile_picture = COALESCE($5, profile_picture),
+                mfa_enabled = COALESCE($6, mfa_enabled)
+            WHERE uid = $1
+        ''', uid, user.display_name, user.email, user.primary_language,
+             user.profile_picture,
+             user.mfa_enabled if user.mfa_enabled is not None else False)
+        return {"status": "existing"}
+
+    if not user.invite_code:
+        return {"status": "rejected", "reason": "invite_required"}
+
+    code = user.invite_code.strip().upper()
+    invite_row = await conn.fetchrow(
+        """SELECT current_uses, max_uses,
+                  (expires_at IS NOT NULL AND expires_at <= NOW()) AS is_expired
+           FROM invite_codes
+           WHERE UPPER(code) = UPPER($1)
+           FOR UPDATE""",
+        code,
+    )
+    if invite_row is None:
+        return {"status": "rejected", "reason": "invalid_invite"}
+    if invite_row["is_expired"]:
+        return {"status": "rejected", "reason": "expired_invite"}
+    if invite_row["current_uses"] >= invite_row["max_uses"]:
+        return {"status": "rejected", "reason": "exhausted_invite"}
+
+    await conn.execute('''
+        INSERT INTO users (uid, display_name, email, primary_language, profile_picture, invite_code, mfa_enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture,
+         code, user.mfa_enabled if user.mfa_enabled is not None else False)
+
+    # Defense-in-depth: the SELECT ... FOR UPDATE above is the primary
+    # concurrency control and should make this condition unreachable in
+    # practice. This guard additionally makes the increment itself
+    # self-verifying at the SQL level — if it ever returns no row (e.g. a
+    # future code change weakens/removes the row lock above), the invite
+    # was not actually consumed, so the transaction must not commit a new
+    # user against it. Raising here rolls back the INSERT too, since both
+    # run inside the same `conn.transaction()` block in the caller.
+    consumed = await conn.fetchrow(
+        """UPDATE invite_codes
+           SET current_uses = current_uses + 1
+           WHERE UPPER(code) = UPPER($1) AND current_uses < max_uses
+           RETURNING current_uses""",
+        code,
+    )
+    if consumed is None:
+        raise _InviteConsumptionRace()
+    return {"status": "created"}
+
+
 async def get_user(firebase_id: str):
     """Pure read — no state mutation. Pending-deletion cancellation is
     handled exclusively by the authenticated `POST
@@ -390,24 +511,14 @@ async def mark_email_verified(email: str) -> bool:
         return False
 
 
-async def mark_invite_code_used(code: str, uid: str) -> bool:
-    """Stores the invite code on the user record then deletes it from the pool."""
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET invite_code = UPPER($1) WHERE uid = $2",
-                code, uid,
-            )
-            await conn.execute(
-                "DELETE FROM invite_codes WHERE UPPER(code) = UPPER($1)",
-                code,
-            )
-            print(f"[DB] Invite code {code.upper()} stored on user {uid} and deleted from pool", flush=True)
-            return True
-    except Exception as e:
-        print(f"[DB] mark_invite_code_used error: {e}")
-        return False
+# F-06: mark_invite_code_used() was removed. It unconditionally deleted an
+# invite row on any use (ignoring max_uses — it never incremented
+# current_uses anywhere), which both broke multi-use codes and, combined
+# with sync_user() never calling validate_invite_code(), was part of the
+# invite-bypass finding. Invite validation, consumption (current_uses
+# increment, never delete), and user creation are now atomic inside
+# sync_user_with_invite_check() above — the sole path that may create a
+# new `users` row.
 
 
 async def delete_user_from_db(uid: str) -> bool:
