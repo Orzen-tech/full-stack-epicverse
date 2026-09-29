@@ -24,7 +24,10 @@ Design:
     Redis URL, or any other credential — every log line here is a fixed,
     generic string.
 """
+import asyncio
 import hashlib
+import socket
+import ssl
 
 from fastapi import Request
 
@@ -34,6 +37,38 @@ try:
     from redis.asyncio import Redis
 except Exception:  # pragma: no cover - redis package already a dependency elsewhere
     Redis = None  # type: ignore
+
+try:
+    from redis import exceptions as redis_exceptions
+except Exception:  # pragma: no cover
+    redis_exceptions = None  # type: ignore
+
+
+def _classify_redis_error(e: Exception) -> str:
+    """Coarse, safe failure category derived only from the exception's
+    TYPE — never from its message, which can contain connection details
+    (host, port, and in some redis-py versions, credential fragments).
+    Diagnostic only; does not change fail-open behavior."""
+    if redis_exceptions is not None:
+        if isinstance(e, redis_exceptions.AuthenticationError):
+            return "authentication_error"
+        if isinstance(e, redis_exceptions.TimeoutError):
+            return "timeout"
+        if isinstance(e, redis_exceptions.ConnectionError):
+            return "connection_error"
+        if isinstance(e, redis_exceptions.ResponseError):
+            return "response_error"
+        if isinstance(e, redis_exceptions.RedisError):
+            return "other_redis_error"
+    if isinstance(e, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(e, ssl.SSLError):
+        return "tls_error"
+    if isinstance(e, socket.gaierror):
+        return "dns_error"
+    if isinstance(e, OSError):
+        return "connection_error"
+    return f"unclassified:{type(e).__name__}"
 
 # Deliberately a separate client/connection from app.services.retriever's
 # redis_client: that module permanently disables itself
@@ -72,12 +107,24 @@ async def _get_redis() -> "Redis | None":
             socket_connect_timeout=2.0,
             health_check_interval=30,
         )
-        await client.ping()
-        _otp_redis_client = client
-        return _otp_redis_client
-    except Exception:
-        print("[OTP-RATE-LIMIT] Redis unavailable, allowing request", flush=True)
+    except Exception as e:
+        print(
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=from_url, category={_classify_redis_error(e)}), allowing request",
+            flush=True,
+        )
         return None
+
+    try:
+        await client.ping()
+    except Exception as e:
+        print(
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=ping, category={_classify_redis_error(e)}), allowing request",
+            flush=True,
+        )
+        return None
+
+    _otp_redis_client = client
+    return _otp_redis_client
 
 
 def _hash(value: str) -> str:
@@ -130,6 +177,9 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
             return False, max(int(ttl), 0)
 
         return True, 0
-    except Exception:
-        print("[OTP-RATE-LIMIT] Redis unavailable, allowing request", flush=True)
+    except Exception as e:
+        print(
+            f"[OTP-RATE-LIMIT] Redis unavailable (stage=command, category={_classify_redis_error(e)}), allowing request",
+            flush=True,
+        )
         return True, 0
