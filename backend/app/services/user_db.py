@@ -103,20 +103,12 @@ async def save_user(user: UserRecord):
 
 
 async def get_user(firebase_id: str):
+    """Pure read — no state mutation. Pending-deletion cancellation is
+    handled exclusively by the authenticated `POST
+    /user/{firebase_id}/cancel-deletion` route (see `cancel_user_deletion`)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Auto-cancel a pending deletion: if the user returns within the
-        # 30-day grace window, clear `deletion_requested_at` so the scheduled
-        # purge will skip them. This is the "sign back in → account restored"
-        # behaviour surfaced in the Settings UI.
         row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
-        if row and row.get('deletion_requested_at') is not None:
-            await conn.execute(
-                'UPDATE users SET deletion_requested_at = NULL WHERE uid = $1',
-                firebase_id,
-            )
-            print(f"[USER_DB] Auto-cancelled pending deletion for uid={firebase_id}", flush=True)
-            row = await conn.fetchrow('SELECT * FROM users WHERE uid = $1', firebase_id)
         if row:
             return dict(row)
     return None
@@ -124,8 +116,10 @@ async def get_user(firebase_id: str):
 
 async def request_user_deletion(uid: str) -> bool:
     """Marks a user as pending deletion. Actual purge happens 30 days later
-    via `purge_expired_deletions()` unless the user signs in and triggers
-    auto-cancel in `get_user()` first.
+    via `purge_expired_deletions()` unless `cancel_user_deletion()` is
+    called first (F-05: via the authenticated `POST
+    /user/{firebase_id}/cancel-deletion` route — `get_user()` is a pure
+    read and performs no cancellation itself).
     """
     try:
         pool = await get_pool()

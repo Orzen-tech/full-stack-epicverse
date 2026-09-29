@@ -178,13 +178,35 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
           final dio = Dio();
           final response = await dio.get(
             '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
-            options: Options(headers: ApiConfig.headers),
+            options: Options(headers: await ApiConfig.authHeaders()),
           );
           
           if (response.statusCode == 200) {
             final data = response.data;
             final user = UserModel.fromJson(data);
             ref.read(userProvider.notifier).setUser(user);
+
+            // F-05 compatibility: GET /user/{uid} is now a pure read and no
+            // longer auto-cancels a pending deletion. Preserve the promised
+            // "sign back in within 30 days -> automatically cancelled"
+            // behavior via the authenticated cancel-deletion endpoint. Kept
+            // in its own try/catch so a failure here is never mistaken by
+            // the outer DioException handler for a missing profile (404).
+            final deletionRequestedAt = data['deletion_requested_at'];
+            if (deletionRequestedAt != null) {
+              debugPrint('[EpicVerse][SPLASH] Pending deletion detected — cancelling');
+              try {
+                final cancelRes = await dio.post(
+                  '${ApiConfig.apiUrl}/user/${firebaseUser.uid}/cancel-deletion',
+                  options: Options(headers: await ApiConfig.authHeaders()),
+                );
+                if (cancelRes.statusCode != 200) {
+                  debugPrint('[EpicVerse][SPLASH] cancel-deletion non-200 status=${cancelRes.statusCode}');
+                }
+              } catch (e) {
+                debugPrint('[EpicVerse][SPLASH] cancel-deletion failed: $e');
+              }
+            }
 
             final emailVerified = data['email_verified'] ?? false;
             if (!emailVerified) {

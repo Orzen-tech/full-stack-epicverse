@@ -88,6 +88,25 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           // Persist language locally for WebSocket session handshake
           await prefs.setString('primaryLanguage', fullUser.primaryLanguage ?? 'English');
 
+          // F-05 compatibility: GET /user/{uid} is now a pure read and no
+          // longer auto-cancels a pending deletion. Preserve the promised
+          // "sign back in within 30 days -> automatically cancelled"
+          // behavior by explicitly calling the authenticated cancel-deletion
+          // endpoint when needed. A failure here is logged, not silently
+          // treated as success, but must not block normal login.
+          final deletionRequestedAt = res.data['deletion_requested_at'];
+          if (deletionRequestedAt != null) {
+            debugPrint('[EpicVerse][LOGIN] Pending deletion detected — cancelling');
+            try {
+              final cancelRes = await apiClient.post('/user/${firebaseUser.uid}/cancel-deletion');
+              if (cancelRes.statusCode != 200) {
+                debugPrint('[EpicVerse][LOGIN] cancel-deletion non-200 status=${cancelRes.statusCode}');
+              }
+            } catch (e) {
+              debugPrint('[EpicVerse][LOGIN] cancel-deletion failed: $e');
+            }
+          }
+
           // Block login if OTP was never verified (app closed mid-registration)
           final emailVerified = res.data['email_verified'] ?? false;
           if (!emailVerified) {

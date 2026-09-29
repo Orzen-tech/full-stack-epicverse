@@ -305,8 +305,16 @@ async def check_session(session_id: str, current_user: dict = Depends(get_curren
 
 
 @router.get("/user/{firebase_id}")
-async def fetch_user(firebase_id: str):
-    """Fetches user info from the SQL database."""
+async def fetch_user(firebase_id: str, current_user: dict = Depends(get_current_user)):
+    """Fetches user info from the SQL database.
+
+    Authorization (F-05): requires a valid Firebase ID token, and the
+    caller's uid must match the requested `firebase_id`. A user can only
+    ever fetch their own record.
+    """
+    caller_uid = current_user.get("uid")
+    if caller_uid != firebase_id:
+        raise HTTPException(status_code=403, detail="You can only view your own account.")
     user = await get_user(firebase_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -471,9 +479,13 @@ async def delete_user(
 
     The account is marked `deletion_requested_at = NOW()` but remains in
     both Firebase and the SQL database. If the user signs back in within
-    30 days, `get_user()` auto-cancels the deletion. After 30 days the
-    scheduled `/admin/purge-expired-deletions` job permanently removes the
-    account from both Firebase and the database.
+    30 days, the mobile login/splash flow detects the pending deletion
+    from the profile GET response and explicitly calls the authenticated
+    `POST /user/{firebase_id}/cancel-deletion` below to cancel it (F-05:
+    `GET /user/{firebase_id}` is a pure read and never cancels deletion
+    itself). After 30 days the scheduled `/admin/purge-expired-deletions`
+    job permanently removes the account from both Firebase and the
+    database.
 
     Authorization: requires a valid Firebase ID token, and the caller's
     uid must match `firebase_id`. Users can only schedule deletion of
@@ -502,9 +514,12 @@ async def cancel_deletion(
     firebase_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Explicitly cancels a pending account deletion (belt-and-braces UI
-    path). Normal sign-in already auto-cancels via `get_user()`; this
-    endpoint exists for screens that want to restore without a full GET.
+    """Explicitly cancels a pending account deletion. This is the sole
+    mechanism that cancels a pending deletion (F-05: `get_user()`/
+    `GET /user/{firebase_id}` are pure reads and perform no cancellation).
+    The mobile login/splash flow calls this endpoint automatically when
+    it detects a non-null `deletion_requested_at` on the profile GET
+    response, preserving the "sign back in within 30 days" promise.
     """
     caller_uid = current_user.get("uid")
     if caller_uid != firebase_id:
