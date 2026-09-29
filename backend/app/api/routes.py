@@ -38,6 +38,7 @@ from app.services.user_db import (
 from app.api.dependencies import get_current_user
 from app.services.app_check_monitor import log_app_check_status
 from app.api.scheduler_auth import verify_scheduler_oidc
+from app.api.admin_auth import verify_admin_user
 
 router = APIRouter()
 
@@ -551,9 +552,7 @@ async def cancel_deletion(
 
 
 @router.get("/admin/feedback")
-async def admin_get_feedback(key: str = ""):
-    if key != "kriyora-admin-2026":
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+async def admin_get_feedback(_: dict = Depends(verify_admin_user)):
     rows = await get_all_feedback()
     return {"total": len(rows), "feedback": rows}
 
@@ -900,16 +899,17 @@ async def submit_feedback(
 
 
 @router.get("/admin/dashboard-data")
-async def admin_dashboard_data(key: str = ""):
-    if key != "kriyora-admin-2026":
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+async def admin_dashboard_data(_: dict = Depends(verify_admin_user)):
     return await get_dashboard_data()
 
 
 @router.get("/admin/dashboard", response_class=HTMLResponse)
-async def admin_dashboard(key: str = ""):
-    if key != "kriyora-admin-2026":
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+async def admin_dashboard():
+    """F-04: public HTML shell only — contains no user/feedback/deletion
+    data server-side. The browser signs in with Firebase, then fetches
+    /admin/dashboard-data with an Authorization: Bearer <ID token> header;
+    that endpoint (and /admin/feedback) remain protected by
+    Depends(verify_admin_user) and are unchanged by this route."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -939,100 +939,273 @@ async def admin_dashboard(key: str = ""):
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     .invite{font-family:monospace;font-size:12px;background:#2A1245;padding:2px 8px;border-radius:4px;color:#A78BFA}
     .time{color:#4A2D7A;font-size:12px;white-space:nowrap}
+    .login-box{max-width:340px;margin:80px auto;background:#1B0C2D;border:1px solid #3D1E6B;border-radius:12px;padding:32px}
+    .login-box h2{font-size:16px;color:#C084FC;margin-bottom:20px;text-align:center}
+    .login-box label{display:block;font-size:12px;color:#9B7DC4;margin-bottom:6px;margin-top:14px}
+    .login-box input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #3D1E6B;background:#2A1245;color:#E8E0F0;font-size:14px}
+    .login-box button{width:100%;margin-top:20px;padding:11px;border:0;border-radius:8px;background:#8B5CF6;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+    .login-box button:hover{background:#7C3AED}
+    .login-error{color:#F87171;font-size:12px;margin-top:12px;min-height:14px;text-align:center}
+    .denied-box{max-width:400px;margin:120px auto;text-align:center;color:#F87171;font-size:14px}
+    .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+    .signout-btn{background:#2A1245;border:1px solid #3D1E6B;color:#9B7DC4;font-size:12px;padding:6px 14px;border-radius:8px;cursor:pointer}
+    .signout-btn:hover{color:#C084FC;border-color:#8B5CF6}
   </style>
 </head>
 <body>
-  <h1>EpicVerse Admin</h1>
-  <div class="subtitle">Owner Dashboard &mdash; Kriyora</div>
 
-  <div class="stats">
-    <div class="stat"><div class="stat-val" id="total-users">—</div><div class="stat-label">Total Users</div></div>
-    <div class="stat"><div class="stat-val" id="total-feedback">—</div><div class="stat-label">Feedback</div></div>
-    <div class="stat"><div class="stat-val" id="total-deletions" style="color:#F87171">—</div><div class="stat-label">Pending Deletion</div></div>
+  <div id="login-view">
+    <div class="login-box">
+      <h2>EpicVerse Admin Sign-In</h2>
+      <form id="login-form">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" autocomplete="username" required/>
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" autocomplete="current-password" required/>
+        <button type="submit">Sign In</button>
+        <div class="login-error" id="login-error"></div>
+      </form>
+    </div>
   </div>
 
-  <div class="refresh"><span class="dot"></span>Auto-refreshes every 30 seconds &nbsp;|&nbsp; Last updated: <span id="last-updated">—</span></div>
-
-  <div class="section">
-    <div class="section-title">Users <span class="badge" id="users-badge">0</span></div>
-    <table>
-      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Invite Code</th><th>Joined</th></tr></thead>
-      <tbody id="users-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
-    </table>
+  <div id="denied-view" style="display:none">
+    <div class="denied-box">Access denied.</div>
   </div>
 
-  <div class="section">
-    <div class="section-title">Feedback <span class="badge" id="feedback-badge">0</span></div>
-    <table>
-      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Message</th><th>Date</th></tr></thead>
-      <tbody id="feedback-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
-    </table>
+  <div id="dashboard-view" style="display:none">
+    <div class="topbar">
+      <div>
+        <h1>EpicVerse Admin</h1>
+        <div class="subtitle">Owner Dashboard &mdash; Kriyora</div>
+      </div>
+      <button class="signout-btn" id="signout-btn">Sign out</button>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="stat-val" id="total-users">—</div><div class="stat-label">Total Users</div></div>
+      <div class="stat"><div class="stat-val" id="total-feedback">—</div><div class="stat-label">Feedback</div></div>
+      <div class="stat"><div class="stat-val" id="total-deletions" style="color:#F87171">—</div><div class="stat-label">Pending Deletion</div></div>
+    </div>
+
+    <div class="refresh"><span class="dot"></span>Auto-refreshes every 30 seconds &nbsp;|&nbsp; Last updated: <span id="last-updated">—</span></div>
+
+    <div class="section">
+      <div class="section-title">Users <span class="badge" id="users-badge">0</span></div>
+      <table>
+        <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Invite Code</th><th>Joined</th></tr></thead>
+        <tbody id="users-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Feedback <span class="badge" id="feedback-badge">0</span></div>
+      <table>
+        <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Message</th><th>Date</th></tr></thead>
+        <tbody id="feedback-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-title" style="color:#F87171">Pending Deletion <span class="badge" style="background:#4B1C1C;color:#F87171" id="deletions-badge">0</span></div>
+      <table>
+        <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Requested At</th><th>Purge Date</th></tr></thead>
+        <tbody id="deletions-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
-  <div class="section">
-    <div class="section-title" style="color:#F87171">Pending Deletion <span class="badge" style="background:#4B1C1C;color:#F87171" id="deletions-badge">0</span></div>
-    <table>
-      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Requested At</th><th>Purge Date</th></tr></thead>
-      <tbody id="deletions-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
-    </table>
-  </div>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+import {
+  getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 
-<script>
-const KEY = new URLSearchParams(location.search).get('key') || '';
-const fmt = s => s ? new Date(s).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+// Client-visible Firebase Web config (not a secret) — identifies the
+// project to Firebase, same class of value as the existing Android
+// google-services.json entries already committed in this repo.
+const firebaseConfig = {
+  apiKey: "AIzaSyAJTzVljY9FcQfSqT3dxPKTKnYv0N8BFu4",
+  authDomain: "perfect-age-491106-p3.firebaseapp.com",
+  projectId: "perfect-age-491106-p3",
+  storageBucket: "perfect-age-491106-p3.firebasestorage.app",
+  messagingSenderId: "721191424605",
+  appId: "1:721191424605:web:d8a3fd3072e4ccddf933b4",
+  measurementId: "G-ZP3HJ6818T"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
 
-async function load() {
-  try {
-    const r = await fetch(`/api/v1/admin/dashboard-data?key=${KEY}`);
-    if (!r.ok) { document.body.innerHTML = '<p style="color:#F87171;padding:40px">Access denied.</p>'; return; }
-    const d = await r.json();
+const loginView = document.getElementById('login-view');
+const deniedView = document.getElementById('denied-view');
+const dashboardView = document.getElementById('dashboard-view');
+const loginError = document.getElementById('login-error');
 
-    document.getElementById('total-users').textContent = d.total_users;
-    document.getElementById('total-feedback').textContent = d.total_feedback;
-    document.getElementById('total-deletions').textContent = d.total_deletions || 0;
-    document.getElementById('users-badge').textContent = d.total_users;
-    document.getElementById('feedback-badge').textContent = d.total_feedback;
-    document.getElementById('deletions-badge').textContent = d.total_deletions || 0;
-    document.getElementById('last-updated').textContent = fmt(new Date().toISOString());
-
-    // Users table
-    const ub = document.getElementById('users-body');
-    if (!d.users.length) { ub.innerHTML = '<tr><td colspan="5" class="empty">No users yet</td></tr>'; }
-    else ub.innerHTML = d.users.map((u,i) => `<tr>
-      <td class="time">${i+1}</td>
-      <td>${u.display_name || '—'}</td>
-      <td>${u.email || '—'}</td>
-      <td>${u.invite_code ? '<span class="invite">'+u.invite_code+'</span>' : '<span style="color:#4A2D7A">—</span>'}</td>
-      <td class="time">${fmt(u.created_at)}</td>
-    </tr>`).join('');
-
-    // Feedback table
-    const fb = document.getElementById('feedback-body');
-    if (!d.feedback.length) { fb.innerHTML = '<tr><td colspan="5" class="empty">No feedback yet</td></tr>'; }
-    else fb.innerHTML = d.feedback.map((f,i) => `<tr>
-      <td class="time">${i+1}</td>
-      <td>${f.display_name || '—'}</td>
-      <td>${f.email || '—'}</td>
-      <td class="msg">${f.message}</td>
-      <td class="time">${fmt(f.created_at)}</td>
-    </tr>`).join('');
-
-    // Deletions table
-    const purgeDate = s => { const d = new Date(s); d.setDate(d.getDate()+30); return fmt(d.toISOString()); };
-    const db = document.getElementById('deletions-body');
-    if (!d.deletions || !d.deletions.length) { db.innerHTML = '<tr><td colspan="5" class="empty">No pending deletions</td></tr>'; }
-    else db.innerHTML = d.deletions.map((u,i) => `<tr>
-      <td class="time">${i+1}</td>
-      <td style="color:#F87171">${u.display_name || '—'}</td>
-      <td style="color:#F87171">${u.email || '—'}</td>
-      <td class="time" style="color:#F87171">${fmt(u.deletion_requested_at)}</td>
-      <td class="time" style="color:#FCA5A5">${purgeDate(u.deletion_requested_at)}</td>
-    </tr>`).join('');
-  } catch(e) { console.error(e); }
+function show(view) {
+  loginView.style.display = view === 'login' ? 'block' : 'none';
+  deniedView.style.display = view === 'denied' ? 'block' : 'none';
+  dashboardView.style.display = view === 'dashboard' ? 'block' : 'none';
 }
 
-load();
-setInterval(load, 30000);
+let refreshTimer = null;
+function stopRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+}
+
+const fmt = s => s ? new Date(s).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+
+// F-08 (dashboard rendering portion): every database/API-controlled value
+// (display_name, email, invite_code, feedback message, dates derived from
+// them) is set via .textContent below, never innerHTML/template-string
+// interpolation — so a stored value can never be interpreted as HTML/JS
+// when an authenticated admin views this page. Only the two small,
+// structural CSS classes/colors applied here are ever attacker-influenced
+// in shape, never the text itself.
+function textCell(value, className, color) {
+  const cell = document.createElement('td');
+  if (className) cell.className = className;
+  if (color) cell.style.color = color;
+  cell.textContent = value;
+  return cell;
+}
+
+function inviteCodeCell(code) {
+  const cell = document.createElement('td');
+  const span = document.createElement('span');
+  if (code) {
+    span.className = 'invite';
+    span.textContent = code;
+  } else {
+    span.style.color = '#4A2D7A';
+    span.textContent = '—';
+  }
+  cell.appendChild(span);
+  return cell;
+}
+
+async function load() {
+  const user = auth.currentUser;
+  if (!user) { stopRefresh(); show('login'); return; }
+
+  let token;
+  try {
+    token = await user.getIdToken();
+  } catch (e) {
+    // Never log the raw auth error — it can carry token/session internals.
+    stopRefresh();
+    show('login');
+    return;
+  }
+
+  let r;
+  try {
+    r = await fetch('/api/v1/admin/dashboard-data', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+  } catch (e) {
+    // Transient network error — keep the current view, next tick retries.
+    return;
+  }
+
+  if (r.status === 401) { stopRefresh(); show('login'); return; }
+  if (r.status === 403) { stopRefresh(); show('denied'); return; }
+  if (!r.ok) { return; }
+
+  show('dashboard');
+  if (!refreshTimer) refreshTimer = setInterval(load, 30000);
+
+  let d;
+  try {
+    d = await r.json();
+  } catch (e) {
+    return;
+  }
+
+  document.getElementById('total-users').textContent = d.total_users;
+  document.getElementById('total-feedback').textContent = d.total_feedback;
+  document.getElementById('total-deletions').textContent = d.total_deletions || 0;
+  document.getElementById('users-badge').textContent = d.total_users;
+  document.getElementById('feedback-badge').textContent = d.total_feedback;
+  document.getElementById('deletions-badge').textContent = d.total_deletions || 0;
+  document.getElementById('last-updated').textContent = fmt(new Date().toISOString());
+
+  // Users table
+  const ub = document.getElementById('users-body');
+  if (!d.users.length) { ub.innerHTML = '<tr><td colspan="5" class="empty">No users yet</td></tr>'; }
+  else {
+    ub.innerHTML = '';
+    d.users.forEach((u, i) => {
+      const row = document.createElement('tr');
+      row.appendChild(textCell(String(i + 1), 'time'));
+      row.appendChild(textCell(u.display_name || '—'));
+      row.appendChild(textCell(u.email || '—'));
+      row.appendChild(inviteCodeCell(u.invite_code));
+      row.appendChild(textCell(fmt(u.created_at), 'time'));
+      ub.appendChild(row);
+    });
+  }
+
+  // Feedback table
+  const fb = document.getElementById('feedback-body');
+  if (!d.feedback.length) { fb.innerHTML = '<tr><td colspan="5" class="empty">No feedback yet</td></tr>'; }
+  else {
+    fb.innerHTML = '';
+    d.feedback.forEach((f, i) => {
+      const row = document.createElement('tr');
+      row.appendChild(textCell(String(i + 1), 'time'));
+      row.appendChild(textCell(f.display_name || '—'));
+      row.appendChild(textCell(f.email || '—'));
+      row.appendChild(textCell(f.message, 'msg'));
+      row.appendChild(textCell(fmt(f.created_at), 'time'));
+      fb.appendChild(row);
+    });
+  }
+
+  // Deletions table
+  const purgeDate = s => { const dd = new Date(s); dd.setDate(dd.getDate()+30); return fmt(dd.toISOString()); };
+  const db = document.getElementById('deletions-body');
+  if (!d.deletions || !d.deletions.length) { db.innerHTML = '<tr><td colspan="5" class="empty">No pending deletions</td></tr>'; }
+  else {
+    db.innerHTML = '';
+    d.deletions.forEach((u, i) => {
+      const row = document.createElement('tr');
+      row.appendChild(textCell(String(i + 1), 'time'));
+      row.appendChild(textCell(u.display_name || '—', null, '#F87171'));
+      row.appendChild(textCell(u.email || '—', null, '#F87171'));
+      row.appendChild(textCell(fmt(u.deletion_requested_at), 'time', '#F87171'));
+      row.appendChild(textCell(purgeDate(u.deletion_requested_at), 'time', '#FCA5A5'));
+      db.appendChild(row);
+    });
+  }
+}
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  loginError.textContent = '';
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+    // onAuthStateChanged below drives the rest.
+  } catch (e) {
+    // Generic message only — never log or display the raw Firebase
+    // auth error object (it can reveal account-enumeration/internal detail).
+    loginError.textContent = 'Sign-in failed. Check your email and password and try again.';
+  }
+});
+
+document.getElementById('signout-btn').addEventListener('click', async () => {
+  stopRefresh();
+  try {
+    await signOut(auth);
+  } catch (e) {
+    // Ignore — onAuthStateChanged still reflects the real session state.
+  }
+});
+
+onAuthStateChanged(auth, (user) => {
+  if (!user) { stopRefresh(); show('login'); return; }
+  load();
+});
 </script>
 </body>
 </html>"""

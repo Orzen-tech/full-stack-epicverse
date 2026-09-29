@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     SCHEDULER_SERVICE_ACCOUNT_EMAIL: str = ""
     SCHEDULER_SERVICE_ACCOUNT_ID: str = ""
 
+    # Admin dashboard/feedback authorization (F-04)
+    ADMIN_UIDS: str = ""      # comma-separated Firebase uids
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:
