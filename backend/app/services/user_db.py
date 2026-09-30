@@ -94,6 +94,53 @@ async def init_db():
             ON otp_send_rate_limits (window_start)
         ''')
 
+        # F-09 Phase 1: additive MFA schema only — no runtime caller yet.
+        # Self-contained challenge storage (see backend/app/services/user_db.py
+        # docs elsewhere): deliberately NOT stored in user_otps, since that
+        # table is shared/overwritten across OTP purposes by identifier alone.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS mfa_login_challenges (
+                challenge_id TEXT PRIMARY KEY,
+                uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                identifier TEXT NOT NULL,
+                purpose TEXT NOT NULL
+                    CHECK (purpose IN ('login_mfa', 'enable_mfa')),
+                otp_hash TEXT NOT NULL,
+                attempts INT NOT NULL DEFAULT 0
+                    CHECK (attempts >= 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                consumed_at TIMESTAMPTZ NULL
+            )
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_mfa_challenges_uid
+            ON mfa_login_challenges (uid)
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires
+            ON mfa_login_challenges (expires_at)
+        ''')
+
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS mfa_sessions (
+                session_hash TEXT PRIMARY KEY,
+                uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                auth_time TIMESTAMPTZ NULL,
+                revoked_at TIMESTAMPTZ NULL
+            )
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_mfa_sessions_uid
+            ON mfa_sessions (uid)
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_mfa_sessions_expires
+            ON mfa_sessions (expires_at)
+        ''')
+
 
 async def save_user(user: UserRecord):
     uid = user.get_uid()

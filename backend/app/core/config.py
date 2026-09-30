@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # it is. Supplied via Secret Manager -> Cloud Run secret-backed env var.
     OTP_RATE_LIMIT_HASH_SECRET: str = ""
 
+    # MFA login challenge OTP hashing (F-09, Phase 1: field only, unused).
+    # Will HMAC-hash MFA challenge OTPs once the Phase 2 MFA endpoints exist.
+    # Not read by any code yet, so empty is safe during Phase 1.
+    MFA_OTP_HASH_SECRET: str = ""
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:
