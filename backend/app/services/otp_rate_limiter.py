@@ -25,6 +25,7 @@ Design:
     generic string.
 """
 import asyncio
+import errno as errno_module
 import hashlib
 import ipaddress
 import socket
@@ -73,6 +74,32 @@ def _classify_redis_error(e: Exception) -> str:
     return f"unclassified:{type(e).__name__}"
 
 
+def _classify_connection_cause(e: Exception) -> str:
+    """Refines a `connection_error` category by inspecting the TYPE (and,
+    for OSError, the numeric .errno only — never any message/string) of
+    the underlying cause chained onto the caught exception via Python's
+    automatic exception chaining (__cause__/__context__). Makes NO new
+    network call or DNS lookup — it only inspects an exception object
+    that has already been raised by the Redis operation that already
+    failed. Falls back to connection_other if no usable cause exists."""
+    cause = e.__cause__ or e.__context__
+    if cause is None:
+        return "connection_other"
+
+    if isinstance(cause, socket.gaierror):
+        return "dns_resolution_error"
+    if isinstance(cause, ConnectionRefusedError):
+        return "connection_refused"
+    if isinstance(cause, ConnectionResetError):
+        return "connection_reset"
+    if isinstance(cause, OSError):
+        if cause.errno in (errno_module.ENETUNREACH, errno_module.EHOSTUNREACH):
+            return "network_unreachable"
+        return "connection_other"
+
+    return "connection_other"
+
+
 def _classify_destination(redis_url: str) -> str:
     """Classifies ONLY the general category of the configured Redis
     destination (localhost / private_ip / public_ip / hostname /
@@ -105,6 +132,22 @@ def _classify_destination(redis_url: str) -> str:
     if ip.is_private:
         return "private_ip"
     return "public_ip"
+
+
+def _format_redis_failure(stage: str, e: Exception) -> str:
+    """Builds the single fixed-shape diagnostic log line used by every
+    Redis failure path below. Only ever includes fixed category labels
+    (never a message/string derived from the exception or from
+    settings.REDIS_URL)."""
+    category = _classify_redis_error(e)
+    cause_part = ""
+    if category == "connection_error":
+        cause_part = f", cause={_classify_connection_cause(e)}"
+    destination = _classify_destination(settings.REDIS_URL)
+    return (
+        f"[OTP-RATE-LIMIT] Redis unavailable (stage={stage}, category={category}"
+        f"{cause_part}, destination={destination}), allowing request"
+    )
 
 # Deliberately a separate client/connection from app.services.retriever's
 # redis_client: that module permanently disables itself
@@ -144,21 +187,13 @@ async def _get_redis() -> "Redis | None":
             health_check_interval=30,
         )
     except Exception as e:
-        print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=from_url, category={_classify_redis_error(e)}, "
-            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
-            flush=True,
-        )
+        print(_format_redis_failure("from_url", e), flush=True)
         return None
 
     try:
         await client.ping()
     except Exception as e:
-        print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=ping, category={_classify_redis_error(e)}, "
-            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
-            flush=True,
-        )
+        print(_format_redis_failure("ping", e), flush=True)
         return None
 
     _otp_redis_client = client
@@ -216,9 +251,5 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
 
         return True, 0
     except Exception as e:
-        print(
-            f"[OTP-RATE-LIMIT] Redis unavailable (stage=command, category={_classify_redis_error(e)}, "
-            f"destination={_classify_destination(settings.REDIS_URL)}), allowing request",
-            flush=True,
-        )
+        print(_format_redis_failure("command", e), flush=True)
         return True, 0
