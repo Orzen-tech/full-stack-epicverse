@@ -77,6 +77,22 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # F-07: OTP send-rate-limit counters (PostgreSQL replacement for
+        # the previous Redis-backed limiter). key_hash is an HMAC-SHA256
+        # hash of the identifier or client IP — never the raw value.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS otp_send_rate_limits (
+                key_hash TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                window_start TIMESTAMPTZ NOT NULL,
+                request_count INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (key_hash, scope, window_start)
+            )
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_otp_send_rate_limits_window_start
+            ON otp_send_rate_limits (window_start)
+        ''')
 
 
 async def save_user(user: UserRecord):

@@ -1,207 +1,76 @@
-"""Distributed, Redis-backed OTP send rate limiting (security finding F-07).
+"""Distributed, PostgreSQL-backed OTP send rate limiting (security finding F-07).
 
-Replaces the previous in-memory `_otp_rate`/`_otp_allowed` limiter, which
-was per-process and therefore reset on every Cloud Run instance restart
-and was not shared across concurrent instances. Reuses the existing
-`settings.REDIS_URL` — no new Redis service, no new credentials.
+Originally implemented against Redis; Redis existed in this project before
+F-07 (semantic cache / session memory — see retriever.py, memory_store.py)
+but the specific Redis Cloud instance this module was pointed at is no
+longer reachable and its provenance could not be recovered. This module
+now uses the project's EXISTING PostgreSQL connection pool instead — no
+new database, no new pool, no new Redis service.
 
 Design:
-  - Two independent fixed-window counters per send request: one keyed by a
-    hash of the (lowercased) identifier, one keyed by a hash of the
-    (X-Forwarded-For-derived) client IP. Neither the raw identifier nor the
-    raw IP is ever stored in a Redis key.
-  - Each counter is incremented and given its TTL in a single atomic Redis
-    Lua script (INCR, then EXPIRE only on the request that created the
-    key) — this closes the classic "INCR then separate EXPIRE" race, where
-    a crash/interruption between the two calls could leave a key with no
-    TTL at all, locking that identifier/IP out permanently instead of for
-    the intended 10-minute window.
+  - Two independent fixed-window (deterministic UTC 10-minute bucket)
+    counters per send request: one keyed by an HMAC-SHA256 hash of the
+    (lowercased) identifier, one keyed by an HMAC-SHA256 hash of the
+    (X-Forwarded-For-derived) client IP. Neither the raw identifier nor
+    the raw IP is ever stored, and plain SHA-256 is deliberately NOT used
+    (it would be reversible via a dictionary attack against a known email
+    corpus) — HMAC with a server-side secret is required.
+  - Each counter is incremented atomically via a single
+    `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING` statement per
+    scope — Postgres's own atomic upsert primitive. No read-then-write,
+    no process-local counters, no advisory lock or SELECT FOR UPDATE
+    needed (the upsert's own row-level locking is sufficient).
   - No OTP value is ever read, written, or referenced by this module —
     it only ever touches integer counters.
-  - Fail-open: if Redis is unreachable for any reason, the send is
-    allowed and a single generic warning is logged. This module never
-    logs the identifier, the client IP, an OTP, a Firebase token, the
-    Redis URL, or any other credential — every log line here is a fixed,
-    generic string.
+  - Fail-open on a Postgres *operational* failure (query error, pool
+    issue): the send-side limiter is a secondary control — OTP
+    verification's independent, unaffected 5-wrong-attempt Postgres
+    lockout remains the primary brute-force defense either way.
+  - Fail-CLOSED (send rejected) if OTP_RATE_LIMIT_HASH_SECRET is missing
+    or empty: a forgotten secret must never silently disable hashing or
+    silently disable the limiter — see check_otp_send_allowed().
+  - Never logs the identifier, the client IP, a hash, an OTP, a Firebase
+    token, DATABASE_URL, or any other credential — every log line here is
+    a fixed, generic string.
 """
-import asyncio
-import errno as errno_module
 import hashlib
-import ipaddress
-import socket
-import ssl
-from urllib.parse import urlparse
+import hmac
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
 
 from app.core.config import settings
-
-try:
-    from redis.asyncio import Redis
-except Exception:  # pragma: no cover - redis package already a dependency elsewhere
-    Redis = None  # type: ignore
-
-try:
-    from redis import exceptions as redis_exceptions
-except Exception:  # pragma: no cover
-    redis_exceptions = None  # type: ignore
-
-
-def _classify_redis_error(e: Exception) -> str:
-    """Coarse, safe failure category derived only from the exception's
-    TYPE — never from its message, which can contain connection details
-    (host, port, and in some redis-py versions, credential fragments).
-    Diagnostic only; does not change fail-open behavior."""
-    if redis_exceptions is not None:
-        if isinstance(e, redis_exceptions.AuthenticationError):
-            return "authentication_error"
-        if isinstance(e, redis_exceptions.TimeoutError):
-            return "timeout"
-        if isinstance(e, redis_exceptions.ConnectionError):
-            return "connection_error"
-        if isinstance(e, redis_exceptions.ResponseError):
-            return "response_error"
-        if isinstance(e, redis_exceptions.RedisError):
-            return "other_redis_error"
-    if isinstance(e, asyncio.TimeoutError):
-        return "timeout"
-    if isinstance(e, ssl.SSLError):
-        return "tls_error"
-    if isinstance(e, socket.gaierror):
-        return "dns_error"
-    if isinstance(e, OSError):
-        return "connection_error"
-    return f"unclassified:{type(e).__name__}"
-
-
-def _classify_connection_cause(e: Exception) -> str:
-    """Refines a `connection_error` category by inspecting the TYPE (and,
-    for OSError, the numeric .errno only — never any message/string) of
-    the underlying cause chained onto the caught exception via Python's
-    automatic exception chaining (__cause__/__context__). Makes NO new
-    network call or DNS lookup — it only inspects an exception object
-    that has already been raised by the Redis operation that already
-    failed. Falls back to connection_other if no usable cause exists."""
-    cause = e.__cause__ or e.__context__
-    if cause is None:
-        return "connection_other"
-
-    if isinstance(cause, socket.gaierror):
-        return "dns_resolution_error"
-    if isinstance(cause, ConnectionRefusedError):
-        return "connection_refused"
-    if isinstance(cause, ConnectionResetError):
-        return "connection_reset"
-    if isinstance(cause, OSError):
-        if cause.errno in (errno_module.ENETUNREACH, errno_module.EHOSTUNREACH):
-            return "network_unreachable"
-        return "connection_other"
-
-    return "connection_other"
-
-
-def _classify_destination(redis_url: str) -> str:
-    """Classifies ONLY the general category of the configured Redis
-    destination (localhost / private_ip / public_ip / hostname /
-    unix_socket / unknown) — never logs the hostname, IP, port,
-    credentials, or any other part of the URL. Parsing/classification
-    only; the raw value never reaches a log line."""
-    try:
-        parsed = urlparse(redis_url)
-    except Exception:
-        return "unknown"
-
-    if parsed.scheme == "unix":
-        return "unix_socket"
-
-    host = parsed.hostname
-    if not host:
-        return "unknown"
-
-    if host == "localhost":
-        return "localhost"
-
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # Not a literal IP address -> it's a DNS hostname.
-        return "hostname"
-
-    if ip.is_loopback:
-        return "localhost"
-    if ip.is_private:
-        return "private_ip"
-    return "public_ip"
-
-
-def _format_redis_failure(stage: str, e: Exception) -> str:
-    """Builds the single fixed-shape diagnostic log line used by every
-    Redis failure path below. Only ever includes fixed category labels
-    (never a message/string derived from the exception or from
-    settings.REDIS_URL)."""
-    category = _classify_redis_error(e)
-    cause_part = ""
-    if category == "connection_error":
-        cause_part = f", cause={_classify_connection_cause(e)}"
-    destination = _classify_destination(settings.REDIS_URL)
-    return (
-        f"[OTP-RATE-LIMIT] Redis unavailable (stage={stage}, category={category}"
-        f"{cause_part}, destination={destination}), allowing request"
-    )
-
-# Deliberately a separate client/connection from app.services.retriever's
-# redis_client: that module permanently disables itself
-# (_REDIS_ENABLED = False) after a single connection failure, which is the
-# right trade-off for a non-critical semantic cache but the wrong one for a
-# security control — this limiter should keep retrying on every call
-# rather than staying disabled for the rest of the process's lifetime.
-_otp_redis_client: "Redis | None" = None
+from app.services.db_pool import get_pool
 
 IDENTIFIER_LIMIT = 3
-IDENTIFIER_WINDOW_SECONDS = 600  # 10 minutes
 IP_LIMIT = 20
-IP_WINDOW_SECONDS = 600  # 10 minutes
+WINDOW_MINUTES = 10
 
-_INCR_WITH_TTL_SCRIPT = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"""
+# Deterministic lazy cleanup: at most once every CLEANUP_INTERVAL per
+# process/instance (not per request). Any instance attempting it is fine —
+# the DELETE is idempotent and harmless if another instance already ran it
+# in the same interval. No Cloud Scheduler, no new background service.
+# 15 minutes is chosen to be comfortably longer than the 10-minute window
+# (so a cleanup sweep always has at least one fully-expired window behind
+# it to remove) while still keeping the table's steady-state size small;
+# it does not need to be tight, since rows only ever matter for the
+# single most-recent window per key.
+CLEANUP_INTERVAL = timedelta(minutes=15)
+CLEANUP_RETENTION = timedelta(minutes=20)
 
-
-async def _get_redis() -> "Redis | None":
-    global _otp_redis_client
-    if Redis is None or not settings.REDIS_URL:
-        return None
-    if _otp_redis_client is not None:
-        return _otp_redis_client
-    try:
-        client = Redis.from_url(
-            settings.REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            socket_timeout=2.0,
-            socket_connect_timeout=2.0,
-            health_check_interval=30,
-        )
-    except Exception as e:
-        print(_format_redis_failure("from_url", e), flush=True)
-        return None
-
-    try:
-        await client.ping()
-    except Exception as e:
-        print(_format_redis_failure("ping", e), flush=True)
-        return None
-
-    _otp_redis_client = client
-    return _otp_redis_client
+_last_cleanup_attempt: datetime | None = None
 
 
-def _hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _window_start(now: datetime) -> datetime:
+    """Floors `now` (must be UTC) to the nearest deterministic
+    WINDOW_MINUTES boundary, e.g. 10:00, 10:10, 10:20, ... — a fixed
+    window, not a sliding one, matching the previously approved design."""
+    floored_minute = (now.minute // WINDOW_MINUTES) * WINDOW_MINUTES
+    return now.replace(minute=floored_minute, second=0, microsecond=0)
+
+
+def _hmac_hash(secret: str, value: str) -> str:
+    return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def client_ip(request: Request) -> str:
@@ -223,33 +92,78 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-async def _incr_with_ttl(redis, key: str, window_seconds: int) -> int:
-    return await redis.eval(_INCR_WITH_TTL_SCRIPT, 1, key, window_seconds)
+async def _incr_scope(conn, key_hash: str, scope: str, window_start: datetime) -> int:
+    """Atomic upsert-and-increment for one (key_hash, scope, window_start).
+    A single statement — Postgres's own atomic UPSERT primitive; no
+    separate SELECT/UPDATE, no advisory lock needed."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO otp_send_rate_limits (key_hash, scope, window_start, request_count)
+        VALUES ($1, $2, $3, 1)
+        ON CONFLICT (key_hash, scope, window_start)
+        DO UPDATE SET request_count = otp_send_rate_limits.request_count + 1
+        RETURNING request_count
+        """,
+        key_hash, scope, window_start,
+    )
+    return row["request_count"]
+
+
+async def _maybe_cleanup(conn) -> None:
+    """Deterministic, process-local-timestamp-gated lazy cleanup. Runs at
+    most once every CLEANUP_INTERVAL per instance; harmless if multiple
+    instances happen to run it around the same time (the DELETE is
+    idempotent). Never raises — cleanup failure must never affect the
+    actual rate-limit check."""
+    global _last_cleanup_attempt
+    now = datetime.now(timezone.utc)
+    if _last_cleanup_attempt is not None and (now - _last_cleanup_attempt) < CLEANUP_INTERVAL:
+        return
+    _last_cleanup_attempt = now
+    try:
+        await conn.execute(
+            "DELETE FROM otp_send_rate_limits WHERE window_start < $1",
+            now - CLEANUP_RETENTION,
+        )
+    except Exception:
+        print("[OTP-RATE-LIMIT] Cleanup sweep failed (non-fatal)", flush=True)
 
 
 async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[bool, int]:
-    """Returns (allowed, retry_after_seconds), matching the previous
-    in-memory limiter's return shape. Fails open (allowed=True) if Redis
-    is unavailable.
+    """Returns (allowed, retry_after_seconds).
+
+    Fail-CLOSED (allowed=False) if OTP_RATE_LIMIT_HASH_SECRET is missing —
+    a forgotten secret must never silently disable hashing or silently
+    disable the limiter.
+
+    Fail-OPEN (allowed=True) if the Postgres operation itself fails — a
+    secondary control; OTP verification's independent 5-wrong-attempt
+    Postgres lockout is unaffected either way.
     """
-    redis = await _get_redis()
-    if redis is None:
-        return True, 0
+    secret = settings.OTP_RATE_LIMIT_HASH_SECRET
+    if not secret:
+        print("[OTP-RATE-LIMIT] Rejected: hash secret not configured", flush=True)
+        return False, 0
+
+    now = datetime.now(timezone.utc)
+    window_start = _window_start(now)
+    retry_after = max(int((window_start + timedelta(minutes=WINDOW_MINUTES) - now).total_seconds()), 0)
 
     try:
-        id_key = f"otp:send:id:{_hash(identifier.lower())}"
-        id_count = await _incr_with_ttl(redis, id_key, IDENTIFIER_WINDOW_SECONDS)
-        if id_count > IDENTIFIER_LIMIT:
-            ttl = await redis.ttl(id_key)
-            return False, max(int(ttl), 0)
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            id_hash = _hmac_hash(secret, identifier.lower())
+            id_count = await _incr_scope(conn, id_hash, "identifier", window_start)
+            if id_count > IDENTIFIER_LIMIT:
+                return False, retry_after
 
-        ip_key = f"otp:send:ip:{_hash(client_ip(request))}"
-        ip_count = await _incr_with_ttl(redis, ip_key, IP_WINDOW_SECONDS)
-        if ip_count > IP_LIMIT:
-            ttl = await redis.ttl(ip_key)
-            return False, max(int(ttl), 0)
+            ip_hash = _hmac_hash(secret, client_ip(request))
+            ip_count = await _incr_scope(conn, ip_hash, "ip", window_start)
+            if ip_count > IP_LIMIT:
+                return False, retry_after
 
-        return True, 0
-    except Exception as e:
-        print(_format_redis_failure("command", e), flush=True)
+            await _maybe_cleanup(conn)
+            return True, 0
+    except Exception:
+        print("[OTP-RATE-LIMIT] Postgres unavailable, allowing request", flush=True)
         return True, 0

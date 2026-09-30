@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # Admin dashboard/feedback authorization (F-04)
     ADMIN_UIDS: str = ""      # comma-separated Firebase uids
 
+    # OTP send rate limiter (F-07): HMAC key for hashing the identifier/IP
+    # before they're stored in otp_send_rate_limits. Must never be empty in
+    # production — see check_otp_send_allowed()'s fail-closed behavior if
+    # it is. Supplied via Secret Manager -> Cloud Run secret-backed env var.
+    OTP_RATE_LIMIT_HASH_SECRET: str = ""
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:
