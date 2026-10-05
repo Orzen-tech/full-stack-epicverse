@@ -36,7 +36,7 @@ from app.services.user_db import (
     UserRecord, get_user, save_otp, verify_otp,
     validate_invite_code, sync_user_with_invite_check,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
-    save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified,
+    save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified_for_uid,
     verify_session, update_session_id, update_mfa,
 )
 from app.api.dependencies import get_current_user
@@ -188,11 +188,28 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     if result != 'success':
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # Mark email as verified in the users table
+    # Mark only the live Firebase account's own profile as verified.
     if "@" in identifier:
-        await mark_email_verified(identifier)
+        await _mark_verified_for_firebase_email(identifier)
 
     return {"status": "success", "message": "OTP verified"}
+
+
+async def _mark_verified_for_firebase_email(email: str) -> None:
+    """Resolves the Firebase account for an OTP-verified email server-side
+    and marks only that UID's profile. No account yet (new signup) is not
+    an error; a failed lookup is logged without the email and never fails
+    the already-successful OTP verification."""
+    try:
+        from firebase_admin import auth as fb_auth
+        try:
+            fb_user = fb_auth.get_user_by_email(email)
+        except fb_auth.UserNotFoundError:
+            return
+    except Exception as e:
+        print(f"[AUTH] verify-otp Firebase lookup failed: {type(e).__name__}", flush=True)
+        return
+    await mark_email_verified_for_uid(fb_user.uid, email)
 
 
 @router.post("/auth/send-password-reset")
@@ -268,10 +285,11 @@ async def send_email_otp_preregistration(
 async def mark_email_verified_route(current_user: dict = Depends(get_current_user)):
     """Sets email_verified=TRUE for the authenticated user. Called after pre-registration
     email OTP is confirmed and Firebase account + sync-user have completed."""
+    uid = current_user.get("uid")
     email = current_user.get("email")
-    if not email:
+    if not uid or not email:
         raise HTTPException(status_code=400, detail="No email on token")
-    await mark_email_verified(email)
+    await mark_email_verified_for_uid(uid, email)
     return {"status": "ok"}
 
 

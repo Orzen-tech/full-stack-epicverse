@@ -570,19 +570,23 @@ async def validate_invite_code(code: str) -> bool:
         return False
 
 
-async def mark_email_verified(email: str) -> bool:
+async def mark_email_verified_for_uid(uid: str, email: str) -> int:
+    """Marks only the profile of this exact Firebase UID as verified, and
+    only if its stored email matches the verified email. Other rows sharing
+    the email (e.g. orphaned profiles) are never touched. Returns rows updated."""
+    if not uid or not email:
+        return 0
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET email_verified = TRUE WHERE LOWER(email) = LOWER($1)",
-                email,
+            status = await conn.execute(
+                "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = LOWER($2)",
+                uid, email,
             )
-            print(f"[DB] Email verified for {email}", flush=True)
-            return True
+            return int(status.split()[-1])
     except Exception as e:
-        print(f"[DB] mark_email_verified error: {e}")
-        return False
+        print(f"[DB] mark_email_verified_for_uid error: {type(e).__name__}", flush=True)
+        return 0
 
 
 # F-06: mark_invite_code_used() was removed. It unconditionally deleted an
