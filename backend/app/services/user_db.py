@@ -157,27 +157,13 @@ async def init_db():
         ''')
 
 
-async def save_user(user: UserRecord):
-    uid = user.get_uid()
-    if not uid:
-        raise ValueError("UserRecord must have firebase_id or uid")
+async def get_security_state(uid: str) -> dict | None:
+    """Only the server-side security flags for this UID (no profile data).
+    Errors propagate so callers fail closed."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO users (uid, display_name, email, primary_language, profile_picture, invite_code, mfa_enabled)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (uid)
-            DO UPDATE SET
-                display_name = COALESCE(EXCLUDED.display_name, users.display_name),
-                email = COALESCE(EXCLUDED.email, users.email),
-                primary_language = COALESCE(EXCLUDED.primary_language, users.primary_language),
-                profile_picture = COALESCE(EXCLUDED.profile_picture, users.profile_picture),
-                invite_code = COALESCE(users.invite_code, EXCLUDED.invite_code),
-                mfa_enabled = COALESCE(EXCLUDED.mfa_enabled, users.mfa_enabled)
-        ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture,
-             user.invite_code.upper() if user.invite_code else None,
-             user.mfa_enabled if user.mfa_enabled is not None else False)
-    return True
+        row = await conn.fetchrow("SELECT mfa_enabled, email_verified FROM users WHERE uid = $1", uid)
+    return dict(row) if row else None
 
 
 class _InviteConsumptionRace(Exception):

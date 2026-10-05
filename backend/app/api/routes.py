@@ -47,7 +47,9 @@ from app.services.mfa_challenge import (
     verify_login_challenge, confirm_enable_mfa, validate_mfa_session, revoke_mfa_session,
     disable_mfa_and_revoke_state,
 )
-from app.api.dependencies import get_current_user
+from app.api.dependencies import (
+    get_current_user, require_mfa_if_enabled, require_verified_mfa_user, mfa_security_error,
+)
 from app.services.app_check_monitor import log_app_check_status
 from app.api.scheduler_auth import verify_scheduler_oidc
 from app.api.admin_auth import verify_admin_user
@@ -66,7 +68,7 @@ async def validate_invite(code: str):
 
 
 @router.post("/sync-user")
-async def sync_user(user: UserRecord, current_user: dict = Depends(get_current_user)):
+async def sync_user(user: UserRecord, current_user: dict = Depends(require_mfa_if_enabled)):
     """The sole path that may create a new SQL `users` row (F-06).
 
     Existing SQL user: normal profile sync, no invite code required or
@@ -308,7 +310,7 @@ async def mark_email_verified_route(current_user: dict = Depends(get_current_use
 
 
 @router.post("/auth/update-session")
-async def update_session(session_id: str = Form(...), current_user: dict = Depends(get_current_user)):
+async def update_session(session_id: str = Form(...), current_user: dict = Depends(require_mfa_if_enabled)):
     """Called on every login. Writes this device's session_id to DB.
     Any other device holding a different session_id will be force-logged out."""
     uid = current_user.get("uid")
@@ -319,7 +321,7 @@ async def update_session(session_id: str = Form(...), current_user: dict = Depen
 
 
 @router.get("/auth/check-session")
-async def check_session(session_id: str, current_user: dict = Depends(get_current_user)):
+async def check_session(session_id: str, current_user: dict = Depends(require_mfa_if_enabled)):
     """Returns whether the given session_id is still the active session for this user.
     If another device has logged in since, the stored session_id will differ."""
     uid = current_user.get("uid")
@@ -589,6 +591,16 @@ async def websocket_realtime(
         await websocket.close(code=1008)
         return
 
+    # F-09 Phase 3: verified email and, when MFA is on, a valid MFA session —
+    # read only from the handshake header, never from the query string.
+    security_code = await mfa_security_error(
+        decoded, websocket.headers.get("x-mfa-session"), require_verified=True)
+    if security_code:
+        print(f"[WS] Rejected: {security_code}", flush=True)
+        await websocket.send_text(json.dumps({"type": "error", "code": security_code, "message": "Unauthorized"}))
+        await websocket.close(code=1008)
+        return
+
     print(f"[WS] Realtime connection uid={uid} mode={mode} session={session_id}", flush=True)
     session = RealtimeSession(
         client_ws=websocket,
@@ -612,7 +624,7 @@ async def websocket_realtime(
 async def process_voice_audio(
     audio_file: UploadFile = File(...),
     game_mode: str | None = Form(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_verified_mfa_user)
 ):
     """
     Main pipeline entry for the Multilingual AI Voice Agent:
@@ -675,7 +687,7 @@ async def process_voice_audio(
 @router.delete("/user/{firebase_id}")
 async def delete_user(
     firebase_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_mfa_if_enabled),
 ):
     """Soft-deletes a user account with a 30-day grace period.
 
@@ -1060,7 +1072,7 @@ class FeedbackRequest(BaseModel):
 @router.post("/feedback")
 async def submit_feedback(
     body: FeedbackRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_verified_mfa_user),
 ):
     from app.services.email_service import send_feedback_notification
     uid = current_user.get("uid")
