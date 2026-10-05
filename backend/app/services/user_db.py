@@ -1,4 +1,8 @@
+import hashlib
+import hmac
+
 from pydantic import BaseModel
+from app.core.config import settings
 from app.services.db_pool import get_pool
 
 
@@ -140,6 +144,17 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_mfa_sessions_expires
             ON mfa_sessions (expires_at)
         ''')
+        # F-09: single-use proof that an email passed OTP verification
+        # before its profile existed (signup). Keyed by an HMAC of the
+        # normalised email; never the plaintext address.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS email_verification_proofs (
+                email_hash TEXT PRIMARY KEY,
+                verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                consumed_at TIMESTAMPTZ NULL
+            )
+        ''')
 
 
 async def save_user(user: UserRecord):
@@ -227,23 +242,16 @@ async def _sync_user_txn(conn, uid: str, user: UserRecord, verified_email: str |
     existing = await conn.fetchrow("SELECT uid FROM users WHERE uid = $1", uid)
 
     if existing:
-        # mfa_enabled preserves the exact (pre-existing) save_user()
-        # semantics: a request that omits it resets it to False rather
-        # than leaving it unchanged — the None -> False substitution
-        # happens in Python before the query runs, so this COALESCE never
-        # actually sees a NULL to fall back on. Not touched/fixed here —
-        # unrelated to F-06.
+        # F-09: email and mfa_enabled are server-controlled. Profile sync
+        # may only change display fields; MFA codes are sent to the stored
+        # email, so letting a client rewrite it would bypass MFA.
         await conn.execute('''
             UPDATE users SET
                 display_name = COALESCE($2, display_name),
-                email = COALESCE($3, email),
-                primary_language = COALESCE($4, primary_language),
-                profile_picture = COALESCE($5, profile_picture),
-                mfa_enabled = COALESCE($6, mfa_enabled)
+                primary_language = COALESCE($3, primary_language),
+                profile_picture = COALESCE($4, profile_picture)
             WHERE uid = $1
-        ''', uid, user.display_name, user.email, user.primary_language,
-             user.profile_picture,
-             user.mfa_enabled if user.mfa_enabled is not None else False)
+        ''', uid, user.display_name, user.primary_language, user.profile_picture)
         return {"status": "existing"}
 
     new_email = user.email
@@ -275,7 +283,7 @@ async def _sync_user_txn(conn, uid: str, user: UserRecord, verified_email: str |
         INSERT INTO users (uid, display_name, email, primary_language, profile_picture, invite_code, mfa_enabled)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
     ''', uid, user.display_name, new_email, user.primary_language, user.profile_picture,
-         code, user.mfa_enabled if user.mfa_enabled is not None else False)
+         code, False)
 
     # Defense-in-depth: the SELECT ... FOR UPDATE above is the primary
     # concurrency control and should make this condition unreachable in
@@ -589,6 +597,74 @@ async def mark_email_verified_for_uid(uid: str, email: str) -> int:
         return 0
 
 
+EMAIL_PROOF_TTL_MINUTES = 30
+
+
+def _email_proof_key(email: str) -> str | None:
+    secret = settings.MFA_OTP_HASH_SECRET
+    if not secret or not email:
+        return None
+    return hmac.new(secret.encode("utf-8"), f"email-proof:{email.strip().lower()}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+async def record_email_verification_proof(email: str) -> bool:
+    """Records (or refreshes) a single-use, 30-minute proof that this email
+    just passed OTP verification. Used only when no profile could be marked
+    yet (signup before the Firebase account / profile exists)."""
+    key = _email_proof_key(email)
+    if key is None:
+        print("[DB] email proof not recorded: hash secret not configured", flush=True)
+        return False
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO email_verification_proofs (email_hash, verified_at, expires_at, consumed_at)
+                VALUES ($1, NOW(), NOW() + make_interval(mins => $2), NULL)
+                ON CONFLICT (email_hash) DO UPDATE SET
+                    verified_at = EXCLUDED.verified_at,
+                    expires_at = EXCLUDED.expires_at,
+                    consumed_at = NULL
+            ''', key, EMAIL_PROOF_TTL_MINUTES)
+            return True
+    except Exception as e:
+        print(f"[DB] record_email_verification_proof error: {type(e).__name__}", flush=True)
+        return False
+
+
+async def mark_email_verified_with_proof(uid: str, email: str) -> int:
+    """Marks this exact UID verified only if an unexpired, unconsumed proof
+    exists for the email and the profile's stored email matches. The proof
+    is consumed in the same transaction. Returns rows marked (0 or 1)."""
+    key = _email_proof_key(email)
+    if key is None or not uid:
+        return 0
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                proof = await conn.fetchrow('''
+                    SELECT 1 FROM email_verification_proofs
+                    WHERE email_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
+                    FOR UPDATE
+                ''', key)
+                if proof is None:
+                    return 0
+                status = await conn.execute(
+                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = LOWER($2)",
+                    uid, email,
+                )
+                if int(status.split()[-1]) != 1:
+                    return 0
+                await conn.execute(
+                    "UPDATE email_verification_proofs SET consumed_at = NOW() WHERE email_hash = $1", key)
+                return 1
+    except Exception as e:
+        print(f"[DB] mark_email_verified_with_proof error: {type(e).__name__}", flush=True)
+        return 0
+
+
 # F-06: mark_invite_code_used() was removed. It unconditionally deleted an
 # invite row on any use (ignoring max_uses — it never incremented
 # current_uses anywhere), which both broke multi-use codes and, combined
@@ -614,16 +690,4 @@ async def delete_user_from_db(uid: str) -> bool:
         return False
 
 
-async def update_mfa(uid: str, enabled: bool) -> bool:
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET mfa_enabled = $1 WHERE uid = $2",
-                enabled, uid
-            )
-            return True
-    except Exception as e:
-        print(f"[DB] update_mfa error: {e}")
-        return False
 

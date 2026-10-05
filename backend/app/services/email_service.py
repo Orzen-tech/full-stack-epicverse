@@ -48,7 +48,7 @@ async def send_feedback_notification(display_name: str, user_email: str, message
         return False
 
 
-async def send_otp_email(email: str, otp: str) -> bool:
+async def send_otp_email(email: str, otp: str, valid_minutes: int = 1) -> bool:
     """Sends a 6-digit OTP to the user's email using SendGrid API."""
     if not settings.SENDGRID_API_KEY:
         logger.error("[EMAIL] CRITICAL: SendGrid API_KEY is missing.")
@@ -72,7 +72,7 @@ async def send_otp_email(email: str, otp: str) -> bool:
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
                     <h2 style="color: #D4AF37; text-align: center;">Welcome to EpicVerse</h2>
                     <p>Hello,</p>
-                    <p>Use the following 6-digit code to verify your account. This code is valid for 1 minute.</p>
+                    <p>Use the following 6-digit code to verify your account. This code is valid for {valid_minutes} minute{"s" if valid_minutes != 1 else ""}.</p>
                     <div style="background: #fdf6e4; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #333; border-radius: 5px; border: 1px dashed #D4AF37;">
                         {otp}
                     </div>
@@ -88,12 +88,12 @@ async def send_otp_email(email: str, otp: str) -> bool:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code >= 400:
-                print(f"[SENDGRID-ERROR] Status {response.status_code}: {response.text}")
+                print(f"[SENDGRID-ERROR] OTP email failed with status {response.status_code}")
                 return False
-            print(f"[SENDGRID-SUCCESS] OTP sent to {email}")
+            print("[SENDGRID-SUCCESS] OTP email sent successfully")
             return True
     except Exception as e:
-        print(f"[SENDGRID-FATAL] Error sending to {email}: {e}")
+        print(f"[SENDGRID-FATAL] OTP email send error: {type(e).__name__}")
         return False
 
 

@@ -37,7 +37,15 @@ from app.services.user_db import (
     validate_invite_code, sync_user_with_invite_check,
     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified_for_uid,
-    verify_session, update_session_id, update_mfa,
+    verify_session, update_session_id,
+    record_email_verification_proof, mark_email_verified_with_proof,
+)
+from app.services.mfa_challenge import (
+    MfaConfigError, PURPOSE_LOGIN_MFA, PURPOSE_ENABLE_MFA, SESSION_LIFETIME, CHALLENGE_LIFETIME,
+    RESULT_SUCCESS, RESULT_TOO_MANY_ATTEMPTS,
+    auth_time_from_claims, signed_in_recently, create_mfa_challenge, invalidate_mfa_challenge,
+    verify_login_challenge, confirm_enable_mfa, validate_mfa_session, revoke_mfa_session,
+    disable_mfa_and_revoke_state,
 )
 from app.api.dependencies import get_current_user
 from app.services.app_check_monitor import log_app_check_status
@@ -160,8 +168,6 @@ async def send_otp(
         email_sent = await send_otp_email(identifier, otp)
         if not email_sent:
             raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
-    else:
-        print(f"[OTP-SMS-LOG] OTP for {identifier}: {otp}")
 
     return {"status": "success", "message": "OTP sent successfully"}
 
@@ -188,28 +194,31 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     if result != 'success':
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # Mark only the live Firebase account's own profile as verified.
+    # Mark only the live Firebase account's own profile as verified. If no
+    # profile could be marked yet (signup / recovery before /sync-user),
+    # leave a single-use server-side proof for /auth/mark-verified.
     if "@" in identifier:
-        await _mark_verified_for_firebase_email(identifier)
+        if not await _mark_verified_for_firebase_email(identifier):
+            await record_email_verification_proof(identifier)
 
     return {"status": "success", "message": "OTP verified"}
 
 
-async def _mark_verified_for_firebase_email(email: str) -> None:
+async def _mark_verified_for_firebase_email(email: str) -> int:
     """Resolves the Firebase account for an OTP-verified email server-side
-    and marks only that UID's profile. No account yet (new signup) is not
-    an error; a failed lookup is logged without the email and never fails
-    the already-successful OTP verification."""
+    and marks only that UID's profile. Returns rows marked. No account yet
+    (new signup) is not an error; a failed lookup is logged without the
+    email and never fails the already-successful OTP verification."""
     try:
         from firebase_admin import auth as fb_auth
         try:
             fb_user = fb_auth.get_user_by_email(email)
         except fb_auth.UserNotFoundError:
-            return
+            return 0
     except Exception as e:
         print(f"[AUTH] verify-otp Firebase lookup failed: {type(e).__name__}", flush=True)
-        return
-    await mark_email_verified_for_uid(fb_user.uid, email)
+        return 0
+    return await mark_email_verified_for_uid(fb_user.uid, email)
 
 
 @router.post("/auth/send-password-reset")
@@ -283,13 +292,18 @@ async def send_email_otp_preregistration(
 
 @router.post("/auth/mark-verified")
 async def mark_email_verified_route(current_user: dict = Depends(get_current_user)):
-    """Sets email_verified=TRUE for the authenticated user. Called after pre-registration
-    email OTP is confirmed and Firebase account + sync-user have completed."""
+    """Sets email_verified=TRUE for the authenticated user, only with a
+    server-side proof that this email passed /auth/verify-otp in the last
+    30 minutes (signup verifies the email before the profile exists)."""
     uid = current_user.get("uid")
     email = current_user.get("email")
     if not uid or not email:
         raise HTTPException(status_code=400, detail="No email on token")
-    await mark_email_verified_for_uid(uid, email)
+    row = await get_user(uid)
+    if row and row.get("email_verified"):
+        return {"status": "ok"}
+    if await mark_email_verified_with_proof(uid, email) != 1:
+        raise HTTPException(status_code=403, detail="Email verification required")
     return {"status": "ok"}
 
 
@@ -333,13 +347,190 @@ async def fetch_user(firebase_id: str, current_user: dict = Depends(get_current_
 
 
 @router.post("/user/update-mfa")
-async def update_user_mfa(mfa_enabled: bool = Form(...), current_user: dict = Depends(get_current_user)):
-    """Toggles Multi-Factor Authentication (MFA) status for the current user."""
+async def update_user_mfa(
+    mfa_enabled: bool = Form(...),
+    current_user: dict = Depends(get_current_user),
+    x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
+):
+    """Legacy toggle kept for released apps. It can no longer change MFA by
+    itself: enabling requires the OTP flow (/user/mfa/enable-*), disabling
+    requires the same MFA-session + recent-sign-in checks as /user/mfa/disable.
+    A request matching the current state is a harmless no-op."""
     uid = current_user.get("uid")
-    success = await update_mfa(uid, mfa_enabled)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update MFA status")
-    return {"status": "success", "message": f"MFA status updated to {mfa_enabled}"}
+    row = await get_user(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    if bool(row.get("mfa_enabled")) == mfa_enabled:
+        return {"status": "success", "message": f"MFA status updated to {mfa_enabled}"}
+    if mfa_enabled:
+        raise HTTPException(status_code=403, detail={
+            "code": "MFA_ENABLE_FLOW_REQUIRED",
+            "message": "Please update the app to enable MFA.",
+        })
+    await _require_mfa_change_authorization(current_user, x_mfa_session)
+    await disable_mfa_and_revoke_state(uid)
+    return {"status": "success", "message": "MFA status updated to False"}
+
+
+# ---------------------------------------------------------------------------
+# F-09: server-side MFA. Phase 1 provides these capabilities only; no other
+# endpoint requires an MFA session yet.
+# ---------------------------------------------------------------------------
+
+_MFA_SESSION_REQUIRED = {"code": "MFA_SESSION_REQUIRED", "message": "MFA verification required"}
+
+
+async def _require_mfa_change_authorization(current_user: dict, raw_session: str | None) -> None:
+    """Valid MFA session for this UID + Firebase sign-in, and a sign-in
+    within the last 15 minutes (Firebase-native re-auth; no password here)."""
+    auth_time = auth_time_from_claims(current_user)
+    if not await validate_mfa_session(raw_session, current_user.get("uid"), auth_time):
+        raise HTTPException(status_code=401, detail=_MFA_SESSION_REQUIRED)
+    if not signed_in_recently(auth_time):
+        raise HTTPException(status_code=401, detail={
+            "code": "RECENT_SIGN_IN_REQUIRED",
+            "message": "Please sign in again to continue.",
+        })
+
+
+async def _send_mfa_challenge(request: Request, uid: str, purpose: str) -> dict:
+    row = await get_user(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    email = (row.get("email") or "").strip().lower()
+    if not row.get("email_verified") or "@" not in email:
+        raise HTTPException(status_code=403, detail="Email verification required")
+    if purpose == PURPOSE_LOGIN_MFA and not row.get("mfa_enabled"):
+        raise HTTPException(status_code=409, detail="MFA is not enabled for this account")
+    if purpose == PURPOSE_ENABLE_MFA and row.get("mfa_enabled"):
+        return {"status": "already_enabled", "mfa_enabled": True}
+
+    allowed, retry_after = await check_otp_send_allowed(email, request)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please wait {retry_after // 60} minutes.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    from app.services.email_service import send_otp_email
+    try:
+        challenge_id, otp = await create_mfa_challenge(uid, email, purpose)
+    except MfaConfigError:
+        raise HTTPException(status_code=503, detail="MFA is temporarily unavailable")
+    if not await send_otp_email(email, otp, valid_minutes=int(CHALLENGE_LIFETIME.total_seconds() // 60)):
+        await invalidate_mfa_challenge(challenge_id, uid)
+        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    return {"status": "sent", "challenge_id": challenge_id,
+            "expires_in": int(CHALLENGE_LIFETIME.total_seconds())}
+
+
+def _mfa_otp_valid(otp: str) -> bool:
+    return isinstance(otp, str) and len(otp) == 6 and otp.isdigit()
+
+
+def _session_response(raw_token: str, **extra) -> dict:
+    return {"status": "success", **extra, "mfa_session_token": raw_token,
+            "expires_in": int(SESSION_LIFETIME.total_seconds())}
+
+
+def _raise_for_result(result: str) -> None:
+    if result == RESULT_TOO_MANY_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new code.")
+    raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+
+@router.get("/auth/session-status")
+async def auth_session_status(
+    current_user: dict = Depends(get_current_user),
+    x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
+):
+    """Server-authoritative state for the signed-in user. Informational in
+    Phase 1; nothing is enforced from here."""
+    uid = current_user.get("uid")
+    row = await get_user(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    session_valid = await validate_mfa_session(x_mfa_session, uid, auth_time_from_claims(current_user))
+    return {
+        "email_verified": bool(row.get("email_verified")),
+        "mfa_enabled": bool(row.get("mfa_enabled")),
+        "mfa_session_valid": session_valid,
+    }
+
+
+@router.post("/auth/mfa/challenge")
+async def mfa_login_challenge(request: Request, current_user: dict = Depends(get_current_user)):
+    return await _send_mfa_challenge(request, current_user.get("uid"), PURPOSE_LOGIN_MFA)
+
+
+@router.post("/auth/mfa/verify")
+async def mfa_login_verify(
+    challenge_id: str = Form(...),
+    otp: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    if not _mfa_otp_valid(otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    auth_time = auth_time_from_claims(current_user)
+    if auth_time is None:
+        raise HTTPException(status_code=401, detail="Please sign in again.")
+    try:
+        result, raw_token = await verify_login_challenge(current_user.get("uid"), challenge_id, otp, auth_time)
+    except MfaConfigError:
+        raise HTTPException(status_code=503, detail="MFA is temporarily unavailable")
+    if result != RESULT_SUCCESS:
+        _raise_for_result(result)
+    return _session_response(raw_token)
+
+
+@router.post("/auth/mfa/logout")
+async def mfa_logout(
+    current_user: dict = Depends(get_current_user),
+    x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
+):
+    await revoke_mfa_session(x_mfa_session, current_user.get("uid"))
+    return {"status": "ok"}
+
+
+@router.post("/user/mfa/enable-request")
+async def mfa_enable_request(request: Request, current_user: dict = Depends(get_current_user)):
+    return await _send_mfa_challenge(request, current_user.get("uid"), PURPOSE_ENABLE_MFA)
+
+
+@router.post("/user/mfa/enable-confirm")
+async def mfa_enable_confirm(
+    challenge_id: str = Form(...),
+    otp: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    if not _mfa_otp_valid(otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    auth_time = auth_time_from_claims(current_user)
+    if auth_time is None:
+        raise HTTPException(status_code=401, detail="Please sign in again.")
+    try:
+        result, raw_token = await confirm_enable_mfa(current_user.get("uid"), challenge_id, otp, auth_time)
+    except MfaConfigError:
+        raise HTTPException(status_code=503, detail="MFA is temporarily unavailable")
+    if result != RESULT_SUCCESS:
+        _raise_for_result(result)
+    return _session_response(raw_token, mfa_enabled=True)
+
+
+@router.post("/user/mfa/disable")
+async def mfa_disable(
+    current_user: dict = Depends(get_current_user),
+    x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
+):
+    uid = current_user.get("uid")
+    row = await get_user(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not row.get("mfa_enabled"):
+        return {"status": "success", "mfa_enabled": False}
+    await _require_mfa_change_authorization(current_user, x_mfa_session)
+    await disable_mfa_and_revoke_state(uid)
+    return {"status": "success", "mfa_enabled": False}
 
 
 @router.websocket("/ws/realtime")
