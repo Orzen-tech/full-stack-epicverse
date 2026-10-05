@@ -187,6 +187,15 @@ class ErrorMapper {
         );
 
       case 403:
+        if (backendCode(error) == 'EMAIL_VERIFICATION_REQUIRED') {
+          return AppException(
+            userMessage: 'Please verify your email to continue.',
+            statusCode: 403,
+            type: AppExceptionType.authorization,
+            originalError: error.message,
+            originalException: error,
+          );
+        }
         return AppException(
           userMessage: "You don't have permission to perform this action.",
           statusCode: 403,

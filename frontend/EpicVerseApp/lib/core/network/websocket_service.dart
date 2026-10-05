@@ -8,7 +8,9 @@ import 'package:flutter/widgets.dart' show WidgetsBinding, AppLifecycleState;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../errors/app_exception.dart';
 import 'api_config.dart';
+import 'mfa_reprompt.dart';
 import 'mfa_session_manager.dart';
 import 'session_manager.dart';
 import 'ssl_pinning_service.dart';
@@ -19,6 +21,19 @@ import 'ssl_pinning_service.dart';
 int reconnectDelayMs(int attempt, {required bool immediate, double jitter01 = 0.0}) {
   final baseSeconds = immediate ? 0.3 : math.min(30.0, math.pow(2, attempt).toDouble());
   return ((baseSeconds + jitter01 * 0.5) * 1000).round();
+}
+
+/// F-09 Phase 3: the security code of a backend handshake refusal
+/// (MFA_SESSION_REQUIRED / EMAIL_VERIFICATION_REQUIRED), or null.
+String? wsSecurityRefusalCode(String message) {
+  try {
+    final data = jsonDecode(message);
+    if (data is Map && data['type'] == 'error') {
+      final code = data['code'];
+      if (code == 'MFA_SESSION_REQUIRED' || code == 'EMAIL_VERIFICATION_REQUIRED') return code as String;
+    }
+  } catch (_) {}
+  return null;
 }
 
 class WebSocketService {
@@ -51,6 +66,13 @@ class WebSocketService {
   static const int _maxReconnectAttempts = 6;
   String? _lastLanguage;
 
+  // F-09 Phase 3: the backend refuses the handshake with MFA_SESSION_REQUIRED or
+  // EMAIL_VERIFICATION_REQUIRED. Such a refusal never auto-reconnects; an MFA
+  // refusal gets at most one re-verification prompt and one reconnect.
+  bool _securityRefused = false;
+  bool _mfaRetryPending = false;   // set only for the single reconnect after MFA
+  bool _mfaRetryUsed = false;
+
   bool get isConnected => _isConnected;
   String get statusText => _statusText;
   Stream<dynamic> get messages => _messageController.stream;
@@ -71,6 +93,10 @@ class WebSocketService {
     }
     if (language != null) _lastLanguage = language;
     _manualClose = false;
+    _securityRefused = false;
+    // A fresh connect may prompt once; the reconnect after MFA may not.
+    _mfaRetryUsed = _mfaRetryPending;
+    _mfaRetryPending = false;
 
     _isConnecting = true;
     _connectionCompleter = Completer<void>();
@@ -127,6 +153,9 @@ class WebSocketService {
       
       _channel!.stream.listen(
         (message) {
+          if (!_isConnected && message is String && _handleSecurityRefusal(message, uid!)) {
+            return;
+          }
           if (!_isConnected) {
             _isConnected = true;
             _isConnecting = false;
@@ -179,11 +208,11 @@ class WebSocketService {
         },
         onError: (error) {
           debugPrint('WebSocket error: $error');
-          _handleDisconnect();
+          _handleDisconnect(reconnect: !_securityRefused);
         },
         onDone: () {
           debugPrint('WebSocket closed');
-          _handleDisconnect();
+          _handleDisconnect(reconnect: !_securityRefused);
         },
       );
     } catch (e) {
@@ -192,6 +221,62 @@ class WebSocketService {
     }
     
     await (_connectionCompleter?.future ?? Future.value());
+  }
+
+  /// Handles a pre-connection refusal from the backend. Returns true when the
+  /// message was a security refusal (never logs the MFA session or tokens).
+  bool _handleSecurityRefusal(String message, String uid) {
+    final code = wsSecurityRefusalCode(message);
+    if (code == null) return false;
+
+    debugPrint('[EpicVerse][WS] connection refused: $code');
+    _securityRefused = true;
+    _reconnectTimer?.cancel();
+    _isConnecting = false;
+    final AppException error;
+    if (code == 'MFA_SESSION_REQUIRED') {
+      // A stale session is useless; drop it so the app re-verifies.
+      MfaSessionManager.clear();
+      error = const AppException(
+        userMessage: 'Please verify your identity to continue.',
+        statusCode: 401,
+        type: AppExceptionType.mfaSessionRequired,
+      );
+      _statusController.add('Verification required');
+    } else {
+      error = const AppException(
+        userMessage: 'Please verify your email to continue.',
+        statusCode: 403,
+        type: AppExceptionType.authorization,
+      );
+      _statusController.add('Email verification required');
+    }
+    if (!(_connectionCompleter?.isCompleted ?? true)) {
+      _connectionCompleter?.completeError(error);
+    }
+    if (code == 'MFA_SESSION_REQUIRED') _repromptThenReconnect(uid);
+    return true;
+  }
+
+  /// One shared MFA prompt (MfaFlow de-duplicates across HTTP and WebSocket),
+  /// then a single reconnect. Only while the voice screen wants a connection;
+  /// a second refusal after re-verifying stops here.
+  Future<void> _repromptThenReconnect(String uid) async {
+    final handler = MfaReprompt.handler;
+    if (!autoReconnect || _mfaRetryUsed || handler == null) return;
+    _mfaRetryUsed = true;
+    bool verified = false;
+    try {
+      verified = await handler();
+    } catch (_) {}
+    if (!verified || !autoReconnect || _manualClose || _isConnected || _isConnecting) return;
+    if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+    _mfaRetryPending = true;
+    try {
+      await connect(language: _lastLanguage).timeout(const Duration(seconds: 20));
+    } catch (e) {
+      debugPrint('[EpicVerse][WS] reconnect after verification failed: $e');
+    }
   }
 
   void disconnect() {
