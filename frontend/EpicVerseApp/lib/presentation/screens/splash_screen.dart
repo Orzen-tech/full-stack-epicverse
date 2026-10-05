@@ -14,6 +14,7 @@ import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
 import '../../core/network/api_config.dart';
 import '../../core/constants/app_colors.dart';
+import '../../core/security/mfa_flow.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -208,7 +209,15 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               }
             }
 
-            final emailVerified = data['email_verified'] ?? false;
+            // F-09: server-authoritative state; null = pre-F-09 backend.
+            SessionStatus? status;
+            try {
+              status = await MfaFlow.fetchSessionStatus();
+            } catch (e) {
+              debugPrint('[EpicVerse][SPLASH] session-status unavailable: ${e.runtimeType}');
+            }
+
+            final emailVerified = status?.emailVerified ?? (data['email_verified'] ?? false);
             if (!emailVerified) {
               debugPrint('[EpicVerse][SPLASH] email_verified=false → OTP screen');
               if (!mounted) return;
@@ -230,6 +239,23 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                 ),
               );
               return;
+            }
+
+            // MFA sessions live in memory only, so a restored Firebase
+            // sign-in must pass the server's MFA challenge again.
+            if (status != null && status.mfaEnabled && !status.mfaSessionValid) {
+              debugPrint('[EpicVerse][SPLASH] MFA required by server → challenge');
+              if (!mounted) return;
+              final verified = await MfaFlow.verifyLogin(Navigator.of(context));
+              if (!verified) {
+                await MfaFlow.signOut();
+                await prefs.setBool('isLoggedIn', false);
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                );
+                return;
+              }
             }
           }
         } on DioException catch (e) {

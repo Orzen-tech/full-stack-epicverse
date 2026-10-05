@@ -11,7 +11,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
+import '../../core/network/mfa_session_manager.dart';
+import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_mapper.dart';
+import '../../core/security/mfa_flow.dart';
 import 'login_screen.dart';
 import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
@@ -269,35 +273,141 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         value: isEnabled,
         activeThumbColor: AppColors.primaryGold,
-        onChanged: (value) => _updateMfa(value),
+        onChanged: _mfaBusy ? null : (value) => _updateMfa(value),
       ),
     );
   }
 
-  Future<void> _updateMfa(bool enabled) async {
-    final user = ref.read(userProvider);
-    if (user == null) return;
+  @override
+  void initState() {
+    super.initState();
+    _refreshMfaState();
+  }
+
+  bool _mfaBusy = false;
+
+  /// The toggle always reflects the server's state, never a local guess.
+  Future<void> _refreshMfaState() async {
     try {
-      final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
-      await _dio.post(
-        '${ApiConfig.apiUrl}/user/update-mfa',
-        data: FormData.fromMap({'mfa_enabled': enabled}),
-        options: Options(headers: {
-          if (idToken != null) 'Authorization': 'Bearer $idToken',
-        }),
-      );
-      ref.read(userProvider.notifier).setUser(user.copyWith(mfaEnabled: enabled));
-    } catch (e) {
-      debugPrint('Error updating MFA: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Failed to update MFA setting'),
-            backgroundColor: Colors.red.shade700,
-          ),
+      final status = await MfaFlow.fetchSessionStatus();
+      final user = ref.read(userProvider);
+      if (status != null && user != null && mounted) {
+        ref.read(userProvider.notifier).setUser(user.copyWith(mfaEnabled: status.mfaEnabled));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _updateMfa(bool enable) async {
+    if (_mfaBusy) return;
+    setState(() => _mfaBusy = true);
+    try {
+      if (enable) {
+        final ok = await MfaFlow.runChallenge(
+          Navigator.of(context),
+          challengePath: MfaFlow.enableRequestPath,
+          verifyPath: MfaFlow.enableConfirmPath,
         );
+        if (ok) _showMfaSnack('Two-factor authentication is now on.');
+      } else {
+        await _disableMfa();
+      }
+    } finally {
+      await _refreshMfaState();
+      if (mounted) setState(() => _mfaBusy = false);
+    }
+  }
+
+  Future<void> _disableMfa() async {
+    if (!await _ensureRecentSignIn()) return;
+    try {
+      await apiClient.post('/user/mfa/disable');
+    } on AppException catch (e) {
+      if (e.type == AppExceptionType.recentSignInRequired && await _ensureRecentSignIn(force: true)) {
+        try {
+          await apiClient.post('/user/mfa/disable');
+        } on AppException catch (e2) {
+          _showMfaSnack(_disableError(e2), error: true);
+          return;
+        }
+      } else {
+        _showMfaSnack(_disableError(e), error: true);
+        return;
       }
     }
+    MfaSessionManager.clear();
+    _showMfaSnack('Two-factor authentication is now off.');
+  }
+
+  String _disableError(AppException e) {
+    switch (e.type) {
+      case AppExceptionType.mfaSessionRequired:
+        return 'Verification is required to turn off two-factor authentication.';
+      case AppExceptionType.recentSignInRequired:
+        return 'Please sign in again to continue.';
+      case AppExceptionType.network:
+      case AppExceptionType.timeout:
+        return 'No internet connection. Please try again.';
+      default:
+        return 'Could not turn off two-factor authentication. Please try again.';
+    }
+  }
+
+  /// Firebase-native re-authentication when the sign-in is older than the
+  /// backend's 15-minute window. The password goes only to Firebase.
+  Future<bool> _ensureRecentSignIn({bool force = false}) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email;
+    if (user == null || email == null) return false;
+    if (!force) {
+      final authTime = (await user.getIdTokenResult()).authTime;
+      if (authTime != null && DateTime.now().difference(authTime) < const Duration(minutes: 14)) {
+        return true;
+      }
+    }
+    final password = await _promptPassword();
+    if (password == null || password.isEmpty) return false;
+    try {
+      await user.reauthenticateWithCredential(EmailAuthProvider.credential(email: email, password: password));
+      await user.getIdToken(true);
+      return true;
+    } on FirebaseAuthException catch (e) {
+      _showMfaSnack(ErrorMapper.fromException(e).userMessage, error: true);
+      return false;
+    }
+  }
+
+  Future<String?> _promptPassword() async {
+    final controller = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.surfaceElevated,
+          title: const Text('Confirm your password', style: TextStyle(color: AppColors.textPrimary)),
+          content: TextField(
+            controller: controller,
+            obscureText: true,
+            autofocus: true,
+            style: const TextStyle(color: AppColors.textPrimary),
+            decoration: const InputDecoration(hintText: 'Password'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Continue')),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  void _showMfaSnack(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message),
+      backgroundColor: error ? Colors.red.shade700 : null,
+    ));
   }
 
   Widget _buildSettingsOption({
@@ -391,7 +501,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     data: {
                       "uid": updatedUser.id,
                       "display_name": updatedUser.displayName,
-                      "email": updatedUser.email,
                       "primary_language": updatedUser.primaryLanguage,
                       "profile_picture": updatedUser.profilePicture,
                     },
@@ -471,7 +580,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         data: {
           "uid": updatedUser.id,
           "display_name": updatedUser.displayName,
-          "email": updatedUser.email,
           "primary_language": updatedUser.primaryLanguage,
           "profile_picture": updatedUser.profilePicture,
         },
@@ -499,7 +607,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onPressed: () async {
               final prefs = await SharedPreferences.getInstance();
               await prefs.remove('isLoggedIn');
-              await FirebaseAuth.instance.signOut();
+              await MfaFlow.signOut();
               if (!context.mounted) return;
               Navigator.of(context).pushAndRemoveUntil(
                 MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -543,20 +651,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               try {
                 // Soft-delete on backend: marks deletion_requested_at = NOW().
                 // Must be authenticated so backend can verify caller uid matches.
-                final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
                 await _dio.delete(
                   '${ApiConfig.apiUrl}/user/${user.id}',
-                  options: Options(headers: {
-                    ...ApiConfig.headers,
-                    if (idToken != null) 'Authorization': 'Bearer $idToken',
-                  }),
+                  options: Options(headers: await ApiConfig.authHeaders()),
                 );
 
                 // NOTE: We intentionally DO NOT delete the Firebase user here.
                 // Keeping the Firebase account alive is what lets the user
                 // sign back in during the 30-day grace period and trigger
                 // the server-side auto-cancel.
-                await FirebaseAuth.instance.signOut();
+                await MfaFlow.signOut();
 
                 // Clear local state
                 final prefs = await SharedPreferences.getInstance();

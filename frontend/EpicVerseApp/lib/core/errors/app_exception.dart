@@ -9,6 +9,10 @@ enum AppExceptionType {
   rateLimit,
   server,
   unknown,
+  // F-09: backend says this request needs a (fresh) MFA verification.
+  mfaSessionRequired,
+  // F-09: backend says the Firebase sign-in is too old for this change.
+  recentSignInRequired,
 }
 
 class AppException implements Exception {

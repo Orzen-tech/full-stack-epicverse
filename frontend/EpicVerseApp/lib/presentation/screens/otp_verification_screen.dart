@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/network/api_config.dart';
+import '../../core/network/mfa_session_manager.dart';
 import '../widgets/network_background.dart';
 import 'welcome_screen.dart';
 import '../../core/errors/error_handler.dart';
@@ -16,6 +17,11 @@ class OtpVerificationScreen extends StatefulWidget {
   final VoidCallback onVerified;
   final VoidCallback? onBack;
   final bool isMfaVerification;
+  // F-09: when given, the caller verifies the code (e.g. MFA) and returns a
+  // user-facing error message, or null on success. Default email
+  // verification below is used only when these are not provided.
+  final Future<String?> Function(String otp)? onSubmitOtp;
+  final Future<String?> Function()? onResend;
 
   const OtpVerificationScreen({
     super.key,
@@ -25,6 +31,8 @@ class OtpVerificationScreen extends StatefulWidget {
     required this.onVerified,
     this.onBack,
     this.isMfaVerification = false,
+    this.onSubmitOtp,
+    this.onResend,
   });
 
   @override
@@ -110,7 +118,16 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     });
 
     try {
-      if (widget.phone != null && widget.verificationId != null) {
+      if (widget.onSubmitOtp != null) {
+        final error = await widget.onSubmitOtp!(otp);
+        if (!mounted) return;
+        if (error == null) {
+          _isVerified = true;
+          widget.onVerified();
+        } else {
+          setState(() => _errorMessage = error);
+        }
+      } else if (widget.phone != null && widget.verificationId != null) {
         debugPrint('[EpicVerse][OTP] Verifying via Firebase phone');
         // --- FIREBASE PHONE VERIFICATION ---
         PhoneAuthCredential credential = PhoneAuthProvider.credential(
@@ -171,7 +188,15 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     debugPrint('[EpicVerse][OTP] Resend tapped');
     setState(() => _isLoading = true);
     try {
-      if (widget.phone != null) {
+      if (widget.onResend != null) {
+        final error = await widget.onResend!();
+        if (error == null) {
+          _startTimer();
+          _showSnackBar("A new code has been sent to your email.");
+        } else {
+          _showSnackBar(error);
+        }
+      } else if (widget.phone != null) {
         // Firebase handles resending via the verifyPhoneNumber call again
         // For simplicity, we suggest going back or we could trigger another verify call here
         _showSnackBar("Please go back and request a new code.");
@@ -356,6 +381,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         if (widget.onBack != null) {
           widget.onBack!();
         } else {
+          MfaSessionManager.clear();
           await FirebaseAuth.instance.signOut();
           if (!mounted) return;
           Navigator.of(context).pushAndRemoveUntil(

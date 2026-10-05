@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'api_config.dart';
+import 'mfa_session_manager.dart';
 import 'session_manager.dart';
 import 'ssl_pinning_service.dart';
 
@@ -113,11 +114,13 @@ class WebSocketService {
       // network_security_config.xml does NOT cover WebSocket connections.
       final HttpClient pinnedHttpClient =
           SslPinningService.createPinnedWebSocketHttpClient();
+      final mfaSession = MfaSessionManager.getSessionForUid(uid);
       _channel = IOWebSocketChannel.connect(
         wsUri,
         headers: {
           ...ApiConfig.headers,
           'Authorization': 'Bearer $idToken',
+          'X-MFA-Session': ?mfaSession,
         },
         customClient: pinnedHttpClient,
       );

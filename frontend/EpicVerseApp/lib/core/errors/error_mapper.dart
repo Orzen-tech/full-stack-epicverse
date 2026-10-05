@@ -4,8 +4,16 @@ import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'app_exception.dart';
+import '../network/mfa_session_manager.dart';
 
 class ErrorMapper {
+  /// The backend's structured error code (`{"detail": {"code": ...}}`), if any.
+  static String? backendCode(DioException error) {
+    final data = error.response?.data;
+    final detail = data is Map ? data['detail'] : null;
+    return detail is Map && detail['code'] is String ? detail['code'] as String : null;
+  }
+
   /// Converts any raw technical exception into a clean, user-friendly [AppException].
   static AppException fromException(dynamic exception) {
     if (exception is AppException) {
@@ -149,6 +157,27 @@ class ErrorMapper {
         );
 
       case 401:
+        final code = backendCode(error);
+        if (code == 'MFA_SESSION_REQUIRED') {
+          // A stale session is useless; drop it so the app re-verifies.
+          MfaSessionManager.clear();
+          return AppException(
+            userMessage: 'Please verify your identity to continue.',
+            statusCode: 401,
+            type: AppExceptionType.mfaSessionRequired,
+            originalError: error.message,
+            originalException: error,
+          );
+        }
+        if (code == 'RECENT_SIGN_IN_REQUIRED') {
+          return AppException(
+            userMessage: 'Please sign in again to continue.',
+            statusCode: 401,
+            type: AppExceptionType.recentSignInRequired,
+            originalError: error.message,
+            originalException: error,
+          );
+        }
         return AppException(
           userMessage: 'Your session has expired. Please sign in again.',
           statusCode: 401,

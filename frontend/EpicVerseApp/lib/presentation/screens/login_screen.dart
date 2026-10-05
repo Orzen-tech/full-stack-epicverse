@@ -15,6 +15,7 @@ import 'otp_verification_screen.dart';
 import 'create_profile_screen.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/errors/app_exception.dart';
+import '../../core/security/mfa_flow.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -107,8 +108,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             }
           }
 
+          // F-09: email verification and MFA state come from the backend.
+          // A null status means the backend predates F-09 (route missing),
+          // so the legacy profile fields are used instead.
+          final status = await MfaFlow.fetchSessionStatus();
+
           // Block login if OTP was never verified (app closed mid-registration)
-          final emailVerified = res.data['email_verified'] ?? false;
+          final emailVerified = status?.emailVerified ?? (res.data['email_verified'] ?? false);
           if (!emailVerified) {
             debugPrint('[EpicVerse][LOGIN] email_verified=false → OTP screen');
             if (!mounted) return;
@@ -130,8 +136,26 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             return;
           }
 
-          // MFA interception: if user has MFA enabled, require OTP before granting access
-          final mfaEnabled = res.data['mfa_enabled'] ?? false;
+          if (status != null && status.mfaEnabled && !status.mfaSessionValid) {
+            debugPrint('[EpicVerse][LOGIN] MFA required by server → challenge');
+            if (!mounted) return;
+            final verified = await MfaFlow.verifyLogin(Navigator.of(context));
+            if (!verified) {
+              await MfaFlow.signOut();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Verification is required to continue. Please sign in again.'),
+                    backgroundColor: Colors.redAccent,
+                  ),
+                );
+              }
+              return;
+            }
+          }
+
+          // Legacy backend only (no F-09 routes): previous client-side MFA prompt.
+          final mfaEnabled = status == null && (res.data['mfa_enabled'] ?? false);
           if (mfaEnabled) {
             debugPrint('[EpicVerse][LOGIN] mfa_enabled=true → sending MFA OTP');
             try {
@@ -301,7 +325,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         data: {
           "uid": uid,
           "display_name": fallback.displayName,
-          "email": fallback.email,
           "primary_language": fallback.primaryLanguage,
           "profile_picture": null,
           "session_id": fallback.sessionId,

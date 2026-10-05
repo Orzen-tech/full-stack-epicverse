@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,6 +9,8 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'core/theme/app_theme.dart';
 import 'core/network/websocket_service.dart';
 import 'core/network/ssl_pinning_service.dart';
+import 'core/network/mfa_reprompt.dart';
+import 'core/security/mfa_flow.dart';
 import 'core/widgets/network_banner_wrapper.dart';
 import 'core/services/logger_service.dart';
 import 'presentation/screens/splash_screen.dart';
@@ -99,6 +100,10 @@ class _EpicVerseAppState extends State<EpicVerseApp> {
   @override
   void initState() {
     super.initState();
+    MfaReprompt.handler = () {
+      final nav = navigatorKey.currentState;
+      return nav == null ? Future.value(false) : MfaFlow.reprompt(nav);
+    };
     _kickedSub = webSocketService.sessionKicked.listen((_) async {
       debugPrint('[EpicVerse][APP] Session kicked — showing popup then signing out');
       final ctx = navigatorKey.currentContext;
@@ -125,7 +130,7 @@ class _EpicVerseAppState extends State<EpicVerseApp> {
           ),
         );
       }
-      await FirebaseAuth.instance.signOut();
+      await MfaFlow.signOut();
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
       navigatorKey.currentState?.pushAndRemoveUntil(

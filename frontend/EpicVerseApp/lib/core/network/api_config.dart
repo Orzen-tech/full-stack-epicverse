@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'mfa_session_manager.dart';
 
 class ApiConfig {
 
@@ -42,10 +43,13 @@ class ApiConfig {
   };
 
   static Future<Map<String, String>> authHeaders() async {
-    final token = await FirebaseAuth.instance.currentUser?.getIdToken();
+    final user = FirebaseAuth.instance.currentUser;
+    final token = await user?.getIdToken();
+    final mfaSession = MfaSessionManager.getSessionForUid(user?.uid);
     return {
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
+      'X-MFA-Session': ?mfaSession,
     };
   }
 

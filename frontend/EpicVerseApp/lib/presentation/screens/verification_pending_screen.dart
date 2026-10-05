@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/constants/app_colors.dart';
 import '../widgets/network_background.dart';
 import '../widgets/glass_card.dart';
+import '../../core/security/mfa_flow.dart';
 import 'dashboard_screen.dart';
 import 'login_screen.dart';
 import 'dart:async';
@@ -166,7 +167,7 @@ class _VerificationPendingScreenState extends State<VerificationPendingScreen> {
                 const Spacer(),
                 TextButton(
                   onPressed: () async {
-                    await FirebaseAuth.instance.signOut();
+                    await MfaFlow.signOut();
                     if (mounted) {
                       Navigator.of(context).pushAndRemoveUntil(
                         MaterialPageRoute(builder: (_) => const LoginScreen()),
