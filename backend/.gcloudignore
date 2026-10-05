@@ -1,0 +1,69 @@
+# Cloud Build upload exclusions for the backend/ build context.
+# Narrow, explicit patterns only — app/, scripts/requirements.txt, and
+# Dockerfile must never be excluded here.
+
+.git
+.git/**
+
+__pycache__/
+**/__pycache__/**
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.env.*
+venv/
+.venv/
+env/
+env.bak/
+venv.bak/
+
+*.log
+
+# Database/spreadsheet dump output — not application source, never
+# needed inside the deployed image.
+scripts/db_dump.txt
+scripts/excel_row_dump.txt
+scripts/row_cols_dump.txt
+scripts/safe_dump.txt
+
+# Credential/key material, matching backend/.gitignore's existing intent.
+google-credentials.json
+GoogleService-Info.plist
+*.p12
+*.pem
+
+# Named test/audit output already excluded from git, excluded here too.
+test_results.txt
+test_results_v2.txt
+audit_results.json
+audit_results.txt
+db_status_check.txt
+excel_audit.log
+
+# Local data exports, matching backend/.gitignore's existing intent.
+data/*.csv
+data/*.xlsx
+*.csv
+*.xlsx
+
+# OS metadata.
+.DS_Store
+Thumbs.db
+
+# Local script/diagnostic output — not application source, not used at runtime.
+scripts/all_paths.txt
+scripts/db_cols.txt
+scripts/debug_output.txt
+scripts/excel_cols.txt
+scripts/mode_output.txt
+scripts/models_debug.txt
+scripts/models_list.txt
+scripts/modes_345_cols.txt
+scripts/retriever_test_output.txt
+scripts/status_output.txt
+scripts/diagnostics/db_output.txt
+scripts/diagnostics/db_structure.json
+scripts/diagnostics/stress_test_raw_results.json
+scripts/diagnostics/stress_test_report.md

@@ -20,7 +20,11 @@ import '../../core/utils/password_validator.dart';
 import '../widgets/password_requirements.dart';
 
 class CreateProfileScreen extends ConsumerStatefulWidget {
-  const CreateProfileScreen({super.key});
+  // True only when login has already signed in the Firebase user, completed
+  // the server OTP for that user's email, and found no backend profile.
+  final bool emailAlreadyVerified;
+
+  const CreateProfileScreen({super.key, this.emailAlreadyVerified = false});
 
   @override
   ConsumerState<CreateProfileScreen> createState() => _CreateProfileScreenState();
@@ -58,9 +62,16 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   final List<FocusNode> _otpFocusNodes =
       List.generate(6, (_) => FocusNode());
 
+  bool get _isRecovery => widget.emailAlreadyVerified;
+
   @override
   void initState() {
     super.initState();
+    if (_isRecovery) {
+      // Set before the email listener is attached so it isn't reset.
+      _emailController.text = FirebaseAuth.instance.currentUser?.email ?? '';
+      _emailVerified = _emailController.text.isNotEmpty;
+    }
     _inviteController.addListener(_onInviteChanged);
     _emailController.addListener(_onEmailChanged);
   }
@@ -203,33 +214,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     if (otp.length < 6) return;
     setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
     try {
-      final res = await _dio.post(
+      await _dio.post(
         '${ApiConfig.apiUrl}/auth/verify-otp',
         data: FormData.fromMap({'identifier': _emailController.text.trim(), 'otp': otp}),
         options: Options(headers: ApiConfig.headers),
       );
-      // If the response contains a uid, the email is already registered
-      // in Firebase — block registration and tell the user to log in instead.
-      final existingUid = res.data?['uid'];
-      if (existingUid != null) {
-        // Email already registered — clear field so user can type a new one
-        _emailController.clear();
-        setState(() {
-          _showOtpRow = false;
-          _emailOtpError = null;
-          _emailVerified = false;
-        });
-        for (final c in _otpControllers) c.clear();
-        _emailFocusNode.requestFocus();
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('This email already has an account. Please enter a different email.'),
-            backgroundColor: Colors.redAccent,
-            duration: Duration(seconds: 4),
-          ));
-        }
-        return;
-      }
       setState(() {
         _emailVerified = true;
         _showOtpRow = false;
@@ -283,28 +272,82 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         return;
       }
 
-      // Step 2: Create Firebase account
+      final email = _emailController.text.trim();
+      final signedIn = FirebaseAuth.instance.currentUser;
+
+      // Step 2a: Firebase account already signed in for this email (login
+      // recovery, or an earlier signup that never reached /sync-user).
+      if (signedIn != null &&
+          (signedIn.email ?? '').toLowerCase() == email.toLowerCase()) {
+        debugPrint('[EpicVerse][REG] Step 2: existing signed-in Firebase user');
+        await _completeExistingFirebaseUser(inviteCode);
+        return;
+      }
+
+      // Step 2b: Create Firebase account
       debugPrint('[EpicVerse][REG] Step 2: createUserWithEmailAndPassword');
-      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-      );
-      debugPrint('[EpicVerse][REG] Firebase user created successfully');
-      await _completeRegistration(cred, inviteCode);
+      try {
+        final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: email,
+          password: _passwordController.text.trim(),
+        );
+        debugPrint('[EpicVerse][REG] Firebase user created successfully');
+        await _completeRegistration(cred, inviteCode);
+        return;
+      } on FirebaseAuthException catch (e) {
+        if (e.code != 'email-already-in-use') rethrow;
+      }
+
+      // Step 2c: Firebase account exists — prove ownership with Firebase
+      // itself (the password goes only to Firebase, never our backend).
+      debugPrint('[EpicVerse][REG] email-already-in-use → Firebase sign-in');
+      try {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: email,
+          password: _passwordController.text.trim(),
+        );
+      } on FirebaseAuthException catch (e) {
+        debugPrint('[EpicVerse][REG] recovery sign-in failed code=${e.code}');
+        setState(() => _emailVerified = false);
+        _showError('This email is already registered. Please log in instead.');
+        return;
+      }
+      await _completeExistingFirebaseUser(inviteCode);
     } on FirebaseAuthException catch (e) {
       debugPrint('[EpicVerse][REG] FirebaseAuthException code=${e.code}');
-      if (e.code == 'email-already-in-use') {
-        setState(() => _emailVerified = false);
-        _showError('This email is already registered. Please use a different email.');
-      } else {
-        _showError(e.message ?? 'Registration failed.');
-      }
+      _showError(e.message ?? 'Registration failed.');
     } catch (e) {
       debugPrint('[EpicVerse][REG] Registration error: $e');
       _showError(e.toString());
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Existing Firebase user: create the backend profile only if it is
+  /// missing. An account that already has one must use normal login, so
+  /// /sync-user is never called for it from this screen.
+  Future<void> _completeExistingFirebaseUser(String inviteCode) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      await _dio.get(
+        '${ApiConfig.apiUrl}/user/${user.uid}',
+        options: Options(headers: await ApiConfig.authHeaders()),
+      );
+      debugPrint('[EpicVerse][REG] Profile already exists → sign out');
+      await FirebaseAuth.instance.signOut();
+      _showError('This email is already registered. Please log in instead.');
+      return;
+    } on DioException catch (e) {
+      if (e.response?.statusCode != 404) {
+        debugPrint('[EpicVerse][REG] Profile check failed status=${e.response?.statusCode}');
+        _showError('Could not reach the server. Please try again.');
+        return;
+      }
+    }
+    debugPrint('[EpicVerse][REG] Profile missing → completing registration');
+    await _completeRegistration(null, inviteCode);
   }
 
   Future<void> _completeRegistration(dynamic cred, String inviteCode) async {
@@ -412,6 +455,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                             padding: const EdgeInsets.only(top: 6, left: 4),
                             child: Text(_emailOtpError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
                           ),
+                        if (!_isRecovery) ...[
                         const SizedBox(height: 20),
                         _buildFieldLabel('PASSWORD'),
                         TextFormField(
@@ -461,6 +505,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
                             return null;
                           },
                         ),
+                        ],
                         const SizedBox(height: 20),
                         _buildFieldLabel('INVITE CODE'),
                         _buildTextField(_inviteController, 'XXXXXX', Icons.vpn_key_outlined, prefix: 'EPIC-'),
@@ -538,8 +583,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     // submit). Other required fields keep their own in-flow checks in
     // _submitForm.
     final password = _passwordController.text;
-    final passwordReady = PasswordValidator.meetsPolicy(password) &&
-        password == _confirmPasswordController.text;
+    // Recovery mode has no password fields: the Firebase user is already
+    // signed in and no account is created.
+    final passwordReady = _isRecovery ||
+        (PasswordValidator.meetsPolicy(password) &&
+            password == _confirmPasswordController.text);
     final enabled = !_isLoading && passwordReady;
 
     return GestureDetector(

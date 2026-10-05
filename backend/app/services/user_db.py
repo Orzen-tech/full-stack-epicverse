@@ -171,7 +171,7 @@ class _InviteConsumptionRace(Exception):
     never allowed to surface database details to the client."""
 
 
-async def sync_user_with_invite_check(user: UserRecord) -> dict:
+async def sync_user_with_invite_check(user: UserRecord, verified_email: str | None = None) -> dict:
     """F-06: the sole path that may create a new `users` row.
 
     Existing users: a normal profile sync — no invite required, none
@@ -195,9 +195,14 @@ async def sync_user_with_invite_check(user: UserRecord) -> dict:
         `SELECT ... FROM invite_codes ... FOR UPDATE` on that specific
         code row, so `current_uses` is read-then-incremented atomically.
 
+    `verified_email` is the email from the verified Firebase ID token. When
+    given, a newly inserted row always stores it, and a different
+    client-supplied email is rejected — decided under the same lock as the
+    existence check, so no concurrent delete can slip a client email in.
+
     Returns {"status": "existing"} | {"status": "created"} |
     {"status": "rejected", "reason": "invite_required" | "invalid_invite"
-     | "expired_invite" | "exhausted_invite"}.
+     | "expired_invite" | "exhausted_invite" | "email_mismatch"}.
     """
     uid = user.get_uid()
     if not uid:
@@ -207,7 +212,7 @@ async def sync_user_with_invite_check(user: UserRecord) -> dict:
     async with pool.acquire() as conn:
         try:
             async with conn.transaction():
-                return await _sync_user_txn(conn, uid, user)
+                return await _sync_user_txn(conn, uid, user, verified_email)
         except _InviteConsumptionRace:
             # The transaction already rolled back (including the INSERT)
             # because this was raised inside conn.transaction(). Report it
@@ -216,7 +221,7 @@ async def sync_user_with_invite_check(user: UserRecord) -> dict:
             return {"status": "rejected", "reason": "exhausted_invite"}
 
 
-async def _sync_user_txn(conn, uid: str, user: UserRecord) -> dict:
+async def _sync_user_txn(conn, uid: str, user: UserRecord, verified_email: str | None) -> dict:
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", uid)
 
     existing = await conn.fetchrow("SELECT uid FROM users WHERE uid = $1", uid)
@@ -241,6 +246,12 @@ async def _sync_user_txn(conn, uid: str, user: UserRecord) -> dict:
              user.mfa_enabled if user.mfa_enabled is not None else False)
         return {"status": "existing"}
 
+    new_email = user.email
+    if verified_email:
+        if user.email and user.email.strip().lower() != verified_email.strip().lower():
+            return {"status": "rejected", "reason": "email_mismatch"}
+        new_email = verified_email
+
     if not user.invite_code:
         return {"status": "rejected", "reason": "invite_required"}
 
@@ -263,7 +274,7 @@ async def _sync_user_txn(conn, uid: str, user: UserRecord) -> dict:
     await conn.execute('''
         INSERT INTO users (uid, display_name, email, primary_language, profile_picture, invite_code, mfa_enabled)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-    ''', uid, user.display_name, user.email, user.primary_language, user.profile_picture,
+    ''', uid, user.display_name, new_email, user.primary_language, user.profile_picture,
          code, user.mfa_enabled if user.mfa_enabled is not None else False)
 
     # Defense-in-depth: the SELECT ... FOR UPDATE above is the primary

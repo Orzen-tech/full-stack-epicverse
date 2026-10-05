@@ -231,7 +231,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               onVerified: () {
                 debugPrint('[EpicVerse][LOGIN] OTP verified → CreateProfile');
                 navigator.pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const CreateProfileScreen()),
+                  MaterialPageRoute(builder: (_) => const CreateProfileScreen(emailAlreadyVerified: true)),
                   (route) => false,
                 );
               },

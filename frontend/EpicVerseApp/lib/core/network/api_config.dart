@@ -2,7 +2,12 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 class ApiConfig {
 
-  static const String baseUrl = 'https://epicverse-backend-721191424605.asia-south1.run.app';
+  // Test builds can point at an isolated backend with
+  // --dart-define=API_BASE_URL=...; normal builds use production.
+  static const String baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'https://epicverse-backend-721191424605.asia-south1.run.app',
+  );
 
   
 

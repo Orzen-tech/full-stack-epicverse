@@ -72,7 +72,10 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(get_current_u
     if current_user.get("uid") != user.get_uid():
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    result = await sync_user_with_invite_check(user)
+    # F-06: a newly created row takes its email from the verified token,
+    # enforced inside the creation transaction.
+    token_email = (current_user.get("email") or "").strip() or None
+    result = await sync_user_with_invite_check(user, verified_email=token_email)
     if result["status"] == "rejected":
         reason = result.get("reason")
         detail = {
@@ -80,6 +83,7 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(get_current_u
             "invalid_invite": "Invalid invite code.",
             "expired_invite": "Invite code has expired.",
             "exhausted_invite": "Invite code has already reached its usage limit.",
+            "email_mismatch": "Email does not match the signed-in account.",
         }.get(reason, "Invite code could not be validated.")
         raise HTTPException(status_code=403, detail=detail)
     return {"status": "success", "message": "User synchronized"}
@@ -164,14 +168,13 @@ async def send_otp(
 
 @router.post("/auth/verify-otp")
 async def verify_otp_route(request: Request, identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
-    """Verifies an OTP for an existing Firebase user.
+    """Verifies an email OTP. Nothing else.
 
-    NOTE (F-06): this endpoint never creates a Firebase user, and never
-    writes a SQL `users` row either. The signup flow must create the
-    Firebase user first (via `createUserWithEmailAndPassword` after invite
-    validation), and `/sync-user` is the sole path that may create the SQL
-    row. Refusing to write here closes the invite-bypass this endpoint
-    previously allowed via an unconditional upsert.
+    F-06: never creates a Firebase user, never writes a SQL `users` row,
+    and never issues a sign-in token. Signup verifies the email before the
+    Firebase account exists, so a missing Firebase user is not an error
+    here. `/sync-user` remains the sole path that may create the SQL row,
+    and only with a server-validated invite.
     """
     log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
 
@@ -189,45 +192,7 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     if "@" in identifier:
         await mark_email_verified(identifier)
 
-    uid = None
-    custom_token = None
-
-    if "@" in identifier:
-        try:
-            from firebase_admin import auth as fb_auth
-            try:
-                fb_user = fb_auth.get_user_by_email(identifier)
-            except fb_auth.UserNotFoundError:
-                # No account for this email — refuse to onboard via OTP alone.
-                # Legitimate signups go through invite validation + createUserWithEmailAndPassword.
-                print(f"[AUTH] OTP verify rejected — no Firebase user for {identifier}", flush=True)
-                raise HTTPException(
-                    status_code=404,
-                    detail="Account not found. Please sign up with a valid invite code.",
-                )
-            uid = fb_user.uid
-
-            # F-06: no SQL write here. /sync-user is the sole path that may
-            # create/update a `users` row (see sync_user_with_invite_check).
-            # This endpoint only confirms the Firebase account and mints a
-            # sign-in token.
-
-            # Custom token lets Flutter sign in via FirebaseAuth.signInWithCustomToken()
-            token_bytes = fb_auth.create_custom_token(uid)
-            custom_token = token_bytes.decode() if isinstance(token_bytes, bytes) else token_bytes
-            print(f"[AUTH] OTP verified — Firebase uid={uid} email={identifier}", flush=True)
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"[AUTH] Firebase user lookup error: {e}", flush=True)
-            # OTP was valid; don't block the user, but token will be None
-
-    return {
-        "status": "success",
-        "message": "OTP verified",
-        "uid": uid,
-        "custom_token": custom_token,
-    }
+    return {"status": "success", "message": "OTP verified"}
 
 
 @router.post("/auth/send-password-reset")
