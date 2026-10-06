@@ -84,9 +84,26 @@ plutil -lint "$IOS_DIR/Runner/GoogleService-Info.plist"
 echo "[3/4] Generating Flutter iOS config..."
 cd "$APP_DIR"
 flutter pub get
+# Optional F-09 test-backend override. Only a workflow that deliberately sets
+# F09_TEST_API_BASE_URL (Xcode Cloud environment variable, never committed)
+# gets an API_BASE_URL dart-define - the variable ApiConfig already reads.
+# Unset or empty means no override: the build is exactly the production one.
+# The value is never printed.
+set --
+if [ -n "${F09_TEST_API_BASE_URL:-}" ]; then
+  case "$F09_TEST_API_BASE_URL" in
+    *[[:space:]]*) echo "error: F09_TEST_API_BASE_URL must not contain whitespace."; exit 1 ;;
+    */) echo "error: F09_TEST_API_BASE_URL must not end with a slash."; exit 1 ;;
+    https://?*) ;;
+    *) echo "error: F09_TEST_API_BASE_URL must be an https:// URL."; exit 1 ;;
+  esac
+  echo "F09_TEST_API_BASE_URL is set: building with an API base URL override (value not printed)."
+  set -- "--dart-define=API_BASE_URL=$F09_TEST_API_BASE_URL"
+fi
+
 # Writes Flutter/Generated.xcconfig with the same obfuscation settings as
 # scripts/build_production_ipa.sh.
-flutter build ios --config-only --release --obfuscate --split-debug-info=build/symbols
+flutter build ios --config-only --release --obfuscate --split-debug-info=build/symbols "$@"
 
 echo "[4/4] Installing CocoaPods dependencies..."
 export HOMEBREW_NO_AUTO_UPDATE=1
