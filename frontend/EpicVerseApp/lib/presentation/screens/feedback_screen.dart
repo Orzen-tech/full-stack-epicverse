@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
 import '../widgets/network_background.dart';
 
 class FeedbackScreen extends StatefulWidget {
@@ -12,7 +11,6 @@ class FeedbackScreen extends StatefulWidget {
 }
 
 class _FeedbackScreenState extends State<FeedbackScreen> {
-  final Dio _dio = Dio();
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
 
@@ -33,11 +31,7 @@ class _FeedbackScreenState extends State<FeedbackScreen> {
 
     setState(() => _isSubmitting = true);
     try {
-      await _dio.post(
-        '${ApiConfig.apiUrl}/feedback',
-        data: {'message': message},
-        options: Options(headers: await ApiConfig.authHeaders()),
-      );
+      await apiClient.post('/feedback', data: {'message': message});
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Thank you for your feedback!'), backgroundColor: Colors.green),

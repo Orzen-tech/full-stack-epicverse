@@ -14,7 +14,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
         decoded_token = auth.verify_id_token(token)
         return decoded_token
     except Exception as e:
-        print(f"Firebase token error: {str(e)}")
+        # Type only: the library's message for a malformed token includes the token text.
+        print(f"Firebase token error: {type(e).__name__}")
         raise HTTPException(status_code=401, detail="Invalid Firebase Auth token")
 
 

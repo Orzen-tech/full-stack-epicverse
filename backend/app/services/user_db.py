@@ -316,14 +316,16 @@ async def sync_user_with_invite_check(user: UserRecord, verified_email: str | No
         `SELECT ... FROM invite_codes ... FOR UPDATE` on that specific
         code row, so `current_uses` is read-then-incremented atomically.
 
-    `verified_email` is the email from the verified Firebase ID token. When
-    given, a newly inserted row always stores it, and a different
-    client-supplied email is rejected — decided under the same lock as the
-    existence check, so no concurrent delete can slip a client email in.
+    `verified_email` is the email from the verified Firebase ID token and is
+    the ONLY authority for a new row's email: it is always the stored value,
+    a different client-supplied email is rejected, and a token with no email
+    cannot create an account at all ("email_required") — decided under the
+    same lock as the existence check and before the invite is touched.
 
     Returns {"status": "existing"} | {"status": "created"} |
-    {"status": "rejected", "reason": "invite_required" | "invalid_invite"
-     | "expired_invite" | "exhausted_invite" | "email_mismatch"}.
+    {"status": "rejected", "reason": "email_required" | "invite_required"
+     | "invalid_invite" | "expired_invite" | "exhausted_invite"
+     | "email_mismatch"}.
     """
     uid = user.get_uid()
     if not uid:
@@ -360,11 +362,13 @@ async def _sync_user_txn(conn, uid: str, user: UserRecord, verified_email: str |
         ''', uid, user.display_name, user.primary_language, user.profile_picture)
         return {"status": "existing"}
 
-    new_email = user.email
-    if verified_email:
-        if user.email and user.email.strip().lower() != verified_email.strip().lower():
-            return {"status": "rejected", "reason": "email_mismatch"}
-        new_email = verified_email
+    # The verified token is the only authority for a new account's email. A
+    # token without one fails closed here, before the invite is looked up.
+    if not verified_email:
+        return {"status": "rejected", "reason": "email_required"}
+    if user.email and user.email.strip().lower() != verified_email.strip().lower():
+        return {"status": "rejected", "reason": "email_mismatch"}
+    new_email = verified_email
 
     if not user.invite_code:
         return {"status": "rejected", "reason": "invite_required"}
@@ -560,7 +564,7 @@ async def save_otp(identifier: str, otp: str) -> bool:
             ''', identifier.lower(), otp)
             return True
     except Exception as e:
-        print(f"[DB] OTP Save Error: {e}")
+        print(f"[DB] OTP Save Error: {type(e).__name__}")
         return False
 
 
@@ -595,7 +599,9 @@ async def verify_otp(identifier: str, otp: str) -> str:
                     await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
                     return 'too_many_attempts'
 
-                if row['otp'] == otp:
+                # Constant-time comparison of the stored and submitted codes.
+                if row['otp'] is not None and hmac.compare_digest(
+                        row['otp'].encode('utf-8'), otp.encode('utf-8')):
                     await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
                     return 'success'
 
@@ -610,7 +616,7 @@ async def verify_otp(identifier: str, otp: str) -> str:
                 )
                 return 'invalid'
     except Exception as e:
-        print(f"OTP Verification Error: {e}")
+        print(f"OTP Verification Error: {type(e).__name__}")
         return 'invalid'
 
 

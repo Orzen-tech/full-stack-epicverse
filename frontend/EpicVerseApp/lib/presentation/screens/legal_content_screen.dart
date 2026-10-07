@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:dio/dio.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
 
 class LegalContentScreen extends StatefulWidget {
   final String title;
@@ -17,7 +16,6 @@ class LegalContentScreen extends StatefulWidget {
 }
 
 class _LegalContentScreenState extends State<LegalContentScreen> {
-  final Dio _dio = Dio();
   String _content = '';
   bool _isLoading = true;
   String? _error;
@@ -30,10 +28,7 @@ class _LegalContentScreenState extends State<LegalContentScreen> {
 
   Future<void> _fetchContent() async {
     try {
-      final response = await _dio.get(
-        '${ApiConfig.apiUrl}${widget.endpoint}',
-        options: Options(headers: ApiConfig.headers),
-      );
+      final response = await apiClient.get(widget.endpoint);
       if (response.statusCode == 200 && response.data is Map) {
         setState(() {
           _content = response.data['content'] ?? 'Content not available';

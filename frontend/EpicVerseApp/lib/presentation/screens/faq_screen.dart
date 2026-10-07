@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
 import '../widgets/network_background.dart';
 
 class FAQScreen extends StatefulWidget {
@@ -12,7 +11,6 @@ class FAQScreen extends StatefulWidget {
 }
 
 class _FAQScreenState extends State<FAQScreen> {
-  final Dio _dio = Dio();
   List<Map<String, String>> _items = [];
   bool _isLoading = true;
   String? _error;
@@ -25,10 +23,7 @@ class _FAQScreenState extends State<FAQScreen> {
 
   Future<void> _fetchFAQ() async {
     try {
-      final response = await _dio.get(
-        '${ApiConfig.apiUrl}/faq',
-        options: Options(headers: ApiConfig.headers),
-      );
+      final response = await apiClient.get('/faq');
       if (response.statusCode == 200 && response.data['items'] is List) {
         final items = (response.data['items'] as List)
             .map((e) => {'question': e['question'] as String, 'answer': e['answer'] as String})

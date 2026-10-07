@@ -8,10 +8,10 @@ import 'package:flutter_jailbreak_detection/flutter_jailbreak_detection.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:dio/dio.dart';
 import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
+import '../../core/errors/app_exception.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/security/mfa_flow.dart';
 import '../../core/security/email_verification_flow.dart';
@@ -176,12 +176,8 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
       // 3. Re-Hydrate User Profile from Backend SQL before navigating
       if (firebaseUser != null) {
         try {
-          final dio = Dio();
-          final response = await dio.get(
-            '${ApiConfig.apiUrl}/user/${firebaseUser.uid}',
-            options: Options(headers: await ApiConfig.authHeaders()),
-          );
-          
+          final response = await apiClient.get('/user/${firebaseUser.uid}');
+
           if (response.statusCode == 200) {
             final data = response.data;
             final user = UserModel.fromJson(data);
@@ -192,15 +188,12 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
             // "sign back in within 30 days -> automatically cancelled"
             // behavior via the authenticated cancel-deletion endpoint. Kept
             // in its own try/catch so a failure here is never mistaken by
-            // the outer DioException handler for a missing profile (404).
+            // the outer AppException handler for a missing profile (404).
             final deletionRequestedAt = data['deletion_requested_at'];
             if (deletionRequestedAt != null) {
               debugPrint('[EpicVerse][SPLASH] Pending deletion detected — cancelling');
               try {
-                final cancelRes = await dio.post(
-                  '${ApiConfig.apiUrl}/user/${firebaseUser.uid}/cancel-deletion',
-                  options: Options(headers: await ApiConfig.authHeaders()),
-                );
+                final cancelRes = await apiClient.post('/user/${firebaseUser.uid}/cancel-deletion');
                 if (cancelRes.statusCode != 200) {
                   debugPrint('[EpicVerse][SPLASH] cancel-deletion non-200 status=${cancelRes.statusCode}');
                 }
@@ -252,8 +245,8 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               }
             }
           }
-        } on DioException catch (e) {
-          if (e.response?.statusCode == 404) {
+        } on AppException catch (e) {
+          if (e.statusCode == 404) {
             // Profile genuinely doesn't exist — signup was never completed.
             // Do NOT let this into the Dashboard; send them back through
             // the normal Login flow, which already knows how to resume

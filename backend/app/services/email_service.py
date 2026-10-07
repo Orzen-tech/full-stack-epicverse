@@ -141,10 +141,11 @@ async def send_password_reset_email(email: str, reset_link: str) -> bool:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code >= 400:
-                print(f"[SENDGRID-ERROR] Password reset email failed: {response.status_code}: {response.text}")
+                # Status only: the provider's response body can echo the recipient.
+                print(f"[SENDGRID-ERROR] Password reset email failed: status={response.status_code}")
                 return False
-            print(f"[SENDGRID-SUCCESS] Password reset email sent to {email}")
+            print("[SENDGRID-SUCCESS] Password reset email sent")
             return True
     except Exception as e:
-        print(f"[SENDGRID-FATAL] Password reset email error: {e}")
+        print(f"[SENDGRID-FATAL] Password reset email error: {type(e).__name__}")
         return False

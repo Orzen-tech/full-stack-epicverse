@@ -22,10 +22,11 @@ Design:
     needed (the upsert's own row-level locking is sufficient).
   - No OTP value is ever read, written, or referenced by this module —
     it only ever touches integer counters.
-  - Fail-open on a Postgres *operational* failure (query error, pool
-    issue): the send-side limiter is a secondary control — OTP
-    verification's independent, unaffected 5-wrong-attempt Postgres
-    lockout remains the primary brute-force defense either way.
+  - Fail-CLOSED on a Postgres *operational* failure (query error, pool
+    issue): when the counters cannot be read or written the send is
+    rejected, so a storage fault can never turn into unlimited OTP emails.
+    OTP verification's independent 5-wrong-attempt Postgres lockout is
+    unaffected either way.
   - Fail-CLOSED (send rejected) if OTP_RATE_LIMIT_HASH_SECRET is missing
     or empty: a forgotten secret must never silently disable hashing or
     silently disable the limiter — see check_otp_send_allowed().
@@ -136,9 +137,9 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
     a forgotten secret must never silently disable hashing or silently
     disable the limiter.
 
-    Fail-OPEN (allowed=True) if the Postgres operation itself fails — a
-    secondary control; OTP verification's independent 5-wrong-attempt
-    Postgres lockout is unaffected either way.
+    Fail-CLOSED (allowed=False, retry in 60 s) if the Postgres operation
+    itself fails; OTP verification's independent 5-wrong-attempt Postgres
+    lockout is unaffected either way.
     """
     secret = settings.OTP_RATE_LIMIT_HASH_SECRET
     if not secret:
@@ -165,5 +166,5 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
             await _maybe_cleanup(conn)
             return True, 0
     except Exception:
-        print("[OTP-RATE-LIMIT] Postgres unavailable, allowing request", flush=True)
-        return True, 0
+        print("[OTP-RATE-LIMIT] Postgres unavailable, rejecting request (fail-closed)", flush=True)
+        return False, 60

@@ -6,11 +6,9 @@ import 'package:image_picker/image_picker.dart';
 import '../../core/constants/app_colors.dart';
 import '../widgets/network_background.dart';
 import '../../providers/user_provider.dart';
-import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../core/network/api_config.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/mfa_session_manager.dart';
 import '../../core/errors/app_exception.dart';
@@ -32,8 +30,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  final Dio _dio = Dio();
-
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(userProvider);
@@ -496,15 +492,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
                 try {
                   await FirebaseAuth.instance.currentUser?.updateDisplayName(newName);
-                  await _dio.post(
-                    '${ApiConfig.apiUrl}/sync-user',
+                  await apiClient.post(
+                    '/sync-user',
                     data: {
                       "uid": updatedUser.id,
                       "display_name": updatedUser.displayName,
                       "primary_language": updatedUser.primaryLanguage,
                       "profile_picture": updatedUser.profilePicture,
                     },
-                    options: Options(headers: await ApiConfig.authHeaders()),
                   );
                 } catch (e) {
                   debugPrint("Error updating name: $e");
@@ -575,15 +570,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final base64Image = base64Encode(bytes);
       final updatedUser = user.copyWith(profilePicture: base64Image);
       ref.read(userProvider.notifier).setUser(updatedUser);
-      await _dio.post(
-        '${ApiConfig.apiUrl}/sync-user',
+      await apiClient.post(
+        '/sync-user',
         data: {
           "uid": updatedUser.id,
           "display_name": updatedUser.displayName,
           "primary_language": updatedUser.primaryLanguage,
           "profile_picture": updatedUser.profilePicture,
         },
-        options: Options(headers: await ApiConfig.authHeaders()),
       );
     } catch (e) {
       debugPrint("Error updating profile photo: $e");
@@ -651,10 +645,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               try {
                 // Soft-delete on backend: marks deletion_requested_at = NOW().
                 // Must be authenticated so backend can verify caller uid matches.
-                await _dio.delete(
-                  '${ApiConfig.apiUrl}/user/${user.id}',
-                  options: Options(headers: await ApiConfig.authHeaders()),
-                );
+                await apiClient.delete('/user/${user.id}');
 
                 // NOTE: We intentionally DO NOT delete the Firebase user here.
                 // Keeping the Firebase account alive is what lets the user

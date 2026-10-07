@@ -93,6 +93,7 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(require_mfa_i
     if result["status"] == "rejected":
         reason = result.get("reason")
         detail = {
+            "email_required": "A verified email is required to create an account.",
             "invite_required": "A valid invite code is required to create a new account.",
             "invalid_invite": "Invalid invite code.",
             "expired_invite": "Invite code has expired.",
@@ -102,9 +103,13 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(require_mfa_i
         raise HTTPException(status_code=403, detail=detail)
     return {"status": "success", "message": "User synchronized"}
 
-async def _authorize_otp_request(invite_code: str | None, authorization: str | None) -> None:
+async def _authorize_otp_request(invite_code: str | None, authorization: str | None) -> dict | None:
     """Authorizes an OTP request via either a valid invite code (signup flow)
     or a valid Firebase ID token (login/resend flow). Raises 403 otherwise.
+
+    Returns the verified token claims for the token path, so the caller can
+    bind the OTP target to the signed-in account's email, and None for the
+    invite path (no account exists yet to bind to).
     """
     # Path 1: signup flow — caller proves they have a valid invite.
     if invite_code:
@@ -122,10 +127,10 @@ async def _authorize_otp_request(invite_code: str | None, authorization: str | N
         if token:
             try:
                 from firebase_admin import auth as fb_auth
-                fb_auth.verify_id_token(token)
-                return
+                return fb_auth.verify_id_token(token)
             except Exception as e:
-                print(f"[OTP] Bearer token rejected: {e}", flush=True)
+                # Type only: the library's message for a malformed token includes the token text.
+                print(f"[OTP] Bearer token rejected: {type(e).__name__}", flush=True)
 
     raise HTTPException(
         status_code=403,
@@ -145,6 +150,8 @@ async def send_otp(
 
     Authorization: caller must supply either a valid `invite_code` (signup)
     or a valid Firebase ID token in the Authorization header (login/resend).
+    A signed-in caller can only request a code for the email address of the
+    account in their own token, never for an arbitrary address.
     """
     log_app_check_status(request, "send-otp")  # Monitor-only, see Finding #4
 
@@ -152,7 +159,12 @@ async def send_otp(
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
 
-    await _authorize_otp_request(invite_code, authorization)
+    claims = await _authorize_otp_request(invite_code, authorization)
+    if claims is not None and norm_email(claims.get("email")) != identifier:
+        raise HTTPException(
+            status_code=403,
+            detail="A code can only be sent to the email address of the signed-in account.",
+        )
 
     allowed, retry_after = await check_otp_send_allowed(identifier, request)
     if not allowed:
@@ -274,10 +286,10 @@ async def send_password_reset(identifier: str = Form(None), email: str = Form(No
         reset_link = fb_auth.generate_password_reset_link(target)
     except fb_auth.UserNotFoundError:
         # Return 200 to avoid leaking whether the email is registered
-        print(f"[AUTH] Password reset requested for unknown email: {target}", flush=True)
+        print("[AUTH] Password reset requested for an unknown account", flush=True)
         return {"status": "sent"}
     except Exception as e:
-        print(f"[AUTH] generate_password_reset_link error: {e}", flush=True)
+        print(f"[AUTH] generate_password_reset_link error: {type(e).__name__}", flush=True)
         raise HTTPException(status_code=500, detail="Failed to generate reset link")
 
     sent = await send_password_reset_email(target, reset_link)
@@ -701,7 +713,8 @@ async def websocket_realtime(
             # Visibility for rollout: tells you when the last legacy client upgrades.
             print(f"[WS] LEGACY token in query string uid={uid} — client should upgrade to header auth", flush=True)
     except Exception as e:
-        print(f"[WS] Auth failed uid={uid} source={token_source}: {e}", flush=True)
+        # Type only: the library's message for a malformed token includes the token text.
+        print(f"[WS] Auth failed uid={uid} source={token_source}: {type(e).__name__}", flush=True)
         await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
         await websocket.close(code=1008)
         return
