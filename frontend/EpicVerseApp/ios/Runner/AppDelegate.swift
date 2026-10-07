@@ -18,7 +18,9 @@ import IOSSecuritySuite
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
-    let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "IntegrityChannel")
+    guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "IntegrityChannel") else {
+      return
+    }
     let channel = FlutterMethodChannel(name: "epicverse/integrity", binaryMessenger: registrar.messenger())
     channel.setMethodCallHandler { call, result in
       if call.method == "amIDebugged" {
