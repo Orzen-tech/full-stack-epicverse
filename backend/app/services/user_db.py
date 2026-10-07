@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import timedelta
 
@@ -550,18 +551,54 @@ async def purge_expired_deletions() -> list[str]:
     return purged
 
 
+_OTP_AT_REST_PURPOSE = b"epicverse/otp-at-rest/v1"
+_LEGACY_PLAINTEXT_OTP = re.compile(r'[0-9]{6}')
+_HASHED_OTP = re.compile(r'[0-9a-f]{64}')
+
+
+def _otp_at_rest_hash(identifier: str, otp: str) -> str:
+    """HMAC-SHA256 of the OTP bound to its identifier, under a subkey derived
+    for this purpose only. Raises if the secret is missing or too short, so
+    nothing is ever stored or accepted without it."""
+    secret = settings.MFA_OTP_HASH_SECRET or ""
+    if len(secret) < 16:
+        raise RuntimeError("OTP hash secret unavailable")
+    key = hmac.new(secret.encode('utf-8'), _OTP_AT_REST_PURPOSE, hashlib.sha256).digest()
+    ident = identifier.encode('utf-8')
+    msg = len(ident).to_bytes(4, 'big') + ident + otp.encode('utf-8')
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def _otp_matches(stored: str, identifier: str, otp: str) -> bool:
+    expected = _otp_at_rest_hash(identifier, otp)
+    if _HASHED_OTP.fullmatch(stored):
+        return hmac.compare_digest(stored.encode('utf-8'), expected.encode('utf-8'))
+    # TRANSITIONAL: rows written by the previous release hold the 6-digit code
+    # in plaintext. They expire after 1 minute and are swept after 1 hour; this
+    # branch can be removed once the old release is fully drained. New rows are
+    # never written in plaintext.
+    if _LEGACY_PLAINTEXT_OTP.fullmatch(stored):
+        return hmac.compare_digest(stored.encode('utf-8'), otp.encode('utf-8'))
+    return False
+
+
 async def save_otp(identifier: str, otp: str) -> bool:
     try:
+        stored = _otp_at_rest_hash(identifier.lower(), otp)
         pool = await get_pool()
         async with pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO user_otps (identifier, otp, created_at, attempts)
-                VALUES ($1, $2, CURRENT_TIMESTAMP, 0)
-                ON CONFLICT (identifier) DO UPDATE SET
-                    otp = EXCLUDED.otp,
-                    created_at = CURRENT_TIMESTAMP,
-                    attempts = 0
-            ''', identifier.lower(), otp)
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM user_otps WHERE created_at < NOW() - INTERVAL '1 hour'"
+                )
+                await conn.execute('''
+                    INSERT INTO user_otps (identifier, otp, created_at, attempts)
+                    VALUES ($1, $2, CURRENT_TIMESTAMP, 0)
+                    ON CONFLICT (identifier) DO UPDATE SET
+                        otp = EXCLUDED.otp,
+                        created_at = CURRENT_TIMESTAMP,
+                        attempts = 0
+                ''', identifier.lower(), stored)
             return True
     except Exception as e:
         print(f"[DB] OTP Save Error: {type(e).__name__}")
@@ -599,9 +636,10 @@ async def verify_otp(identifier: str, otp: str) -> str:
                     await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
                     return 'too_many_attempts'
 
-                # Constant-time comparison of the stored and submitted codes.
-                if row['otp'] is not None and hmac.compare_digest(
-                        row['otp'].encode('utf-8'), otp.encode('utf-8')):
+                # Constant-time comparison. The expected value is derived from
+                # the submitted code (raises, so fails closed, without the secret).
+                if row['otp'] is not None and _otp_matches(
+                        row['otp'], identifier.lower(), otp):
                     await conn.execute('DELETE FROM user_otps WHERE identifier = $1', identifier.lower())
                     return 'success'
 

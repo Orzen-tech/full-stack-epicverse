@@ -53,6 +53,22 @@ class LoggerService {
   @visibleForTesting
   static String scrub(String text) => text.replaceAll(_proofPattern, redactedMarker);
 
+  /// Sentry tag form of an endpoint: query/fragment dropped and per-user
+  /// identifiers (Firebase UID, invite code) replaced by placeholders so they
+  /// never reach event tags.
+  @visibleForTesting
+  static String normalizeEndpoint(String endpoint) {
+    var path = endpoint.split(RegExp(r'[?#]')).first;
+    path = path.replaceFirstMapped(
+      RegExp(r'^(/user)/([^/]+)'),
+      (m) => m[2] == 'update-mfa' || m[2] == 'mfa' ? m[0]! : '${m[1]}/{uid}',
+    );
+    return path.replaceFirstMapped(
+      RegExp(r'^(/validate-invite)/[^/]+'),
+      (m) => '${m[1]}/{code}',
+    );
+  }
+
   /// Logs developer-facing technical details and reports exceptions to Sentry.
   static void logError(
     dynamic exception, {
@@ -105,7 +121,7 @@ class LoggerService {
         exception,
         stackTrace: stackTrace,
         withScope: (scope) {
-          if (endpoint != null) scope.setTag('endpoint', endpoint);
+          if (endpoint != null) scope.setTag('endpoint', normalizeEndpoint(endpoint));
           if (statusCode != null) scope.setTag('status_code', statusCode.toString());
           if (screenName != null) scope.setTag('screen', screenName);
           if (method != null) scope.setTag('http_method', method);

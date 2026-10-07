@@ -22,7 +22,7 @@ Future<void> main() async {
   await SentryFlutter.init(
     (options) {
       options.dsn = 'https://afe194a04c6b9f969e6a9f39a9b99299@o4511507517341696.ingest.us.sentry.io/4511822514421760';
-      options.sendDefaultPii = true;
+      options.sendDefaultPii = false;
       options.tracesSampleRate = 1.0;
     },
     appRunner: () async {

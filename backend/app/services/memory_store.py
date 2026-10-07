@@ -27,11 +27,11 @@ class SessionStore:
                 )
                 # Heartbeat check
                 await asyncio.wait_for(self.redis.ping(), timeout=timeout)
-                print(f"MemoryStore: Redis CONNECTED on {settings.REDIS_URL}")
+                print("MemoryStore: Redis connected")
             except Exception as e:
                 if self._redis_enabled:
                     print(f"\n[INFRA] Redis Offline: Degraded Mode Active (Stateless Session).")
-                    print(f"       Persistence layer disabled due to: {e}\n")
+                    print(f"       Persistence layer disabled due to: {type(e).__name__}\n")
                 self._redis_enabled = False
                 self.redis = None
         return self.redis

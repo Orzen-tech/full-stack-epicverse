@@ -1,13 +1,30 @@
+import html
+import unicodedata
 import httpx
 from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
+def _subject_safe(value, limit: int = 60) -> str:
+    """One-line, bounded text for an email subject: control chars (incl. CR/LF,
+    U+2028/2029) become spaces, whitespace is collapsed, length is capped."""
+    cleaned = "".join(
+        " " if (ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")) else ch
+        for ch in ("" if value is None else str(value))
+    )
+    return " ".join(cleaned.split())[:limit].strip()
+
+
 async def send_feedback_notification(display_name: str, user_email: str, message: str) -> bool:
     """Notifies tech@kriyora.com when a user submits feedback."""
     if not settings.SENDGRID_API_KEY:
         return False
+    subject_name = _subject_safe(display_name) or "a user"
+    # User-controlled values are HTML-escaped before entering the template.
+    display_name = html.escape("" if display_name is None else str(display_name), quote=True)
+    user_email = html.escape(str(user_email) if user_email else "(not provided)", quote=True)
+    message = html.escape("" if message is None else str(message), quote=True)
     url = "https://api.sendgrid.com/v3/mail/send"
     headers = {
         "Authorization": f"Bearer {settings.SENDGRID_API_KEY.strip()}",
@@ -15,7 +32,7 @@ async def send_feedback_notification(display_name: str, user_email: str, message
     }
     payload = {
         "personalizations": [{"to": [{"email": "tech@kriyora.com"}],
-                               "subject": f"New EpicVerse Feedback from {display_name}"}],
+                               "subject": f"New EpicVerse Feedback from {subject_name}"}],
         "from": {"email": settings.SENDGRID_FROM_EMAIL, "name": "EpicVerse AI"},
         "content": [{"type": "text/html", "value": f"""
             <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;
@@ -41,7 +58,7 @@ async def send_feedback_notification(display_name: str, user_email: str, message
             if response.status_code >= 400:
                 print(f"[SENDGRID-ERROR] Feedback notify failed: {response.status_code}")
                 return False
-            print(f"[SENDGRID-SUCCESS] Feedback notification sent for {display_name}")
+            print("[SENDGRID-SUCCESS] Feedback notification sent")
             return True
     except Exception as e:
         print(f"[SENDGRID-FATAL] Feedback notify error: {e}")

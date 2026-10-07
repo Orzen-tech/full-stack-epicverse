@@ -1,31 +1,9 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
-from collections import defaultdict
-from datetime import datetime, timedelta
 import io
 import uuid
 import json
-
-# In-memory OTP rate limiter: max 3 requests per 10 minutes per identifier.
-# F-07: /auth/send-otp and /auth/send-email-otp now use the Redis-backed,
-# multi-instance-safe check_otp_send_allowed() instead (see
-# app/services/otp_rate_limiter.py). This in-memory limiter is kept only
-# for /auth/send-password-reset, which is out of scope for this change.
-_otp_rate: dict[str, list] = defaultdict(list)
-
-def _otp_allowed(identifier: str) -> tuple[bool, int]:
-    """Returns (allowed: bool, retry_after_seconds: int)."""
-    now = datetime.utcnow()
-    cutoff = now - timedelta(minutes=10)
-    _otp_rate[identifier] = [t for t in _otp_rate[identifier] if t > cutoff]
-    if len(_otp_rate[identifier]) >= 3:
-        # Calculate remaining cooldown until oldest entry expires
-        oldest = min(_otp_rate[identifier])
-        retry_after = int((oldest + timedelta(minutes=10) - now).total_seconds())
-        return False, retry_after
-    _otp_rate[identifier].append(now)
-    return True, 0
 
 # Local modules
 from app.services.speech_to_text import transcribe_audio
@@ -263,7 +241,11 @@ async def _mark_verified_for_firebase_email(email: str) -> int:
 
 
 @router.post("/auth/send-password-reset")
-async def send_password_reset(identifier: str = Form(None), email: str = Form(None)):
+async def send_password_reset(
+    request: Request,
+    identifier: str = Form(None),
+    email: str = Form(None),
+):
     """Generates a Firebase password reset link and sends it via SendGrid.
     Uses SendGrid for reliable inbox delivery instead of Firebase's default sender.
     """
@@ -273,7 +255,9 @@ async def send_password_reset(identifier: str = Form(None), email: str = Form(No
     if not target or "@" not in target:
         raise HTTPException(status_code=422, detail="Valid email required")
 
-    allowed, retry_after = _otp_allowed(target.lower())
+    # Distributed (Postgres) limiter shared with the OTP send routes; its own
+    # namespace keeps reset requests from consuming OTP-send budget.
+    allowed, retry_after = await check_otp_send_allowed(f"pwreset:{norm_email(target)}", request)
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -324,7 +308,8 @@ async def send_email_otp_preregistration(
         )
 
     otp = str(secrets.randbelow(900000) + 100000)
-    await save_otp(target.lower(), otp)
+    if not await save_otp(target.lower(), otp):
+        raise HTTPException(status_code=500, detail="Database error while saving OTP")
     sent = await send_otp_email(target, otp)
     if not sent:
         raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
@@ -662,6 +647,14 @@ async def mfa_disable(
     return {"status": "success", "mfa_enabled": False}
 
 
+def _ws_safe(value, tail: int = 8) -> str:
+    """Client-supplied handshake values for logs: repr() escapes CR/LF and
+    control characters (no forged log lines), and only the last `tail`
+    characters are kept (bounded size, identifiers never logged in full)."""
+    s = "" if value is None else str(value)
+    return ("…" if len(s) > tail else "") + repr(s[-tail:])
+
+
 @router.websocket("/ws/realtime")
 async def websocket_realtime(
     websocket: WebSocket,
@@ -696,7 +689,7 @@ async def websocket_realtime(
 
     # Mandatory Firebase auth — reject unauthenticated/anonymous connections.
     if not uid or uid == "anonymous" or not resolved_token:
-        print(f"[WS] Auth rejected — missing uid or token (uid={uid!r} source={token_source})", flush=True)
+        print(f"[WS] Auth rejected — missing uid or token (uid={_ws_safe(uid)} source={token_source})", flush=True)
         await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
         await websocket.close(code=1008)
         return
@@ -705,16 +698,16 @@ async def websocket_realtime(
         from firebase_admin import auth as fb_auth
         decoded = fb_auth.verify_id_token(resolved_token)
         if decoded.get("uid") != uid:
-            print(f"[WS] Auth rejected — uid mismatch (claim={decoded.get('uid')!r}, query={uid!r})", flush=True)
+            print(f"[WS] Auth rejected — uid mismatch (claim={_ws_safe(decoded.get('uid'))}, query={_ws_safe(uid)})", flush=True)
             await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
             await websocket.close(code=1008)
             return
         if token_source == "query(legacy)":
             # Visibility for rollout: tells you when the last legacy client upgrades.
-            print(f"[WS] LEGACY token in query string uid={uid} — client should upgrade to header auth", flush=True)
+            print(f"[WS] LEGACY token in query string uid={_ws_safe(uid)} — client should upgrade to header auth", flush=True)
     except Exception as e:
         # Type only: the library's message for a malformed token includes the token text.
-        print(f"[WS] Auth failed uid={uid} source={token_source}: {type(e).__name__}", flush=True)
+        print(f"[WS] Auth failed uid={_ws_safe(uid)} source={token_source}: {type(e).__name__}", flush=True)
         await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
         await websocket.close(code=1008)
         return
@@ -729,7 +722,7 @@ async def websocket_realtime(
         await websocket.close(code=1008)
         return
 
-    print(f"[WS] Realtime connection uid={uid} mode={mode} session={session_id}", flush=True)
+    print(f"[WS] Realtime connection uid={_ws_safe(uid)} mode={_ws_safe(mode, 24)} session={_ws_safe(session_id, 16)}", flush=True)
     session = RealtimeSession(
         client_ws=websocket,
         uid=uid,

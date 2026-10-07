@@ -226,9 +226,10 @@ async def test_email_is_normalised_end_to_end(client, mailbox, fb, make_user):
 async def test_missing_hmac_secret_fails_closed(client, mailbox, make_user, monkeypatch):
     tok = await make_user("uidA", VICTIM)
     proof = await signup_proof(client, mailbox, VICTIM)  # issued while the secret was configured
+    # OTP issued while the secret was configured (R2: sending fails closed without it)
+    await client.post(f"{API}/auth/send-email-otp", data={"identifier": "second@example.com"})
     monkeypatch.setattr(settings, "MFA_OTP_HASH_SECRET", "")
     # verify-otp refuses BEFORE it consumes the code
-    await client.post(f"{API}/auth/send-email-otp", data={"identifier": "second@example.com"})
     r = await client.post(f"{API}/auth/verify-otp", data={
         "identifier": "second@example.com", "otp": mailbox.last_otp("second@example.com")})
     assert r.status_code == 503 and "email_verification_proof" not in r.text

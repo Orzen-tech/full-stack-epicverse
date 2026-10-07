@@ -92,7 +92,8 @@ async def health():
         await pool.fetchval("SELECT 1")
         result["database"] = f"connected ({round((time.monotonic()-t0)*1000)}ms)"
     except Exception as e:
-        result["database"] = f"error: {str(e)}"
+        print(f"[HEALTH] database check failed: {type(e).__name__}", flush=True)
+        result["database"] = "error"
         result["status"] = "degraded"
 
     # Check Redis
@@ -105,7 +106,8 @@ async def health():
             await redis.ping()
             result["redis"] = f"connected ({round((time.monotonic()-t0)*1000)}ms)"
     except Exception as e:
-        result["redis"] = f"error: {str(e)}"
+        print(f"[HEALTH] redis check failed: {type(e).__name__}", flush=True)
+        result["redis"] = "error"
 
     return result
 
