@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_jailbreak_detection/flutter_jailbreak_detection.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
-import 'otp_verification_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import '../../providers/user_provider.dart';
@@ -15,6 +14,7 @@ import '../../models/user_model.dart';
 import '../../core/network/api_config.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/security/mfa_flow.dart';
+import '../../core/security/email_verification_flow.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -219,26 +219,20 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
 
             final emailVerified = status?.emailVerified ?? (data['email_verified'] ?? false);
             if (!emailVerified) {
-              debugPrint('[EpicVerse][SPLASH] email_verified=false → OTP screen');
+              // F-09 H1: authenticated, server-confirmed verification of THIS
+              // signed-in account. On success the normal start-up continues.
+              debugPrint('[EpicVerse][SPLASH] email_verified=false → verification flow');
               if (!mounted) return;
-              final navigator = Navigator.of(context);
-              navigator.pushReplacement(
-                PageRouteBuilder(
-                  transitionDuration: const Duration(milliseconds: 800),
-                  pageBuilder: (ctx, a, b) => OtpVerificationScreen(
-                    email: firebaseUser.email ?? '',
-                    onVerified: () {
-                      navigator.pushAndRemoveUntil(
-                        MaterialPageRoute(builder: (_) => const DashboardScreen()),
-                        (route) => false,
-                      );
-                    },
-                  ),
-                  transitionsBuilder: (_, animation, __, child) =>
-                      FadeTransition(opacity: animation, child: child),
-                ),
-              );
-              return;
+              final verified = await EmailVerificationFlow.run(Navigator.of(context));
+              if (!verified) {
+                await MfaFlow.signOut();
+                await prefs.setBool('isLoggedIn', false);
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                );
+                return;
+              }
             }
 
             // MFA sessions live in memory only, so a restored Firebase

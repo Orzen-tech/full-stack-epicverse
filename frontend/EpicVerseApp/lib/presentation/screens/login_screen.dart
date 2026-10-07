@@ -16,6 +16,7 @@ import 'create_profile_screen.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/security/mfa_flow.dart';
+import '../../core/security/email_verification_flow.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -116,24 +117,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           // Block login if OTP was never verified (app closed mid-registration)
           final emailVerified = status?.emailVerified ?? (res.data['email_verified'] ?? false);
           if (!emailVerified) {
-            debugPrint('[EpicVerse][LOGIN] email_verified=false → OTP screen');
+            // F-09 H1: verification is an authenticated, server-confirmed
+            // step for THIS signed-in account; on success normal login
+            // simply continues below.
+            debugPrint('[EpicVerse][LOGIN] email_verified=false → verification flow');
             if (!mounted) return;
-            final navigator = Navigator.of(context);
-            navigator.pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => OtpVerificationScreen(
-                  email: firebaseUser.email ?? '',
-                  onVerified: () async {
-                    await prefs.setBool('isLoggedIn', true);
-                    navigator.pushAndRemoveUntil(
-                      MaterialPageRoute(builder: (_) => const DashboardScreen()),
-                      (route) => false,
-                    );
-                  },
-                ),
-              ),
-            );
-            return;
+            final verified = await EmailVerificationFlow.run(Navigator.of(context));
+            if (!verified) {
+              await MfaFlow.signOut();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Please verify your email to continue. Sign in again to retry.'),
+                    backgroundColor: Colors.redAccent,
+                  ),
+                );
+              }
+              return;
+            }
           }
 
           if (status != null && status.mfaEnabled && !status.mfaSessionValid) {
@@ -164,7 +165,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 data: FormData.fromMap({'identifier': firebaseUser.email}),
               );
             } catch (e) {
-              debugPrint('[EpicVerse][LOGIN] MFA OTP send failed: $e');
+              debugPrint('[EpicVerse][LOGIN] MFA OTP send failed: ${e.runtimeType}');
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
@@ -182,6 +183,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 builder: (_) => OtpVerificationScreen(
                   email: firebaseUser.email ?? '',
                   isMfaVerification: true,
+                  // Pre-F-09 backend only: the old send-otp/verify-otp pair.
+                  onSubmitOtp: (otp) async =>
+                      (await EmailOtp.verify(firebaseUser.email ?? '', otp)).error,
+                  onResend: () => EmailOtp.resend(firebaseUser.email ?? ''),
                   onVerified: () async {
                     // Finalize login state only after MFA passes
                     final sessionId = await SessionManager.getSessionId();
@@ -236,7 +241,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
            );
            debugPrint('[EpicVerse][LOGIN] /auth/send-otp status=${otpRes.statusCode}');
         } catch (e) {
-           debugPrint("OTP Send failed: $e");
+           debugPrint("OTP Send failed: ${e.runtimeType}");
            if (mounted) {
              ScaffoldMessenger.of(context).showSnackBar(
                const SnackBar(content: Text("Failed to send verification code. Please try again."), backgroundColor: Colors.redAccent),
@@ -248,14 +253,32 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         // Capture NavigatorState before pushReplacement — LoginScreen will be
         // disposed, but this NavigatorState remains valid for onVerified.
         final navigator = Navigator.of(context);
+        final recoveryEmail = firebaseUser.email ?? '';
+        // F-09 H1: the one-time proof from verify-otp travels to
+        // CreateProfileScreen in memory only (a closure variable), is handed
+        // over once and then dropped.
+        String? recoveryProof;
         navigator.pushReplacement(
           MaterialPageRoute(
             builder: (_) => OtpVerificationScreen(
-              email: loggedInUser.email,
+              email: recoveryEmail,
+              onSubmitOtp: (otp) async {
+                final result = await EmailOtp.verify(recoveryEmail, otp);
+                if (result.error == null) recoveryProof = result.proof;
+                return result.error;
+              },
+              onResend: () => EmailOtp.resend(recoveryEmail),
               onVerified: () {
                 debugPrint('[EpicVerse][LOGIN] OTP verified → CreateProfile');
+                final proof = recoveryProof;
+                recoveryProof = null;
                 navigator.pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const CreateProfileScreen(emailAlreadyVerified: true)),
+                  MaterialPageRoute(
+                    builder: (_) => CreateProfileScreen(
+                      emailAlreadyVerified: true,
+                      emailVerificationProof: proof,
+                    ),
+                  ),
                   (route) => false,
                 );
               },

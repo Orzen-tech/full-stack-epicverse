@@ -10,12 +10,14 @@ import 'dart:convert';
 import 'dart:io';
 import '../../providers/user_provider.dart';
 import '../../models/user_model.dart';
-import '../../core/network/api_config.dart';
+import '../../core/network/api_client.dart';
 import '../../core/network/session_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
+import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_handler.dart';
+import '../../core/security/email_verification_flow.dart';
 import '../../core/utils/password_validator.dart';
 import '../widgets/password_requirements.dart';
 
@@ -24,7 +26,16 @@ class CreateProfileScreen extends ConsumerStatefulWidget {
   // the server OTP for that user's email, and found no backend profile.
   final bool emailAlreadyVerified;
 
-  const CreateProfileScreen({super.key, this.emailAlreadyVerified = false});
+  // F-09 H1: the one-time proof /auth/verify-otp returned for this email.
+  // Memory only: it is handed over through the constructor (never stored,
+  // logged or put in a URL) and dropped as soon as it has been presented.
+  final String? emailVerificationProof;
+
+  const CreateProfileScreen({
+    super.key,
+    this.emailAlreadyVerified = false,
+    this.emailVerificationProof,
+  });
 
   @override
   ConsumerState<CreateProfileScreen> createState() => _CreateProfileScreenState();
@@ -45,12 +56,14 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   bool _isLoading = false;
   bool _acceptedPrivacy = false;
   bool _acceptedTerms = false;
-  final Dio _dio = Dio();
   File? _profileImage;
   final ImagePicker _picker = ImagePicker();
 
   // Email inline verification
   bool _emailVerified = false;
+  // One-time proof for the verified email (F-09 H1). Memory only; cleared when
+  // the email changes, when the screen is disposed and once it has been used.
+  String? _emailProof;
   bool _isVerifyingEmail = false;
   bool _showOtpRow = false;
   String? _emailOtpError;
@@ -70,6 +83,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     if (_isRecovery) {
       // Set before the email listener is attached so it isn't reset.
       _emailController.text = FirebaseAuth.instance.currentUser?.email ?? '';
+      // Login only gets here after the server accepted this email's OTP. The
+      // proof is optional (a pre-H1 backend returns none): the server, not
+      // this flag, decides, and a missing/expired proof falls back to the
+      // authenticated verification flow before the Dashboard opens.
+      _emailProof = widget.emailVerificationProof;
       _emailVerified = _emailController.text.isNotEmpty;
     }
     _inviteController.addListener(_onInviteChanged);
@@ -96,10 +114,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     final inviteCode = "EPIC-$rawCode";
     try {
       debugPrint('[EpicVerse][REG] GET /validate-invite/$inviteCode');
-      final response = await _dio.get(
-        '${ApiConfig.apiUrl}/validate-invite/$inviteCode',
-        options: Options(headers: ApiConfig.headers),
-      );
+      final response = await apiClient.get('/validate-invite/$inviteCode');
       final isValid = response.statusCode == 200 && response.data['valid'] == true;
       debugPrint('[EpicVerse][REG] Invite check status=${response.statusCode} valid=$isValid');
       if (mounted) {
@@ -120,10 +135,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
   Future<bool> _checkInviteCodeValid(String inviteCode) async {
     try {
-      final response = await _dio.get(
-        '${ApiConfig.apiUrl}/validate-invite/$inviteCode',
-        options: Options(headers: ApiConfig.headers),
-      );
+      final response = await apiClient.get('/validate-invite/$inviteCode');
       return response.statusCode == 200 && response.data['valid'] == true;
     } catch (_) {
       return false;
@@ -132,6 +144,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
   @override
   void dispose() {
+    _emailProof = null;
     _cooldownTimer?.cancel();
     _inviteController.removeListener(_onInviteChanged);
     _emailController.removeListener(_onEmailChanged);
@@ -159,6 +172,8 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   }
 
   void _onEmailChanged() {
+    // A proof is valid only for the exact email it was issued for.
+    _emailProof = null;
     if (_showOtpRow || _emailVerified) {
       setState(() {
         _showOtpRow = false;
@@ -177,16 +192,18 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     }
     setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
     try {
-      await _dio.post(
-        '${ApiConfig.apiUrl}/auth/send-email-otp',
+      await apiClient.post(
+        '/auth/send-email-otp',
         data: FormData.fromMap({'identifier': email}),
-        options: Options(headers: ApiConfig.headers),
       );
       setState(() => _showOtpRow = true);
       _startCooldown();
-    } on DioException catch (e) {
-      if (e.response?.statusCode == 429) {
-        final retryAfterStr = e.response?.headers.value('retry-after');
+    } on AppException catch (e) {
+      if (e.statusCode == 429) {
+        final original = e.originalException;
+        final retryAfterStr = original is DioException
+            ? original.response?.headers.value('retry-after')
+            : null;
         final retrySeconds = int.tryParse(retryAfterStr ?? '') ?? 600;
         final retryMins = (retrySeconds / 60).ceil();
         setState(() => _resendCooldown = retrySeconds);
@@ -214,20 +231,21 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     if (otp.length < 6) return;
     setState(() { _isVerifyingEmail = true; _emailOtpError = null; });
     try {
-      await _dio.post(
-        '${ApiConfig.apiUrl}/auth/verify-otp',
-        data: FormData.fromMap({'identifier': _emailController.text.trim(), 'otp': otp}),
-        options: Options(headers: ApiConfig.headers),
-      );
+      final result = await EmailOtp.verify(_emailController.text.trim(), otp);
+      if (result.error != null) {
+        setState(() => _emailOtpError = 'Invalid or expired code. Try again.');
+        for (final c in _otpControllers) c.clear();
+        _otpFocusNodes[0].requestFocus();
+        return;
+      }
       setState(() {
         _emailVerified = true;
         _showOtpRow = false;
+        // Held in memory only. Null from a pre-H1 backend, which verifies
+        // server-side instead.
+        _emailProof = result.proof;
       });
       for (final c in _otpControllers) c.clear();
-    } catch (e) {
-      setState(() => _emailOtpError = 'Invalid or expired code. Try again.');
-      for (final c in _otpControllers) c.clear();
-      _otpFocusNodes[0].requestFocus();
     } finally {
       if (mounted) setState(() => _isVerifyingEmail = false);
     }
@@ -317,7 +335,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       debugPrint('[EpicVerse][REG] FirebaseAuthException code=${e.code}');
       _showError(e.message ?? 'Registration failed.');
     } catch (e) {
-      debugPrint('[EpicVerse][REG] Registration error: $e');
+      debugPrint('[EpicVerse][REG] Registration error: ${e.runtimeType}');
       _showError(e.toString());
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -331,17 +349,14 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
-      await _dio.get(
-        '${ApiConfig.apiUrl}/user/${user.uid}',
-        options: Options(headers: await ApiConfig.authHeaders()),
-      );
+      await apiClient.get('/user/${user.uid}');
       debugPrint('[EpicVerse][REG] Profile already exists → sign out');
       await FirebaseAuth.instance.signOut();
       _showError('This email is already registered. Please log in instead.');
       return;
-    } on DioException catch (e) {
-      if (e.response?.statusCode != 404) {
-        debugPrint('[EpicVerse][REG] Profile check failed status=${e.response?.statusCode}');
+    } on AppException catch (e) {
+      if (e.statusCode != 404) {
+        debugPrint('[EpicVerse][REG] Profile check failed status=${e.statusCode}');
         _showError('Could not reach the server. Please try again.');
         return;
       }
@@ -374,7 +389,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     try {
       // Sync user — consumes (marks used) the invite code.
       debugPrint('[EpicVerse][REG] Step 3: POST /sync-user');
-      await _dio.post('${ApiConfig.apiUrl}/sync-user', data: {
+      await apiClient.post('/sync-user', data: {
         "firebase_id": user.uid,
         "display_name": model.displayName,
         "email": model.email,
@@ -382,18 +397,38 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         "invite_code": inviteCode,
         "profile_picture": base64Image,
         "session_id": sessionId,
-      }, options: Options(headers: await ApiConfig.authHeaders()));
+      });
       debugPrint('[EpicVerse][REG] /sync-user OK');
 
-      // Mark email verified in DB (email was confirmed inline before registration)
+      // F-09 H1: present the one-time proof. The server takes UID and email
+      // from the Firebase token only. The proof is dropped here whether or
+      // not it worked: it is single-use and must not outlive this call.
+      final proof = _emailProof;
+      _emailProof = null;
+      var verified = false;
       try {
-        await _dio.post(
-          '${ApiConfig.apiUrl}/auth/mark-verified',
-          options: Options(headers: await ApiConfig.authHeaders()),
+        await apiClient.post(
+          '/auth/mark-verified',
+          data: proof == null ? null : FormData.fromMap({'proof': proof}),
         );
-        debugPrint('[EpicVerse][REG] mark-verified OK → Dashboard');
+        verified = true;
+        debugPrint('[EpicVerse][REG] mark-verified OK');
       } catch (e) {
-        debugPrint('[EpicVerse][REG] mark-verified error (non-fatal): $e');
+        // Never print the exception: the request carried the proof.
+        debugPrint('[EpicVerse][REG] mark-verified failed: ${e.runtimeType}');
+      }
+      if (!verified) {
+        // No proof (or it expired / was already used): verify through the
+        // authenticated flow BEFORE the Dashboard can open.
+        if (!mounted) return;
+        verified = await EmailVerificationFlow.run(Navigator.of(context));
+      }
+      if (!verified) {
+        debugPrint('[EpicVerse][REG] email not verified → sign out');
+        await FirebaseAuth.instance.signOut();
+        _showError('Your account was created, but your email is not verified yet. '
+            'Please log in to finish verifying it.');
+        return;
       }
 
       ref.read(userProvider.notifier).setUser(model);
@@ -408,7 +443,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         );
       }
     } catch (e, st) {
-      debugPrint('[EpicVerse][REG] _completeRegistration error: $e');
+      debugPrint('[EpicVerse][REG] _completeRegistration error: ${e.runtimeType}');
       if (mounted) {
         ErrorHandler.handleError(
           e,

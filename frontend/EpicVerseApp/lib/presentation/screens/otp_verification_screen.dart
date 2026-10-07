@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:dio/dio.dart';
 import '../../core/constants/app_colors.dart';
-import '../../core/network/api_config.dart';
 import '../../core/network/mfa_session_manager.dart';
 import '../widgets/network_background.dart';
 import 'welcome_screen.dart';
@@ -33,7 +32,8 @@ class OtpVerificationScreen extends StatefulWidget {
     this.isMfaVerification = false,
     this.onSubmitOtp,
     this.onResend,
-  });
+  }) : assert(phone != null || onSubmitOtp != null,
+            'An email OTP screen must supply onSubmitOtp (verification runs over the pinned client).');
 
   @override
   State<OtpVerificationScreen> createState() => _OtpVerificationScreenState();
@@ -137,29 +137,13 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         await FirebaseAuth.instance.signInWithCredential(credential);
         _isVerified = true;
         widget.onVerified();
-      } else if (widget.email != null) {
-        // --- CUSTOM EMAIL VERIFICATION ---
-        debugPrint('[EpicVerse][OTP] POST /auth/verify-otp');
-        final dio = Dio();
-        final formData = FormData.fromMap({
-          'identifier': widget.email,
-          'otp': otp,
-        });
-
-        final response = await dio.post(
-          '${ApiConfig.apiUrl}/auth/verify-otp',
-          data: formData,
-        );
-
-        debugPrint('[EpicVerse][OTP] /auth/verify-otp status=${response.statusCode}');
-        if (response.statusCode == 200) {
-          _isVerified = true;
-          debugPrint('[EpicVerse][OTP] Verification SUCCESS');
-          widget.onVerified();
-        }
       }
+      // Email codes are always verified by the caller through `onSubmitOtp`
+      // (EmailOtp / EmailVerificationFlow / MfaFlow), over the pinned client.
     } catch (e, st) {
-      debugPrint('[EpicVerse][OTP] Verify error: $e');
+      // The exception text is deliberately not printed: nothing near an OTP
+      // may end up in a log.
+      debugPrint('[EpicVerse][OTP] Verify error: ${e.runtimeType}');
       if (mounted) {
         // An HTTP 400 from /auth/verify-otp means the backend correctly
         // rejected a wrong or expired code — expected user-input validation,
@@ -200,26 +184,9 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         // Firebase handles resending via the verifyPhoneNumber call again
         // For simplicity, we suggest going back or we could trigger another verify call here
         _showSnackBar("Please go back and request a new code.");
-      } else if (widget.email != null) {
-        final dio = Dio();
-        final user = FirebaseAuth.instance.currentUser;
-        final idToken = await user?.getIdToken();
-        debugPrint('[EpicVerse][OTP] POST /auth/send-otp (resend)');
-        final formData = FormData.fromMap({'identifier': widget.email});
-        final res = await dio.post(
-          '${ApiConfig.apiUrl}/auth/send-otp',
-          data: formData,
-          options: Options(headers: {
-            'Content-Type': 'application/json',
-            if (idToken != null) 'Authorization': 'Bearer $idToken',
-          }),
-        );
-        debugPrint('[EpicVerse][OTP] /auth/send-otp resend status=${res.statusCode}');
-        _startTimer(); // Restart countdown on resend
-        _showSnackBar("A new code has been sent to your email.");
       }
     } on DioException catch (e) {
-      debugPrint('[EpicVerse][OTP] Resend error: $e');
+      debugPrint('[EpicVerse][OTP] Resend error: ${e.runtimeType}');
       if (e.response?.statusCode == 429) {
         // Rate limited - parse Retry-After header
         final retryAfter = int.tryParse(e.response?.headers.value('retry-after') ?? '600') ?? 600;
@@ -230,7 +197,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         _showSnackBar("Failed to resend code.");
       }
     } catch (e) {
-      debugPrint('[EpicVerse][OTP] Resend error: $e');
+      debugPrint('[EpicVerse][OTP] Resend error: ${e.runtimeType}');
       _showSnackBar("Failed to resend code.");
     } finally {
       if (mounted) setState(() => _isLoading = false);
