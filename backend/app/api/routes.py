@@ -1,5 +1,5 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -39,13 +39,17 @@ from app.services.user_db import (
     save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified_for_uid,
     verify_session, update_session_id,
     record_email_verification_proof, mark_email_verified_with_proof,
+    norm_email, email_proof_available, issue_email_verification_proof,
+    consume_email_verification_proof,
 )
+from app.core.config import settings
 from app.services.mfa_challenge import (
-    MfaConfigError, PURPOSE_LOGIN_MFA, PURPOSE_ENABLE_MFA, SESSION_LIFETIME, CHALLENGE_LIFETIME,
+    MfaConfigError, PURPOSE_LOGIN_MFA, PURPOSE_ENABLE_MFA, PURPOSE_VERIFY_EMAIL,
+    SESSION_LIFETIME, CHALLENGE_LIFETIME,
     RESULT_SUCCESS, RESULT_TOO_MANY_ATTEMPTS,
     auth_time_from_claims, signed_in_recently, create_mfa_challenge, invalidate_mfa_challenge,
-    verify_login_challenge, confirm_enable_mfa, validate_mfa_session, revoke_mfa_session,
-    disable_mfa_and_revoke_state,
+    verify_login_challenge, confirm_enable_mfa, confirm_email_verification, validate_mfa_session,
+    revoke_mfa_session, disable_mfa_and_revoke_state,
 )
 from app.api.dependencies import (
     get_current_user, require_mfa_if_enabled, require_verified_mfa_user, mfa_security_error,
@@ -144,7 +148,7 @@ async def send_otp(
     """
     log_app_check_status(request, "send-otp")  # Monitor-only, see Finding #4
 
-    identifier = identifier or email
+    identifier = norm_email(identifier or email)
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
 
@@ -183,12 +187,28 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     Firebase account exists, so a missing Firebase user is not an error
     here. `/sync-user` remains the sole path that may create the SQL row,
     and only with a server-validated invite.
+
+    F-09 H1: this endpoint is unauthenticated, so it must never decide WHICH
+    account becomes verified. A correct OTP for an email address only earns
+    the caller a random one-time proof, returned once in the response body.
+    The proof is later presented to the authenticated /auth/mark-verified,
+    which takes UID and email from the Firebase token. Only with
+    EMAIL_VERIFY_LEGACY_COMPAT (a temporary rollout switch for old app
+    builds, off by default) does this route still mark the Firebase account
+    that owns the email.
     """
     log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
 
-    identifier = identifier or email
+    identifier = norm_email(identifier or email)
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
+
+    legacy_compat = settings.EMAIL_VERIFY_LEGACY_COMPAT
+    is_email = "@" in identifier
+    if is_email and not legacy_compat and not email_proof_available():
+        # Fail closed BEFORE the OTP is consumed, so a misconfigured server
+        # does not burn the user's code.
+        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
 
     result = await verify_otp(identifier, otp)
     if result == 'too_many_attempts':
@@ -196,14 +216,21 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     if result != 'success':
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # Mark only the live Firebase account's own profile as verified. If no
-    # profile could be marked yet (signup / recovery before /sync-user),
-    # leave a single-use server-side proof for /auth/mark-verified.
-    if "@" in identifier:
-        if not await _mark_verified_for_firebase_email(identifier):
-            await record_email_verification_proof(identifier)
+    body = {"status": "success", "message": "OTP verified"}
+    if is_email:
+        proof = await issue_email_verification_proof(identifier)
+        if proof:
+            body["email_verification_proof"] = proof
+        elif not legacy_compat:
+            raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
+        if legacy_compat:
+            # Legacy rollout path (old app builds). Counted without any
+            # identifying data so the switch can be retired safely.
+            print("[EMAIL-VERIFY] legacy_compat path=verify_otp_mark", flush=True)
+            if not await _mark_verified_for_firebase_email(identifier):
+                await record_email_verification_proof(identifier)
 
-    return {"status": "success", "message": "OTP verified"}
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
 
 async def _mark_verified_for_firebase_email(email: str) -> int:
@@ -272,7 +299,7 @@ async def send_email_otp_preregistration(
     import secrets
     from app.services.email_service import send_otp_email
 
-    target = (identifier or email or "").strip()
+    target = norm_email(identifier or email)
     if not target or "@" not in target:
         raise HTTPException(status_code=422, detail="Valid email required")
 
@@ -292,21 +319,109 @@ async def send_email_otp_preregistration(
     return {"status": "sent"}
 
 
+EMAIL_PROOF_INVALID = "EMAIL_PROOF_INVALID"
+
+
 @router.post("/auth/mark-verified")
-async def mark_email_verified_route(current_user: dict = Depends(get_current_user)):
-    """Sets email_verified=TRUE for the authenticated user, only with a
-    server-side proof that this email passed /auth/verify-otp in the last
-    30 minutes (signup verifies the email before the profile exists)."""
+async def mark_email_verified_route(
+    current_user: dict = Depends(get_current_user),
+    proof: str = Form(None),
+):
+    """Sets email_verified=TRUE for the authenticated user, only with the
+    one-time proof that /auth/verify-otp returned to this client.
+
+    F-09 H1: UID and email come ONLY from the verified Firebase ID token;
+    nothing in the request body can name another account, another email or
+    set email_verified. The proof is consumed atomically with the update, so
+    it works once, for the email it was issued for, within 15 minutes. Every
+    failure returns the same 403 so callers cannot tell which check failed.
+    Without a proof this endpoint verifies nothing, except during the
+    temporary EMAIL_VERIFY_LEGACY_COMPAT rollout window for old app builds.
+    """
     uid = current_user.get("uid")
-    email = current_user.get("email")
+    email = norm_email(current_user.get("email"))
     if not uid or not email:
         raise HTTPException(status_code=400, detail="No email on token")
     row = await get_user(uid)
     if row and row.get("email_verified"):
         return {"status": "ok"}
-    if await mark_email_verified_with_proof(uid, email) != 1:
-        raise HTTPException(status_code=403, detail="Email verification required")
+    if proof:
+        verified = await consume_email_verification_proof(uid, email, proof)
+    elif settings.EMAIL_VERIFY_LEGACY_COMPAT:
+        print("[EMAIL-VERIFY] legacy_compat path=mark_verified_no_proof", flush=True)
+        verified = await mark_email_verified_with_proof(uid, email) == 1
+    else:
+        verified = False
+    if not verified:
+        raise HTTPException(status_code=403, detail={
+            "code": EMAIL_PROOF_INVALID, "message": "Email verification required"})
     return {"status": "ok"}
+
+
+@router.post("/auth/email/verify-request")
+async def email_verify_request(request: Request, current_user: dict = Depends(get_current_user)):
+    """F-09 H1: starts email verification for the signed-in user.
+
+    UID and email come only from the Firebase token. The code is sent to the
+    email stored on this user's row, and only if that matches the token's
+    email, so a code can never be steered to a different address. Needs no
+    MFA session: an unverified account cannot have MFA enabled.
+    """
+    uid = current_user.get("uid")
+    token_email = norm_email(current_user.get("email"))
+    if not uid or "@" not in token_email:
+        raise HTTPException(status_code=400, detail="No email on token")
+    row = await get_user(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    if row.get("email_verified"):
+        return {"status": "already_verified"}
+    db_email = norm_email(row.get("email"))
+    if db_email != token_email:
+        raise HTTPException(status_code=409, detail={
+            "code": "EMAIL_MISMATCH", "message": "Email does not match the signed-in account."})
+
+    allowed, retry_after = await check_otp_send_allowed(db_email, request)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please wait {retry_after // 60} minutes.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    from app.services.email_service import send_otp_email
+    try:
+        challenge_id, otp = await create_mfa_challenge(uid, db_email, PURPOSE_VERIFY_EMAIL)
+    except MfaConfigError:
+        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
+    if not await send_otp_email(db_email, otp, valid_minutes=int(CHALLENGE_LIFETIME.total_seconds() // 60)):
+        await invalidate_mfa_challenge(challenge_id, uid)
+        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+    return {"status": "sent", "challenge_id": challenge_id,
+            "expires_in": int(CHALLENGE_LIFETIME.total_seconds())}
+
+
+@router.post("/auth/email/verify-confirm")
+async def email_verify_confirm(
+    challenge_id: str = Form(...),
+    otp: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """F-09 H1: completes email verification for the signed-in user. Only the
+    authenticated UID can be verified, only with a `verify_email` challenge
+    that was created for that UID and email."""
+    if not _mfa_otp_valid(otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    uid = current_user.get("uid")
+    token_email = norm_email(current_user.get("email"))
+    if not uid or "@" not in token_email:
+        raise HTTPException(status_code=400, detail="No email on token")
+    try:
+        result = await confirm_email_verification(uid, challenge_id, otp, token_email)
+    except MfaConfigError:
+        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
+    if result != RESULT_SUCCESS:
+        _raise_for_result(result)
+    return {"status": "verified"}
 
 
 @router.post("/auth/update-session")

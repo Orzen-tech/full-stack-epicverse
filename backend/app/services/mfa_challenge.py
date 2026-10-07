@@ -21,6 +21,10 @@ RECENT_SIGN_IN = timedelta(minutes=15)
 
 PURPOSE_LOGIN_MFA = "login_mfa"
 PURPOSE_ENABLE_MFA = "enable_mfa"
+# F-09 H1: email-ownership verification for an already-authenticated user.
+# Reuses the challenge engine (HMAC'd OTP, UID-bound, single use, 5 attempts);
+# it is not an MFA factor and never creates an MFA session.
+PURPOSE_VERIFY_EMAIL = "verify_email"
 
 RESULT_SUCCESS = "success"
 RESULT_WRONG_OTP = "wrong_otp"
@@ -161,6 +165,45 @@ async def confirm_enable_mfa(uid: str, challenge_id: str, otp: str,
                 return result, None
             await conn.execute("UPDATE users SET mfa_enabled = TRUE WHERE uid = $1", uid)
             return result, await _create_session(conn, uid, auth_time)
+
+
+class _EmailVerifyRollback(Exception):
+    """Internal: aborts the confirm transaction so a half-applied success
+    (challenge consumed but no row verified) can never be committed."""
+
+
+async def confirm_email_verification(uid: str, challenge_id: str, otp: str, token_email: str) -> str:
+    """Verifies ONE user's email: only the authenticated UID, only if its SQL
+    row holds the token's email, and only with a correct, unexpired,
+    unconsumed `verify_email` challenge created for that same UID and email.
+    The challenge is consumed and email_verified set in one transaction.
+    `uid` and `token_email` must come from a verified Firebase ID token."""
+    email = (token_email or "").strip().lower()
+    if not uid or "@" not in email:
+        return RESULT_INVALID
+    secret = _secret()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow("SELECT email FROM users WHERE uid = $1 FOR UPDATE", uid)
+                if row is None or (row["email"] or "").strip().lower() != email:
+                    return RESULT_INVALID
+                challenge = await conn.fetchrow(
+                    "SELECT uid, identifier FROM mfa_login_challenges WHERE challenge_id = $1", challenge_id)
+                if (challenge is not None and challenge["uid"] == uid and not hmac.compare_digest(
+                        challenge["identifier"], _hmac(secret, f"mfa-identifier:{email}"))):
+                    return RESULT_INVALID
+                result = await _consume_challenge(conn, uid, challenge_id, PURPOSE_VERIFY_EMAIL, otp, secret)
+                if result != RESULT_SUCCESS:
+                    return result  # wrong attempts are recorded and committed
+                status = await conn.execute(
+                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2", uid, email)
+                if int(status.split()[-1]) != 1:
+                    raise _EmailVerifyRollback()
+                return RESULT_SUCCESS
+        except _EmailVerifyRollback:
+            return RESULT_INVALID
 
 
 async def validate_mfa_session(raw_token: str | None, uid: str, auth_time: datetime | None) -> bool:

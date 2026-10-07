@@ -1,6 +1,10 @@
+import contextlib
 import hashlib
 import hmac
+import secrets
+from datetime import timedelta
 
+import asyncpg
 from pydantic import BaseModel
 from app.core.config import settings
 from app.services.db_pool import get_pool
@@ -24,10 +28,58 @@ class UserRecord(BaseModel):
         return self.firebase_id or self.uid
 
 
+# ---------------------------------------------------------------------------
+# Startup schema work must never queue live traffic.
+#
+# Even a no-op `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an
+# ACCESS EXCLUSIVE lock, and `CREATE INDEX IF NOT EXISTS` a SHARE lock. If a
+# long transaction already holds a conflicting lock, the DDL waits, and every
+# ordinary query on that table queues behind the waiting DDL (up to the pool's
+# 15 s command_timeout). Startup therefore gives up quickly instead: each
+# startup statement runs in its OWN short transaction with a transaction-local
+# lock_timeout. `SET LOCAL` is discarded automatically at COMMIT or ROLLBACK, so
+# it can never remain on the pooled connection or reach a runtime query, and
+# every statement still holds its locks exactly as long as it did in autocommit.
+# The pool's command_timeout is deliberately left unchanged.
+# ---------------------------------------------------------------------------
+INIT_DB_LOCK_TIMEOUT_MS = 750
+
+
+class SchemaLockTimeout(Exception):
+    """init_db gave up because a schema lock was not granted within
+    INIT_DB_LOCK_TIMEOUT_MS. Nothing was half-applied: the statement's
+    transaction was rolled back, and all startup schema work is idempotent, so
+    the next start simply completes it."""
+
+
+@contextlib.asynccontextmanager
+async def _startup_schema_txn(conn, label: str):
+    """One explicit transaction with a transaction-local lock_timeout. A lock
+    that cannot be obtained in time rolls everything in the block back and
+    raises SchemaLockTimeout; the message and log contain only the statement
+    text prefix (no credentials, hosts or data)."""
+    try:
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL lock_timeout = {int(INIT_DB_LOCK_TIMEOUT_MS)}")
+            yield
+    except asyncpg.exceptions.LockNotAvailableError:
+        print(f"[DB] init_db gave up: a schema lock was not available within "
+              f"{INIT_DB_LOCK_TIMEOUT_MS} ms ({label}). Live traffic was not held longer than "
+              f"that; startup schema work is idempotent and completes on the next start.", flush=True)
+        raise SchemaLockTimeout(
+            f"schema lock not available within {INIT_DB_LOCK_TIMEOUT_MS} ms ({label})") from None
+
+
+async def _ddl(conn, sql: str) -> None:
+    """Runs ONE startup schema statement under _startup_schema_txn."""
+    async with _startup_schema_txn(conn, " ".join(sql.split())[:70]):
+        await conn.execute(sql)
+
+
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS users (
                 uid TEXT PRIMARY KEY,
                 display_name TEXT,
@@ -37,16 +89,16 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture TEXT")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_id TEXT")
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture TEXT")
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS session_id TEXT")
         # Soft-delete support: a non-null timestamp means the account is
         # scheduled for permanent deletion 30 days later. A subsequent
         # authenticated sign-in auto-clears this column (grace period).
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE")
-        await conn.execute('''
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMP NULL")
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT")
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE")
+        await _ddl(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS user_otps (
                 identifier TEXT PRIMARY KEY,
                 otp TEXT,
@@ -54,11 +106,11 @@ async def init_db():
                 attempts INT NOT NULL DEFAULT 0
             )
         ''')
-        await conn.execute("ALTER TABLE user_otps ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0")
+        await _ddl(conn, "ALTER TABLE user_otps ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0")
         # Schema must match the columns read by validate_invite_code() and
         # mark_invite_code_used() below. Production rows already have these
         # columns; this DDL only fires on a fresh DB (e.g. staging / DR).
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS invite_codes (
                 code TEXT PRIMARY KEY,
                 current_uses INT NOT NULL DEFAULT 0,
@@ -69,11 +121,11 @@ async def init_db():
         ''')
         # Belt-and-braces: if an older deploy left the legacy columns, make
         # sure the new ones exist too. IF NOT EXISTS makes these idempotent.
-        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS current_uses INT NOT NULL DEFAULT 0")
-        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS max_uses INT NOT NULL DEFAULT 1")
-        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL")
-        await conn.execute("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        await conn.execute('''
+        await _ddl(conn, "ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS current_uses INT NOT NULL DEFAULT 0")
+        await _ddl(conn, "ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS max_uses INT NOT NULL DEFAULT 1")
+        await _ddl(conn, "ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL")
+        await _ddl(conn, "ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS user_feedback (
                 id SERIAL PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -84,7 +136,7 @@ async def init_db():
         # F-07: OTP send-rate-limit counters (PostgreSQL replacement for
         # the previous Redis-backed limiter). key_hash is an HMAC-SHA256
         # hash of the identifier or client IP — never the raw value.
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS otp_send_rate_limits (
                 key_hash TEXT NOT NULL,
                 scope TEXT NOT NULL,
@@ -93,7 +145,7 @@ async def init_db():
                 PRIMARY KEY (key_hash, scope, window_start)
             )
         ''')
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE INDEX IF NOT EXISTS idx_otp_send_rate_limits_window_start
             ON otp_send_rate_limits (window_start)
         ''')
@@ -102,13 +154,13 @@ async def init_db():
         # Self-contained challenge storage (see backend/app/services/user_db.py
         # docs elsewhere): deliberately NOT stored in user_otps, since that
         # table is shared/overwritten across OTP purposes by identifier alone.
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS mfa_login_challenges (
                 challenge_id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
                 identifier TEXT NOT NULL,
                 purpose TEXT NOT NULL
-                    CHECK (purpose IN ('login_mfa', 'enable_mfa')),
+                    CHECK (purpose IN ('login_mfa', 'enable_mfa', 'verify_email')),
                 otp_hash TEXT NOT NULL,
                 attempts INT NOT NULL DEFAULT 0
                     CHECK (attempts >= 0),
@@ -117,16 +169,16 @@ async def init_db():
                 consumed_at TIMESTAMPTZ NULL
             )
         ''')
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE INDEX IF NOT EXISTS idx_mfa_challenges_uid
             ON mfa_login_challenges (uid)
         ''')
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires
             ON mfa_login_challenges (expires_at)
         ''')
 
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS mfa_sessions (
                 session_hash TEXT PRIMARY KEY,
                 uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
@@ -136,24 +188,92 @@ async def init_db():
                 revoked_at TIMESTAMPTZ NULL
             )
         ''')
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE INDEX IF NOT EXISTS idx_mfa_sessions_uid
             ON mfa_sessions (uid)
         ''')
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE INDEX IF NOT EXISTS idx_mfa_sessions_expires
             ON mfa_sessions (expires_at)
         ''')
         # F-09: single-use proof that an email passed OTP verification
         # before its profile existed (signup). Keyed by an HMAC of the
         # normalised email; never the plaintext address.
-        await conn.execute('''
+        await _ddl(conn, '''
             CREATE TABLE IF NOT EXISTS email_verification_proofs (
                 email_hash TEXT PRIMARY KEY,
                 verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL,
                 consumed_at TIMESTAMPTZ NULL
             )
+        ''')
+
+        # F-09 H1 (additive, idempotent): databases created before
+        # 'verify_email' existed carry a CHECK that only allows the two MFA
+        # purposes. The constraint is found in the catalog (its name is
+        # auto-generated), replaced only if it lacks 'verify_email', and the
+        # whole step runs in ONE transaction under an advisory lock, with the
+        # same transaction-local lock_timeout as every other startup statement, so
+        # concurrently starting instances cannot race each other and a lock that
+        # cannot be had in time rolls the whole swap back (the constraint is never
+        # left missing or half-changed). Older backend code never writes
+        # 'verify_email', so it tolerates the wider constraint.
+        async with _startup_schema_txn(conn, "mfa_login_challenges purpose constraint"):
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('f09_h1_challenge_purpose'))")
+            await conn.execute('''
+                DO $$
+                DECLARE
+                    r RECORD;
+                    has_wide BOOLEAN := FALSE;
+                BEGIN
+                    FOR r IN
+                        SELECT conname, pg_get_constraintdef(oid) AS def
+                        FROM pg_constraint
+                        WHERE conrelid = 'mfa_login_challenges'::regclass
+                          AND contype = 'c'
+                          AND pg_get_constraintdef(oid) ILIKE '%purpose%'
+                    LOOP
+                        IF r.def LIKE '%verify_email%' THEN
+                            has_wide := TRUE;
+                        ELSE
+                            EXECUTE format('ALTER TABLE mfa_login_challenges DROP CONSTRAINT %I', r.conname);
+                        END IF;
+                    END LOOP;
+                    IF NOT has_wide THEN
+                        ALTER TABLE mfa_login_challenges
+                            ADD CONSTRAINT mfa_login_challenges_purpose_check
+                            CHECK (purpose IN ('login_mfa', 'enable_mfa', 'verify_email'));
+                    END IF;
+                END $$;
+            ''')
+
+        # F-09 H1: single-use proof of email ownership issued by
+        # /auth/verify-otp for signup. The raw proof ("evp1_...") is returned
+        # to the client once and never stored; only HMACs are. It replaces
+        # the email-only v1 table above, which is kept until the legacy
+        # rollout window closes.
+        await _ddl(conn, '''
+            CREATE TABLE IF NOT EXISTS email_verification_proofs_v2 (
+                proof_hash TEXT PRIMARY KEY,
+                email_hash TEXT NOT NULL,
+                purpose TEXT NOT NULL
+                    CHECK (purpose = 'signup_email_verification'),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                consumed_at TIMESTAMPTZ NULL,
+                consumed_by_uid TEXT NULL,
+                CHECK (expires_at > created_at),
+                CHECK (consumed_by_uid IS NULL OR consumed_at IS NOT NULL)
+            )
+        ''')
+        await _ddl(conn, '''
+            CREATE INDEX IF NOT EXISTS idx_evp2_email_live
+            ON email_verification_proofs_v2 (email_hash)
+            WHERE consumed_at IS NULL
+        ''')
+        await _ddl(conn, '''
+            CREATE INDEX IF NOT EXISTS idx_evp2_expires
+            ON email_verification_proofs_v2 (expires_at)
         ''')
 
 
@@ -649,6 +769,113 @@ async def mark_email_verified_with_proof(uid: str, email: str) -> int:
     except Exception as e:
         print(f"[DB] mark_email_verified_with_proof error: {type(e).__name__}", flush=True)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# F-09 H1: proof-secret email verification (signup).
+#
+# /auth/verify-otp issues a random one-time proof to the client that solved the
+# OTP. Only HMACs of the proof and of the normalised email are stored. The
+# proof is later presented to the authenticated /auth/mark-verified, which
+# derives UID and email from the Firebase token alone. Nothing here is ever
+# logged: no proof, hash, email or OTP.
+# ---------------------------------------------------------------------------
+EMAIL_PROOF_V2_PREFIX = "evp1_"
+EMAIL_PROOF_V2_TTL = timedelta(minutes=15)
+_EMAIL_PROOF_V2_MAX_LEN = 128
+
+
+def norm_email(value) -> str:
+    """The single normalisation used for OTP identifiers, proof hashes and
+    token/database email comparison."""
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def email_proof_available() -> bool:
+    """False when the HMAC secret is missing; callers must then fail closed."""
+    return bool(settings.MFA_OTP_HASH_SECRET)
+
+
+def _hmac_hex(secret: str, value: str) -> str:
+    return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _proof_v2_hash(secret: str, raw_proof: str) -> str:
+    return _hmac_hex(secret, f"email-proof-v2:{raw_proof}")
+
+
+def _proof_v2_email_hash(secret: str, email: str) -> str:
+    return _hmac_hex(secret, f"email-proof-v2-email:{email}")
+
+
+async def issue_email_verification_proof(email: str) -> str | None:
+    """Creates a 15-minute, single-use proof for this normalised email and
+    returns the RAW proof (shown to the caller exactly once). Any earlier
+    unconsumed proof for the same email is superseded. Returns None when the
+    HMAC secret is missing or the email is unusable (fail closed)."""
+    secret = settings.MFA_OTP_HASH_SECRET
+    email = norm_email(email)
+    if not secret or "@" not in email:
+        return None
+    raw_proof = EMAIL_PROOF_V2_PREFIX + secrets.token_urlsafe(32)
+    email_hash = _proof_v2_email_hash(secret, email)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", email_hash)
+            await conn.execute(
+                "DELETE FROM email_verification_proofs_v2 WHERE expires_at < NOW() - INTERVAL '1 day'")
+            await conn.execute(
+                "UPDATE email_verification_proofs_v2 SET consumed_at = NOW() "
+                "WHERE email_hash = $1 AND consumed_at IS NULL", email_hash)
+            await conn.execute('''
+                INSERT INTO email_verification_proofs_v2
+                    (proof_hash, email_hash, purpose, created_at, expires_at)
+                VALUES ($1, $2, 'signup_email_verification', NOW(), NOW() + $3::interval)
+            ''', _proof_v2_hash(secret, raw_proof), email_hash, EMAIL_PROOF_V2_TTL)
+    return raw_proof
+
+
+async def consume_email_verification_proof(uid: str, token_email: str, raw_proof: str) -> bool:
+    """Atomically marks ONLY this UID verified and consumes the proof.
+
+    `uid` and `token_email` must come from a verified Firebase ID token. The
+    proof must exist, be unexpired and unconsumed, and have been issued for
+    this exact email; the UID's SQL row must hold the same email. If any
+    check fails nothing changes and False is returned (callers must not
+    reveal which check failed). The proof row is locked, so of two concurrent
+    attempts exactly one can succeed."""
+    secret = settings.MFA_OTP_HASH_SECRET
+    email = norm_email(token_email)
+    if (not secret or not uid or "@" not in email or not isinstance(raw_proof, str)
+            or not raw_proof.startswith(EMAIL_PROOF_V2_PREFIX)
+            or len(raw_proof) > _EMAIL_PROOF_V2_MAX_LEN):
+        return False
+    proof_hash = _proof_v2_hash(secret, raw_proof)
+    email_hash = _proof_v2_email_hash(secret, email)
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                proof = await conn.fetchrow('''
+                    SELECT email_hash FROM email_verification_proofs_v2
+                    WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
+                    FOR UPDATE
+                ''', proof_hash)
+                if proof is None or not hmac.compare_digest(proof["email_hash"], email_hash):
+                    return False
+                status = await conn.execute(
+                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2",
+                    uid, email)
+                if int(status.split()[-1]) != 1:
+                    return False
+                await conn.execute(
+                    "UPDATE email_verification_proofs_v2 SET consumed_at = NOW(), consumed_by_uid = $2 "
+                    "WHERE proof_hash = $1", proof_hash, uid)
+                return True
+    except Exception as e:
+        print(f"[DB] consume_email_verification_proof error: {type(e).__name__}", flush=True)
+        return False
 
 
 # F-06: mark_invite_code_used() was removed. It unconditionally deleted an

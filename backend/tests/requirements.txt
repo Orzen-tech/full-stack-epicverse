@@ -1,0 +1,9 @@
+# Test-only dependencies; deliberately NOT in scripts/requirements.txt (the
+# Docker image). Install with: pip install -r tests/requirements.txt  (plus scripts/requirements.txt); run from backend/: python -m pytest
+#
+# pgserver bundles a PostgreSQL binary and starts a throwaway instance on a
+# Unix socket in a temp directory, so no database server needs installing and
+# the tests can never reach a real database.
+pytest
+pytest-asyncio
+pgserver

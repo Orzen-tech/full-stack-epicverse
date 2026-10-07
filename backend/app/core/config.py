@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # Not read by any code yet, so empty is safe during Phase 1.
     MFA_OTP_HASH_SECRET: str = ""
 
+    # F-09 H1: temporary rollout switch for app builds that predate the
+    # proof-secret email verification. MUST stay False (secure) by default.
+    # When True, /auth/verify-otp keeps its legacy behaviour of marking the
+    # Firebase account that owns the email, and /auth/mark-verified accepts
+    # the legacy email-only proof. Set it only on an explicit, time-boxed
+    # rollout revision, then remove it together with the legacy code.
+    EMAIL_VERIFY_LEGACY_COMPAT: bool = False
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:
