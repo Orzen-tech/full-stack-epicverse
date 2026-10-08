@@ -1,6 +1,10 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, StringConstraints
+from typing import Annotated
 import io
 import uuid
 import json
@@ -1186,11 +1190,39 @@ async def get_faq():
     return {"items": _FAQ_ITEMS}
 
 
+FEEDBACK_MAX_CHARS = 5000
+
+
 class FeedbackRequest(BaseModel):
-    message: str
+    # Surrounding whitespace is trimmed first, then the length (in characters)
+    # is checked, so an oversized message is rejected by request validation
+    # (422) before the route stores it or queues the notification email.
+    message: Annotated[str, StringConstraints(strip_whitespace=True, max_length=FEEDBACK_MAX_CHARS)]
 
 
-@router.post("/feedback")
+class _NoEchoValidationRoute(APIRoute):
+    """Used only by the feedback route. FastAPI's default 422 body repeats the
+    rejected input, which would reflect a user's (possibly very large) message
+    back to them. Same 422 and error details, minus the echoed `input`; nothing
+    from the request is logged. Other routes keep FastAPI's default handling."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def sanitized(request: Request):
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                errors = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+                return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
+        return sanitized
+
+
+_feedback_router = APIRouter(route_class=_NoEchoValidationRoute)
+
+
+@_feedback_router.post("/feedback")
 async def submit_feedback(
     body: FeedbackRequest,
     current_user: dict = Depends(require_verified_mfa_user),
@@ -1210,6 +1242,9 @@ async def submit_feedback(
     except Exception:
         pass
     return {"status": "success", "message": "Thank you for your feedback!"}
+
+
+router.include_router(_feedback_router)
 
 
 @router.get("/admin/dashboard-data")
