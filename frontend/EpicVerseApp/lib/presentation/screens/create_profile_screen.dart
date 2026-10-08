@@ -18,6 +18,7 @@ import 'legal_content_screen.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/security/email_verification_flow.dart';
+import '../widgets/security_alert_dialog.dart';
 import '../../core/utils/password_validator.dart';
 import '../widgets/password_requirements.dart';
 
@@ -261,6 +262,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
 
   Future<void> _submitForm() async {
     debugPrint('[EpicVerse][REG] GET STARTED tapped');
+    if (_isLoading) return; // a signup (or its device check) is already running
     if (!_formKey.currentState!.validate()) {
       debugPrint('[EpicVerse][REG] Form validation failed');
       _showError('Please fill all fields');
@@ -276,6 +278,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
     }
     setState(() => _isLoading = true);
     try {
+      // Finding #4: re-check the device before creating the account (fresh check;
+      // only a confirmed compromise blocks). Inside the try so `finally` always
+      // clears the loading state, whether this returns, continues or throws.
+      if (await blockIfCompromised(context)) return;
+
       String rawCode = _inviteController.text.trim().replaceAll(' ', '');
       if (rawCode.startsWith('EPIC-')) rawCode = rawCode.substring(5);
       final inviteCode = "EPIC-$rawCode";

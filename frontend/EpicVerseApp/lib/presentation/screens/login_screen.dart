@@ -17,6 +17,7 @@ import '../../core/errors/error_handler.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/security/mfa_flow.dart';
 import '../../core/security/email_verification_flow.dart';
+import '../widgets/security_alert_dialog.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -40,12 +41,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Future<void> _handleLogin() async {
+    if (_isLoading) return; // a sign-in (or its device check) is already running
     if (!_formKey.currentState!.validate()) return;
 
     debugPrint('[EpicVerse][LOGIN] Sign-In tapped');
     setState(() => _isLoading = true);
 
     try {
+      // Finding #4: re-check the device before authenticating (fresh check; only a
+      // confirmed compromise blocks). Inside the try so `finally` always clears
+      // the loading state, whether this returns, continues or throws.
+      if (await blockIfCompromised(context)) return;
+
       // 1. Sign in with Firebase (Primary Identity Check)
       debugPrint('[EpicVerse][LOGIN] Firebase signInWithEmailAndPassword...');
       final UserCredential credential = await FirebaseAuth.instance.signInWithEmailAndPassword(

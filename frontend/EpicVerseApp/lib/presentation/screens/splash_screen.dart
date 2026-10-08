@@ -1,10 +1,6 @@
-import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
-import 'package:flutter/services.dart' show MethodChannel;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_jailbreak_detection/flutter_jailbreak_detection.dart';
 import 'welcome_screen.dart';
 import 'dashboard_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,6 +11,8 @@ import '../../core/errors/app_exception.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/security/mfa_flow.dart';
 import '../../core/security/email_verification_flow.dart';
+import '../../core/security/device_integrity.dart';
+import '../widgets/security_alert_dialog.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -77,87 +75,19 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
     super.dispose();
   }
 
-  static const _integrityChannel = MethodChannel('epicverse/integrity');
-
-  /// Finding #4 hardening: a second, independent signal (ptrace-attachment
-  /// on Android via TracerPid, IOSSecuritySuite.amIDebugged() on iOS),
-  /// alongside the existing RootBeer/amIJailbroken() check. Deliberately
-  /// inactive in debug builds so normal `flutter run` development (which
-  /// itself attaches a debugger) is never blocked — the existing
-  /// root/jailbreak check above is NOT gated this way and stays active in
-  /// every build. Any failure here (channel missing, read error, etc.)
-  /// is treated as "unknown" and logged, never as "compromised" — this
-  /// must never be the reason a legitimate user gets blocked.
-  Future<bool> _isRuntimeInstrumented() async {
-    if (kDebugMode) return false;
-    try {
-      if (Platform.isAndroid) {
-        final tracerPid = await _integrityChannel.invokeMethod<int>('tracerPid');
-        return (tracerPid ?? -1) > 0;
-      } else if (Platform.isIOS) {
-        final debugged = await _integrityChannel.invokeMethod<bool>('amIDebugged');
-        return debugged ?? false;
-      }
-    } catch (e) {
-      debugPrint('[EpicVerse][INTEGRITY] Runtime-instrumentation check unavailable: $e');
-    }
-    return false;
-  }
-
-  /// Checks if the device is rooted/jailbroken before proceeding.
-  /// If rooted, shows a non-dismissible security warning dialog.
+  /// Finding #4: one shared check (DeviceIntegrity) before anything else. Only
+  /// a confirmed compromise blocks; an unknown result keeps normal access and
+  /// is checked again at login/signup.
   Future<void> _checkRootAndProceed() async {
-    bool isRooted = false;
-    try {
-      isRooted = await FlutterJailbreakDetection.jailbroken;
-    } catch (_) {
-      // If detection fails, fail safe — assume not rooted
-      isRooted = false;
-    }
-
-    final isInstrumented = await _isRuntimeInstrumented();
-
+    final result = await DeviceIntegrity.check();
     if (!mounted) return;
 
-    if (isRooted || isInstrumented) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => PopScope(
-          canPop: false,
-          child: AlertDialog(
-            backgroundColor: const Color(0xFF1B0C2D),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: Color(0xFFFF4C4C), width: 1.5),
-            ),
-            title: const Row(
-              children: [
-                Icon(Icons.security, color: Color(0xFFFF4C4C), size: 24),
-                SizedBox(width: 10),
-                Text(
-                  'Security Alert',
-                  style: TextStyle(
-                    color: Color(0xFFFF4C4C),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
-                ),
-              ],
-            ),
-            content: const Text(
-              'This device appears to be rooted or jailbroken.\n\n'
-              'EpicVerse cannot run on rooted or jailbroken devices to protect '
-              'your account security and sensitive data.',
-              style: TextStyle(color: Colors.white70, fontSize: 14, height: 1.5),
-            ),
-          ),
-        ),
-      );
+    if (result.state == IntegrityState.compromised) {
+      showSecurityAlertDialog(context);
       return; // Stop execution — do not proceed to auth check
     }
 
-    // Device is safe — proceed normally
+    // Safe, or unknown (transient failure): proceed normally
     _checkAuth();
   }
 
