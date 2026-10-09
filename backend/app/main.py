@@ -10,6 +10,12 @@ from app.services.user_db import init_db
 from app.services.db_pool import get_pool, close_pool
 import firebase_admin
 from firebase_admin import credentials
+from app.core.log_sanitizer import install as install_log_sanitizer
+
+# uvicorn logs every request target, query string included. Keep query VALUES out of
+# those application logs (idempotent; uvicorn has already configured its loggers by the
+# time this module is imported).
+install_log_sanitizer()
 
 # Initialize Firebase Admin
 try:
