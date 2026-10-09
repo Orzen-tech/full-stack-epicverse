@@ -254,6 +254,32 @@ def test_r4_ws_safe_escapes_bounds_and_truncates():
     assert routes._ws_safe(None) == "''"
 
 
+async def test_ws_query_string_token_no_longer_authenticates(fb, make_user, monkeypatch, capsys):
+    """The legacy ?token= fallback is gone: a valid ID token supplied ONLY in the query string
+    (no usable Authorization header) must be refused and the realtime session must not start."""
+    from app.services import realtime_service
+    started = []
+
+    class Stub:
+        def __init__(self, **kw):
+            started.append(kw)
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(realtime_service, "RealtimeSession", Stub)
+    tok = await make_user("uidQ", "q@example.com", verified=True)
+    ws = _WS("")                                     # "Bearer " with nothing after it
+    await routes.websocket_realtime(ws, uid="uidQ", mode="Mode 1", session_id="s", token=tok)
+    assert started == [] and ws.code == 1008 and ws.sent[0]["message"] == "Unauthorized"
+    out = capsys.readouterr().out
+    assert "LEGACY" not in out and tok not in out
+    # control: the same token in the header is still accepted
+    ws = _WS(tok)
+    await routes.websocket_realtime(ws, uid="uidQ", mode="Mode 1", session_id="s", token="")
+    assert len(started) == 1 and ws.code is None
+
+
 async def test_r4_newlines_and_long_values_cannot_forge_or_flood_the_log(fb, make_user, monkeypatch, capsys):
     from app.services import realtime_service
 

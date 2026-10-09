@@ -39,17 +39,30 @@ from app.api.dependencies import (
 from app.services.app_check_monitor import log_app_check_status
 from app.api.scheduler_auth import verify_scheduler_oidc
 from app.api.admin_auth import verify_admin_user
-from app.services.otp_rate_limiter import check_otp_send_allowed
+from app.services.otp_rate_limiter import check_otp_send_allowed, check_rate_limit, reserve_failure_slot, release_failure_slot
 
 router = APIRouter()
 
+INVITE_FAILED_VALIDATIONS_PER_IP = 20  # per 10-minute window; only FAILED validations count
+
+
 @router.get("/validate-invite/{code}")
-async def validate_invite(code: str):
-    """Checks if an invite code exists in the database and has not been used."""
+async def validate_invite(code: str, request: Request):
+    """Checks if an invite code exists in the database and has not been used.
+
+    Brute-force guard: at most INVITE_FAILED_VALIDATIONS_PER_IP failed validations per
+    client IP per window. A slot is reserved atomically before checking and handed back
+    when the code is valid, so successes are never counted but also cannot bypass a lockout."""
+    allowed, retry_after, slot = await reserve_failure_slot(
+        "invite_fail", request, limit=INVITE_FAILED_VALIDATIONS_PER_IP)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many attempts. Please wait a few minutes.",
+                            headers={"Retry-After": str(max(retry_after, 1))})
     code = code.replace(" ", "").upper()
     is_valid = await validate_invite_code(code)
     if not is_valid:
         return {"valid": False, "message": "Invalid or expired invite code"}
+    await release_failure_slot(slot)
     return {"valid": True, "message": "Invite code accepted"}
 
 
@@ -669,27 +682,22 @@ async def websocket_realtime(
 ):
     """OpenAI Realtime API proxy — bidirectional audio bridge.
 
-    Token source: Prefer the `Authorization: Bearer <id_token>` handshake header
-    (keeps the ID token out of Cloud Run / LB / proxy access logs). The `token`
-    query-string parameter is retained only as a transitional fallback for
-    older app builds and will be removed after all clients have upgraded.
+    Token source: the `Authorization: Bearer <id_token>` handshake header only
+    (keeps the ID token out of Cloud Run / LB / proxy access logs). The legacy
+    `token` query parameter is still accepted in the signature so existing
+    callers do not error, but it is never read and never authenticates.
     """
     from app.services.realtime_service import RealtimeSession
     await websocket.accept()
 
-    # Prefer Authorization header; fall back to ?token= for older clients.
+    # Authorization header only.
     auth_header = websocket.headers.get("authorization", "")
     header_token = ""
     if auth_header.lower().startswith("bearer "):
         header_token = auth_header[7:].strip()
 
-    resolved_token = header_token or token
-    if header_token:
-        token_source = "header"
-    elif token:
-        token_source = "query(legacy)"
-    else:
-        token_source = "none"
+    resolved_token = header_token
+    token_source = "header" if header_token else "none"
 
     # Mandatory Firebase auth — reject unauthenticated/anonymous connections.
     if not uid or uid == "anonymous" or not resolved_token:
@@ -706,9 +714,6 @@ async def websocket_realtime(
             await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
             await websocket.close(code=1008)
             return
-        if token_source == "query(legacy)":
-            # Visibility for rollout: tells you when the last legacy client upgrades.
-            print(f"[WS] LEGACY token in query string uid={_ws_safe(uid)} — client should upgrade to header auth", flush=True)
     except Exception as e:
         # Type only: the library's message for a malformed token includes the token text.
         print(f"[WS] Auth failed uid={_ws_safe(uid)} source={token_source}: {type(e).__name__}", flush=True)
@@ -1191,6 +1196,9 @@ async def get_faq():
 
 
 FEEDBACK_MAX_CHARS = 5000
+# Abuse limit for POST /feedback (each accepted message also emails the owner): per user per
+# 10-minute window, using the same Postgres counters as the OTP limiter.
+FEEDBACK_PER_USER_LIMIT = 5
 
 
 class FeedbackRequest(BaseModel):
@@ -1225,12 +1233,18 @@ _feedback_router = APIRouter(route_class=_NoEchoValidationRoute)
 @_feedback_router.post("/feedback")
 async def submit_feedback(
     body: FeedbackRequest,
+    request: Request,
     current_user: dict = Depends(require_verified_mfa_user),
 ):
     from app.services.email_service import send_feedback_notification
     uid = current_user.get("uid")
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Feedback message cannot be empty")
+    allowed, retry_after = await check_rate_limit(
+        "feedback", uid, request, key_limit=FEEDBACK_PER_USER_LIMIT, ip_limit=None)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a few minutes.",
+                            headers={"Retry-After": str(retry_after)})
     await save_feedback(uid, body.message.strip())
     # Notify owner — fire and forget, don't block the response
     try:

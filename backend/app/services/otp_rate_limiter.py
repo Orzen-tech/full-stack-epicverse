@@ -168,3 +168,88 @@ async def check_otp_send_allowed(identifier: str, request: Request) -> tuple[boo
     except Exception:
         print("[OTP-RATE-LIMIT] Postgres unavailable, rejecting request (fail-closed)", flush=True)
         return False, 60
+
+
+async def check_rate_limit(scope: str, key: str | None, request: Request, *,
+                           key_limit: int | None, ip_limit: int | None) -> tuple[bool, int]:
+    """Fixed-window limit for non-OTP endpoints. Same table, window, hashing and
+    fail-closed behaviour as check_otp_send_allowed, under its own scope names
+    (f"{scope}_key" / f"{scope}_ip") so these counters never mix with OTP ones.
+    Returns (allowed, retry_after_seconds)."""
+    secret = settings.OTP_RATE_LIMIT_HASH_SECRET
+    if not secret:
+        print("[RATE-LIMIT] Rejected: hash secret not configured", flush=True)
+        return False, 0
+
+    now = datetime.now(timezone.utc)
+    window_start = _window_start(now)
+    retry_after = max(int((window_start + timedelta(minutes=WINDOW_MINUTES) - now).total_seconds()), 0)
+
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            if key is not None and key_limit is not None:
+                key_hash = _hmac_hash(secret, key.lower())
+                if await _incr_scope(conn, key_hash, f"{scope}_key", window_start) > key_limit:
+                    return False, retry_after
+            if ip_limit is not None:
+                ip_hash = _hmac_hash(secret, client_ip(request))
+                if await _incr_scope(conn, ip_hash, f"{scope}_ip", window_start) > ip_limit:
+                    return False, retry_after
+            await _maybe_cleanup(conn)
+            return True, 0
+    except Exception:
+        print("[RATE-LIMIT] Postgres unavailable, rejecting request (fail-closed)", flush=True)
+        return False, 60
+
+
+async def reserve_failure_slot(scope: str, request: Request, *, limit: int):
+    """Failures-only per-IP limiter (reserve, then refund on success).
+
+    Atomically reserves one slot for this request BEFORE the guarded check runs
+    (single upsert, so concurrent requests can never exceed `limit`). Returns
+    (allowed, retry_after_seconds, handle). If allowed, the caller MUST call
+    release_failure_slot(handle) when the check SUCCEEDED, so only failures stay
+    counted. A request that finds the budget exhausted is refused whatever it
+    carries (a valid value cannot bypass a lockout) and keeps the count.
+    Fail-CLOSED on a missing secret or a database error."""
+    secret = settings.OTP_RATE_LIMIT_HASH_SECRET
+    if not secret:
+        print("[RATE-LIMIT] Rejected: hash secret not configured", flush=True)
+        return False, 0, None
+
+    now = datetime.now(timezone.utc)
+    window_start = _window_start(now)
+    retry_after = max(int((window_start + timedelta(minutes=WINDOW_MINUTES) - now).total_seconds()), 0)
+
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            ip_hash = _hmac_hash(secret, client_ip(request))
+            scope_name = f"{scope}_ip"
+            if await _incr_scope(conn, ip_hash, scope_name, window_start) > limit:
+                return False, retry_after, None
+            await _maybe_cleanup(conn)
+            return True, 0, (ip_hash, scope_name, window_start)
+    except Exception:
+        print("[RATE-LIMIT] Postgres unavailable, rejecting request (fail-closed)", flush=True)
+        return False, 60, None
+
+
+async def release_failure_slot(handle) -> None:
+    """Gives back a slot reserved by reserve_failure_slot (the guarded check
+    succeeded). Never raises; if it cannot run the slot simply stays counted,
+    which errs on the side of limiting."""
+    if handle is None:
+        return
+    key_hash, scope_name, window_start = handle
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE otp_send_rate_limits SET request_count = GREATEST(request_count - 1, 0) "
+                "WHERE key_hash = $1 AND scope = $2 AND window_start = $3",
+                key_hash, scope_name, window_start,
+            )
+    except Exception:
+        print("[RATE-LIMIT] Could not release slot (non-fatal)", flush=True)

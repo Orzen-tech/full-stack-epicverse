@@ -61,7 +61,7 @@ async def send_feedback_notification(display_name: str, user_email: str, message
             print("[SENDGRID-SUCCESS] Feedback notification sent")
             return True
     except Exception as e:
-        print(f"[SENDGRID-FATAL] Feedback notify error: {e}")
+        print(f"[SENDGRID-FATAL] Feedback notify error: {type(e).__name__}")
         return False
 
 
