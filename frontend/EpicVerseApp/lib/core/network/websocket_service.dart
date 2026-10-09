@@ -135,7 +135,7 @@ class WebSocketService {
     }
 
     try {
-      debugPrint('[EpicVerse][WS] Opening channel uri=$wsUri');
+      debugPrint('[EpicVerse][WS] Opening channel host=${wsUri.host} path=${wsUri.path}');
       // Use a pinned HttpClient so WebSocket TLS is validated at the Dart level.
       // network_security_config.xml does NOT cover WebSocket connections.
       final HttpClient pinnedHttpClient =
