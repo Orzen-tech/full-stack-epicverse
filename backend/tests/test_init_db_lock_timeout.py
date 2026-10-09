@@ -260,6 +260,50 @@ async def test_concurrent_first_start_on_an_empty_database_converges(lockdb):
         assert len(await _purpose_constraints(c)) == 1
 
 
+# ------------------------------------- startup statements are serialized
+DUPLICATE_ERRORS = (asyncpg.exceptions.UniqueViolationError, asyncpg.exceptions.DuplicateTableError,
+                    asyncpg.exceptions.DuplicateObjectError)
+
+
+async def test_waiting_for_the_startup_advisory_lock_is_bounded_by_the_lock_timeout(lockdb):
+    """If another instance is mid-statement, init_db waits at most the startup lock timeout, then
+    gives up cleanly (non-fatal in the app); nothing is left waiting, and a retry completes."""
+    pool = await lockdb.make_pool()
+    await user_db.init_db()
+    holder = await lockdb.connect()
+    await holder.execute("BEGIN")
+    await holder.execute(user_db._INIT_DB_ADVISORY_LOCK)          # simulate the other instance's lock
+    try:
+        await _expect_give_up("CREATE TABLE IF NOT EXISTS users")
+        assert await holder.fetchval("SELECT count(*) FROM pg_locks WHERE NOT granted") == 0
+    finally:
+        await holder.execute("ROLLBACK")
+    await user_db.init_db()
+    assert await _runtime_lock_timeout(pool) == "0"               # no timeout leaked onto the pool
+
+
+async def test_concurrent_first_start_on_an_empty_database_has_no_duplicate_errors(lockdb):
+    """Brand-new database, eight instances at once: no PostgreSQL duplicate-name error may escape."""
+    pool = await lockdb.make_pool(size=9)
+    results = await asyncio.gather(*[user_db.init_db() for _ in range(8)], return_exceptions=True)
+    assert not [r for r in results if isinstance(r, DUPLICATE_ERRORS)], results
+    assert all(r is None or isinstance(r, user_db.SchemaLockTimeout) for r in results), results
+    await user_db.init_db()
+    async with pool.acquire() as c:
+        assert await c.fetchval("SELECT to_regclass('email_verification_proofs_v2')") is not None
+        assert len(await _purpose_constraints(c)) == 1
+        assert await c.fetchval("SELECT count(*) FROM pg_locks WHERE NOT granted") == 0
+
+
+async def test_concurrent_pre_h1_start_has_no_errors_at_all(lockdb):
+    """The scenario of test_schema_migration's concurrency test, repeated: four instances on a pre-H1 database."""
+    pool = await lockdb.make_pool(size=5)
+    for _ in range(5):
+        await _make_pre_h1(pool)
+        results = await asyncio.gather(*[user_db.init_db() for _ in range(4)], return_exceptions=True)
+        assert results == [None, None, None, None], results
+
+
 # --------------------------------------------- the runtime is untouched
 def test_lock_timeout_is_only_ever_set_locally_inside_startup_schema_code():
     """No runtime code path, pool setting or session default may carry a lock timeout."""

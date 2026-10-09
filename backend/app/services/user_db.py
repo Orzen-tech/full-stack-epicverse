@@ -45,6 +45,16 @@ class UserRecord(BaseModel):
 # ---------------------------------------------------------------------------
 INIT_DB_LOCK_TIMEOUT_MS = 750
 
+# Instances that start together (a rollout, or Cloud Run scaling out) must not run
+# the same startup statement at the same moment. "CREATE TABLE/INDEX IF NOT EXISTS"
+# is not safe against a concurrent identical CREATE: both sessions pass the existence
+# check before either commits, and the loser then fails inside PostgreSQL's catalog
+# with a duplicate-key error. Every startup statement therefore takes this
+# transaction-scoped advisory lock first, inside its own short transaction and under
+# the same lock timeout, so identical statements run one after another. It is
+# released at COMMIT or ROLLBACK and is held only for that one statement.
+_INIT_DB_ADVISORY_LOCK = "SELECT pg_advisory_xact_lock(hashtext('epicverse:init_db'))"
+
 
 class SchemaLockTimeout(Exception):
     """init_db gave up because a schema lock was not granted within
@@ -58,10 +68,13 @@ async def _startup_schema_txn(conn, label: str):
     """One explicit transaction with a transaction-local lock_timeout. A lock
     that cannot be obtained in time rolls everything in the block back and
     raises SchemaLockTimeout; the message and log contain only the statement
-    text prefix (no credentials, hosts or data)."""
+    text prefix (no credentials, hosts or data). Concurrent instances queue on one
+    advisory lock (see _INIT_DB_ADVISORY_LOCK); waiting for it is also bounded by
+    the lock timeout."""
     try:
         async with conn.transaction():
             await conn.execute(f"SET LOCAL lock_timeout = {int(INIT_DB_LOCK_TIMEOUT_MS)}")
+            await conn.execute(_INIT_DB_ADVISORY_LOCK)
             yield
     except asyncpg.exceptions.LockNotAvailableError:
         print(f"[DB] init_db gave up: a schema lock was not available within "
