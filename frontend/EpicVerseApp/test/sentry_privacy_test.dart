@@ -65,7 +65,11 @@ void main() {
       statusCode: 500,
       screenName: 'Test',
     );
-    await Future<void>.delayed(const Duration(milliseconds: 200));
+    // Bounded wait for the capture to reach beforeSend (poll, 5 s cap).
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (events.isEmpty && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
     await Sentry.close();
     expect(events, hasLength(1));
     expect(events.single.tags?['endpoint'], '/user/{uid}');

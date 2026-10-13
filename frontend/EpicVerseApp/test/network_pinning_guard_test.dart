@@ -16,6 +16,10 @@ const _migratedScreens = [
   'lib/presentation/screens/splash_screen.dart',
 ];
 
+/// Path with Windows separators normalised to '/' so suffix checks behave
+/// identically on Windows and Unix.
+String _norm(String path) => path.replaceAll(r'\', '/');
+
 List<File> _dartFiles() => Directory('lib')
     .listSync(recursive: true)
     .whereType<File>()
@@ -82,7 +86,7 @@ void main() {
       final offenders = <String>[];
       for (final f in _dartFiles()) {
         final src = _code(f);
-        final isPinningService = f.path.endsWith(
+        final isPinningService = _norm(f.path).endsWith(
           'core/network/ssl_pinning_service.dart',
         );
         if (!isPinningService && RegExp(r'\bDio\(').hasMatch(src)) {
@@ -108,7 +112,7 @@ void main() {
     ];
     final offenders = <String>[];
     for (final f in _dartFiles()) {
-      if (allowed.any(f.path.endsWith)) continue;
+      if (allowed.any(_norm(f.path).endsWith)) continue;
       if (RegExp(r'ApiConfig\.(apiUrl|baseUrl|wsUrl)').hasMatch(_code(f))) {
         offenders.add(f.path);
       }
