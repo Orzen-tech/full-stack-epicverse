@@ -193,6 +193,8 @@ async def load_excel_data() -> None:
     print("[BOOT] Pre-loading RAM Fallback Cache from Excel...")
 
     count = 0
+    missing_files: list[str] = []
+    failed_files: list[str] = []
     _dynamic_valid_chars: dict[str, set[int]] = {}
     for i in range(1, 8):
         file = f"mode {i}.xlsx"
@@ -200,6 +202,7 @@ async def load_excel_data() -> None:
         mode_label = KANDA_MAP[i]
 
         if not os.path.exists(path):
+            missing_files.append(file)
             continue
 
         try:
@@ -235,7 +238,19 @@ async def load_excel_data() -> None:
                 except:
                     continue
         except Exception as e:
+            failed_files.append(file)
             print(f"[BOOT] Failed to load {file} into RAM cache: {e}")
+
+    if missing_files:
+        print(f"[BOOT][ERROR] Knowledge-base file(s) not found in {data_dir}: {', '.join(missing_files)}")
+    if count == 0:
+        # Never report success with an empty fallback cache: lookups would silently
+        # answer "not mentioned in the scriptures" whenever the database cannot.
+        raise RuntimeError(
+            f"RAM fallback cache is EMPTY: 0 combinations loaded "
+            f"(missing files: {len(missing_files)}, files that failed to read: {len(failed_files)}). "
+            f"Expected data/mode 1.xlsx ... mode 7.xlsx in {data_dir}."
+        )
 
     # Replace hardcoded character sets with actual data from Excel
     if _dynamic_valid_chars:

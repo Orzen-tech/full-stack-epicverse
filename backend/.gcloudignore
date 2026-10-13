@@ -48,6 +48,19 @@ data/*.xlsx
 *.csv
 *.xlsx
 
+# EXCEPTION to the spreadsheet exclusions above: the seven game-knowledge
+# workbooks are application data read at startup by load_excel_data()
+# (app/services/retriever.py). Without them the image's RAM fallback cache is
+# empty. Only these exact files are re-included; every other .xlsx/.csv
+# (invite sheets, exports) stays excluded.
+!data/mode 1.xlsx
+!data/mode 2.xlsx
+!data/mode 3.xlsx
+!data/mode 4.xlsx
+!data/mode 5.xlsx
+!data/mode 6.xlsx
+!data/mode 7.xlsx
+
 # OS metadata.
 .DS_Store
 Thumbs.db
