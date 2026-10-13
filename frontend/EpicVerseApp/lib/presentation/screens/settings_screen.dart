@@ -251,7 +251,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Widget _buildMfaToggle(BuildContext context, user) {
     final isEnabled = user?.mfaEnabled ?? false;
-    return Container(
+    final mfaState = MfaSettingsState(_mfaCapability);
+    final toggle = Container(
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.05),
         borderRadius: BorderRadius.circular(12),
@@ -264,13 +265,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
         ),
         subtitle: Text(
-          isEnabled ? 'Email OTP required on login' : 'Tap to enable extra security',
+          mfaState.message ?? (isEnabled ? 'Email OTP required on login' : 'Tap to enable extra security'),
           style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
         ),
         value: isEnabled,
         activeThumbColor: AppColors.primaryGold,
-        onChanged: _mfaBusy ? null : (value) => _updateMfa(value),
+        // Enabled only once the modern backend is confirmed. Never falls back to the legacy /user/update-mfa.
+        onChanged: (_mfaBusy || !mfaState.toggleEnabled) ? null : (value) => _updateMfa(value),
       ),
+    );
+    if (!mfaState.canRetry) return toggle;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        toggle,
+        TextButton(
+          onPressed: _mfaBusy ? null : _retryMfaCheck,
+          child: const Text('Retry'),
+        ),
+      ],
     );
   }
 
@@ -281,20 +294,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   bool _mfaBusy = false;
+  MfaSettingsCapability _mfaCapability = MfaSettingsCapability.unknown;
 
-  /// The toggle always reflects the server's state, never a local guess.
+  /// The toggle always reflects the server's state, never a local guess. It also records whether the backend
+  /// supports the modern MFA endpoints (null status = it predates F-09) or the check itself failed.
   Future<void> _refreshMfaState() async {
+    var capability = MfaSettingsCapability.unavailable;
     try {
       final status = await MfaFlow.fetchSessionStatus();
+      capability = MfaSettingsState.capabilityFor(status);
       final user = ref.read(userProvider);
       if (status != null && user != null && mounted) {
         ref.read(userProvider.notifier).setUser(user.copyWith(mfaEnabled: status.mfaEnabled));
       }
     } catch (_) {}
+    if (mounted) setState(() => _mfaCapability = capability);
+  }
+
+  Future<void> _retryMfaCheck() async {
+    setState(() => _mfaCapability = MfaSettingsCapability.unknown);
+    await _refreshMfaState();
   }
 
   Future<void> _updateMfa(bool enable) async {
-    if (_mfaBusy) return;
+    if (_mfaBusy || _mfaCapability != MfaSettingsCapability.modern) return;
     setState(() => _mfaBusy = true);
     try {
       if (enable) {

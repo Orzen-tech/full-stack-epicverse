@@ -10,6 +10,7 @@ import '../../core/network/api_client.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/security/mfa_flow.dart';
+import '../../core/security/session_gate.dart';
 import '../../core/security/email_verification_flow.dart';
 import '../../core/security/device_integrity.dart';
 import '../widgets/security_alert_dialog.dart';
@@ -140,7 +141,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               debugPrint('[EpicVerse][SPLASH] session-status unavailable: ${e.runtimeType}');
             }
 
-            final emailVerified = status?.emailVerified ?? (data['email_verified'] ?? false);
+            final emailVerified = SessionGate.emailVerified(status, data);
             if (!emailVerified) {
               // F-09 H1: authenticated, server-confirmed verification of THIS
               // signed-in account. On success the normal start-up continues.
@@ -160,7 +161,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
 
             // MFA sessions live in memory only, so a restored Firebase
             // sign-in must pass the server's MFA challenge again.
-            if (status != null && status.mfaEnabled && !status.mfaSessionValid) {
+            if (SessionGate.needsServerMfaChallenge(status)) {
               debugPrint('[EpicVerse][SPLASH] MFA required by server → challenge');
               if (!mounted) return;
               final verified = await MfaFlow.verifyLogin(Navigator.of(context));

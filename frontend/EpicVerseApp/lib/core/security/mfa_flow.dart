@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 
 import '../errors/app_exception.dart';
@@ -22,6 +23,48 @@ class SessionStatus {
   });
 }
 
+typedef MfaStatusGet = Future<Response<dynamic>> Function(String path);
+
+MfaStatusGet? _statusTransportOverride;
+
+/// Tests replace the session-status read with a stub; production always uses [apiClient] (the stub is
+/// ignored in release builds and never set by app code).
+@visibleForTesting
+void setMfaStatusTransportForTest(MfaStatusGet? get) => _statusTransportOverride = get;
+
+/// What the server supports for Settings -> Two-factor authentication.
+///  * unknown     - not checked yet (toggle stays disabled)
+///  * modern      - F-09 routes exist (toggle enabled)
+///  * legacy      - the backend predates F-09 (toggle disabled; never falls back to /user/update-mfa)
+///  * unavailable - the check failed (network/server error; toggle disabled, retry offered)
+enum MfaSettingsCapability { unknown, modern, legacy, unavailable }
+
+class MfaSettingsState {
+  final MfaSettingsCapability capability;
+  const MfaSettingsState(this.capability);
+
+  bool get toggleEnabled => capability == MfaSettingsCapability.modern;
+  bool get canRetry => capability == MfaSettingsCapability.unavailable;
+
+  /// Text shown instead of the usual subtitle; null means "use the normal subtitle".
+  String? get message {
+    switch (capability) {
+      case MfaSettingsCapability.modern:
+        return null;
+      case MfaSettingsCapability.legacy:
+        return 'Available after our next server update.';
+      case MfaSettingsCapability.unknown:
+        return 'Checking availability...';
+      case MfaSettingsCapability.unavailable:
+        return 'Could not check availability right now.';
+    }
+  }
+
+  /// A null status means the backend has no `/auth/session-status` route (it predates F-09).
+  static MfaSettingsCapability capabilityFor(SessionStatus? status) =>
+      status == null ? MfaSettingsCapability.legacy : MfaSettingsCapability.modern;
+}
+
 /// F-09 client flows. The backend decides everything; this only asks it,
 /// shows the OTP UI, and carries the resulting session token.
 class MfaFlow {
@@ -36,7 +79,8 @@ class MfaFlow {
   /// back to a pre-F-09 revision); every other failure is rethrown.
   static Future<SessionStatus?> fetchSessionStatus() async {
     try {
-      final res = await apiClient.get('/auth/session-status');
+      final override = kReleaseMode ? null : _statusTransportOverride;
+      final res = override != null ? await override('/auth/session-status') : await apiClient.get('/auth/session-status');
       final d = Map<String, dynamic>.from(res.data as Map);
       return SessionStatus(
         emailVerified: d['email_verified'] == true,
@@ -65,7 +109,7 @@ class MfaFlow {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return false;
     String? challengeId;
-    final startError = await _requestChallenge(challengePath, (id) => challengeId = id);
+    final startError = await requestChallenge(challengePath, (id) => challengeId = id);
     if (startError != null) {
       _snack(nav, startError);
       return false;
@@ -76,8 +120,8 @@ class MfaFlow {
       builder: (_) => OtpVerificationScreen(
         email: user.email ?? '',
         isMfaVerification: true,
-        onSubmitOtp: (otp) => _verify(verifyPath, challengeId!, otp, user.uid),
-        onResend: () => _requestChallenge(challengePath, (id) => challengeId = id),
+        onSubmitOtp: (otp) => verifyChallenge(verifyPath, challengeId!, otp, user.uid),
+        onResend: () => requestChallenge(challengePath, (id) => challengeId = id),
         onVerified: () => nav.pop(true),
         onBack: () => nav.pop(false),
       ),
@@ -106,7 +150,8 @@ class MfaFlow {
     await FirebaseAuth.instance.signOut();
   }
 
-  static Future<String?> _requestChallenge(String path, void Function(String) onId) async {
+  @visibleForTesting
+  static Future<String?> requestChallenge(String path, void Function(String) onId) async {
     try {
       final res = await apiClient.post(path);
       final id = res.data is Map ? res.data['challenge_id'] : null;
@@ -117,7 +162,8 @@ class MfaFlow {
     }
   }
 
-  static Future<String?> _verify(String path, String challengeId, String otp, String uid) async {
+  @visibleForTesting
+  static Future<String?> verifyChallenge(String path, String challengeId, String otp, String uid) async {
     try {
       final res = await apiClient.post(path,
           data: FormData.fromMap({'challenge_id': challengeId, 'otp': otp}));

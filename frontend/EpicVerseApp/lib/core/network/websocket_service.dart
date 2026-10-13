@@ -36,6 +36,17 @@ String? wsSecurityRefusalCode(String message) {
   return null;
 }
 
+/// Handshake query string. The ID token is deliberately NOT part of it (it travels in the Authorization header).
+String buildWsQuery({required String? uid, required String mode, required String sessionId, required bool listening, required String language}) =>
+    'uid=$uid&mode=${Uri.encodeComponent(mode)}&session_id=$sessionId&listening=$listening&language=${Uri.encodeComponent(language)}';
+
+/// Handshake headers: the ID token as a bearer header, plus the MFA session only when one exists.
+Map<String, String> buildWsHandshakeHeaders({required String? idToken, required String? mfaSession}) => {
+      ...ApiConfig.headers,
+      'Authorization': 'Bearer $idToken',
+      'X-MFA-Session': ?mfaSession,
+    };
+
 class WebSocketService {
   static final WebSocketService _instance = WebSocketService._internal();
   factory WebSocketService() => _instance;
@@ -127,7 +138,8 @@ class WebSocketService {
     final listenFlag = isListening ?? false;
     // Token is sent via the Authorization handshake header (NOT in the URL),
     // so it does not leak into Cloud Run / load balancer / proxy access logs.
-    String queryParams = 'uid=$uid&mode=${Uri.encodeComponent(_currentMode)}&session_id=$sessionId&listening=$listenFlag&language=${Uri.encodeComponent(language ?? 'English')}';
+    final queryParams = buildWsQuery(
+        uid: uid, mode: _currentMode, sessionId: sessionId, listening: listenFlag, language: language ?? 'English');
 
     Uri wsUri = Uri.parse('${ApiConfig.wsUrl}?$queryParams');
     if (hostOrUrl != null && hostOrUrl.isNotEmpty) {
@@ -143,11 +155,7 @@ class WebSocketService {
       final mfaSession = MfaSessionManager.getSessionForUid(uid);
       _channel = IOWebSocketChannel.connect(
         wsUri,
-        headers: {
-          ...ApiConfig.headers,
-          'Authorization': 'Bearer $idToken',
-          'X-MFA-Session': ?mfaSession,
-        },
+        headers: buildWsHandshakeHeaders(idToken: idToken, mfaSession: mfaSession),
         customClient: pinnedHttpClient,
       );
       

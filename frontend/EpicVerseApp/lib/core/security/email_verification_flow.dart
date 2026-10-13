@@ -172,6 +172,19 @@ class EmailVerificationFlow {
     return ok == true;
   }
 
+  /// Signup: POST /auth/mark-verified with the one-time [proof] (null when the backend predates proofs).
+  /// True only when the server accepts it. The exception is never printed: the request carried the proof.
+  static Future<bool> markVerified(String? proof) async {
+    try {
+      await _post('/auth/mark-verified', data: proof == null ? null : FormData.fromMap({'proof': proof}));
+      debugPrint('[EpicVerse][REG] mark-verified OK');
+      return true;
+    } catch (e) {
+      debugPrint('[EpicVerse][REG] mark-verified failed: ${e.runtimeType}');
+      return false;
+    }
+  }
+
   /// Pre-H1 backend (the new routes do not exist): the old authenticated
   /// send-otp + verify-otp pair, which marks the account server-side. Reached
   /// only on a genuine missing-route 404, never on any other failure.

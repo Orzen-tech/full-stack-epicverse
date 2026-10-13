@@ -412,18 +412,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       // not it worked: it is single-use and must not outlive this call.
       final proof = _emailProof;
       _emailProof = null;
-      var verified = false;
-      try {
-        await apiClient.post(
-          '/auth/mark-verified',
-          data: proof == null ? null : FormData.fromMap({'proof': proof}),
-        );
-        verified = true;
-        debugPrint('[EpicVerse][REG] mark-verified OK');
-      } catch (e) {
-        // Never print the exception: the request carried the proof.
-        debugPrint('[EpicVerse][REG] mark-verified failed: ${e.runtimeType}');
-      }
+      var verified = await EmailVerificationFlow.markVerified(proof);
       if (!verified) {
         // No proof (or it expired / was already used): verify through the
         // authenticated flow BEFORE the Dashboard can open.

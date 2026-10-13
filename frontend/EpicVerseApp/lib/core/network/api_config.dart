@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode, visibleForTesting;
 import 'mfa_session_manager.dart';
 
 class ApiConfig {
@@ -42,10 +43,25 @@ class ApiConfig {
 
   };
 
+  /// Test seam, never set by app code (a test guards this) and ignored in release builds: supplies the
+  /// signed-in identity so tests can drive the real network stack without initialising Firebase.
+  @visibleForTesting
+  static Future<({String uid, String token})?> Function()? identityForTest;
+
   static Future<Map<String, String>> authHeaders() async {
-    final user = FirebaseAuth.instance.currentUser;
-    final token = await user?.getIdToken();
-    final mfaSession = MfaSessionManager.getSessionForUid(user?.uid);
+    final String? uid;
+    final String? token;
+    final override = kReleaseMode ? null : identityForTest;
+    if (override != null) {
+      final identity = await override();
+      uid = identity?.uid;
+      token = identity?.token;
+    } else {
+      final user = FirebaseAuth.instance.currentUser;
+      uid = user?.uid;
+      token = await user?.getIdToken();
+    }
+    final mfaSession = MfaSessionManager.getSessionForUid(uid);
     return {
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',

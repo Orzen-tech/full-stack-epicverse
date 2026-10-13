@@ -16,6 +16,7 @@ import 'create_profile_screen.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/security/mfa_flow.dart';
+import '../../core/security/session_gate.dart';
 import '../../core/security/email_verification_flow.dart';
 import '../widgets/security_alert_dialog.dart';
 
@@ -122,7 +123,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           final status = await MfaFlow.fetchSessionStatus();
 
           // Block login if OTP was never verified (app closed mid-registration)
-          final emailVerified = status?.emailVerified ?? (res.data['email_verified'] ?? false);
+          final emailVerified = SessionGate.emailVerified(status, res.data);
           if (!emailVerified) {
             // F-09 H1: verification is an authenticated, server-confirmed
             // step for THIS signed-in account; on success normal login
@@ -144,7 +145,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             }
           }
 
-          if (status != null && status.mfaEnabled && !status.mfaSessionValid) {
+          if (SessionGate.needsServerMfaChallenge(status)) {
             debugPrint('[EpicVerse][LOGIN] MFA required by server → challenge');
             if (!mounted) return;
             final verified = await MfaFlow.verifyLogin(Navigator.of(context));
@@ -163,7 +164,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           }
 
           // Legacy backend only (no F-09 routes): previous client-side MFA prompt.
-          final mfaEnabled = status == null && (res.data['mfa_enabled'] ?? false);
+          final mfaEnabled = SessionGate.needsLegacyClientMfa(status, res.data);
           if (mfaEnabled) {
             debugPrint('[EpicVerse][LOGIN] mfa_enabled=true → sending MFA OTP');
             try {
