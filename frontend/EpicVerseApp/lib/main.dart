@@ -10,6 +10,7 @@ import 'core/theme/app_theme.dart';
 import 'core/network/websocket_service.dart';
 import 'core/network/ssl_pinning_service.dart';
 import 'core/network/mfa_reprompt.dart';
+import 'core/network/mfa_session_manager.dart';
 import 'core/security/mfa_flow.dart';
 import 'core/widgets/network_banner_wrapper.dart';
 import 'core/services/logger_service.dart';
@@ -52,6 +53,10 @@ Future<void> main() async {
       } catch (e, st) {
         LoggerService.logError(e, stackTrace: st, customReason: 'Firebase initialization failed');
       }
+
+      // Restore the MFA session proof from secure storage (it is validated by the server, never trusted locally).
+      // Never throws; on first launch after an install it wipes any stale Keychain entry instead.
+      await MfaSessionManager.restore();
 
       try {
         // Debug builds use the debug provider (a token registered in

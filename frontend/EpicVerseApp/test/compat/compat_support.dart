@@ -8,7 +8,8 @@ import 'package:epicverse/core/network/api_config.dart';
 
 const compatBackend = String.fromEnvironment('COMPAT_BACKEND');
 const compatOutbox = String.fromEnvironment('COMPAT_OUTBOX');
-final bool compatEnabled = compatBackend == 'L' || compatBackend == 'M';
+final bool compatEnabled = compatBackend == 'L' || compatBackend == 'M'; // classic suites: deployed (L) / newer (M)
+final bool compatAdditive = compatBackend == 'A'; // the additive MFA backend
 final bool compatIsLegacy = compatBackend == 'L'; // L = deployed d733776, M = newer e121583
 
 String _b64(Map<String, dynamic> m) => base64Url.encode(utf8.encode(jsonEncode(m))).replaceAll('=', '');
@@ -31,8 +32,24 @@ String fakeIdToken(String uid, String email, {int? authTime}) {
   })}.';
 }
 
-void signInAs(String uid, String email) {
-  ApiConfig.identityForTest = () async => (uid: uid, token: fakeIdToken(uid, email));
+/// [ageSeconds] is how long ago the (fake) Firebase sign-in happened: the token's auth_time.
+void signInAs(String uid, String email, {int ageSeconds = 0}) {
+  final authTime = DateTime.now().millisecondsSinceEpoch ~/ 1000 - ageSeconds;
+  ApiConfig.identityForTest = () async => (uid: uid, token: fakeIdToken(uid, email, authTime: authTime));
+}
+
+/// Test-harness-only route of the isolated local backends: clears limiter/MFA rows and resets the fake users.
+Future<void> resetBackend() async {
+  final base = const String.fromEnvironment('API_BASE_URL');
+  final client = HttpClient();
+  try {
+    final req = await client.postUrl(Uri.parse('$base/__test/reset'));
+    final res = await req.close();
+    await res.drain<void>();
+    if (res.statusCode != 200) throw StateError('backend reset failed: ${res.statusCode}');
+  } finally {
+    client.close();
+  }
 }
 
 /// Signed out: the override stays installed (returning no identity) so tests never touch FirebaseAuth.

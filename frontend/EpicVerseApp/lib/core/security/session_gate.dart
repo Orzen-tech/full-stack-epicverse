@@ -13,6 +13,13 @@ class SessionGate {
   static bool needsServerMfaChallenge(SessionStatus? status) =>
       status != null && status.mfaEnabled && !status.mfaSessionValid;
 
+  /// When the server cannot be asked right now (temporary error), decide conservatively from the profile: anything
+  /// except a missing value or an explicit `false` keeps the MFA gate (never fail open on a malformed value).
+  static bool needsGateWhenStatusUnavailable(Map<dynamic, dynamic> profile) {
+    final value = profile['mfa_enabled'];
+    return value != null && value != false;
+  }
+
   /// True only on a pre-F-09 backend for an MFA-enabled profile: the previous client-side OTP prompt.
   /// Fails closed: only a missing value or an explicit `false` means "no MFA"; any other value (including a
   /// malformed one) keeps the prompt. The original inline code threw on such values rather than skipping MFA.

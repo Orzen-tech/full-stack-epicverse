@@ -15,8 +15,11 @@ import 'otp_verification_screen.dart';
 import 'create_profile_screen.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/errors/app_exception.dart';
+import '../../core/network/mfa_session_manager.dart';
 import '../../core/security/mfa_flow.dart';
 import '../../core/security/session_gate.dart';
+import 'mfa_required_gate.dart';
+import 'splash_screen.dart';
 import '../../core/security/email_verification_flow.dart';
 import '../widgets/security_alert_dialog.dart';
 
@@ -121,6 +124,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           // A null status means the backend predates F-09 (route missing),
           // so the legacy profile fields are used instead.
           final status = await MfaFlow.fetchSessionStatus();
+          if (status == null) await MfaSessionManager.clearAll(); // old backend: no server sessions exist
 
           // Block login if OTP was never verified (app closed mid-registration)
           final emailVerified = SessionGate.emailVerified(status, res.data);
@@ -148,8 +152,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           if (SessionGate.needsServerMfaChallenge(status)) {
             debugPrint('[EpicVerse][LOGIN] MFA required by server → challenge');
             if (!mounted) return;
-            final verified = await MfaFlow.verifyLogin(Navigator.of(context));
-            if (!verified) {
+            final result = await MfaFlow.verifyLoginDetailed(Navigator.of(context));
+            if (result.isTemporary) {
+              // Rate limit or network/server trouble: keep the Firebase sign-in and let the user retry.
+              if (!mounted) return;
+              Navigator.of(context).pushReplacement(MaterialPageRoute(
+                builder: (_) => MfaRequiredGate(
+                  rateLimited: result.outcome == MfaChallengeOutcome.rateLimited,
+                  retryAfterSeconds: result.retryAfterSeconds,
+                  retryBuilder: () => const SplashScreen(),
+                ),
+              ));
+              return;
+            }
+            if (!result.verified) {
               await MfaFlow.signOut();
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(

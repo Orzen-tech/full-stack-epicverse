@@ -9,11 +9,13 @@ import '../../models/user_model.dart';
 import '../../core/network/api_client.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/constants/app_colors.dart';
+import '../../core/network/mfa_session_manager.dart';
 import '../../core/security/mfa_flow.dart';
 import '../../core/security/session_gate.dart';
 import '../../core/security/email_verification_flow.dart';
 import '../../core/security/device_integrity.dart';
 import '../widgets/security_alert_dialog.dart';
+import 'mfa_required_gate.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -133,12 +135,24 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               }
             }
 
-            // F-09: server-authoritative state; null = pre-F-09 backend.
-            SessionStatus? status;
-            try {
-              status = await MfaFlow.fetchSessionStatus();
-            } catch (e) {
-              debugPrint('[EpicVerse][SPLASH] session-status unavailable: ${e.runtimeType}');
+            // F-09: server-authoritative state. A null status with probe.legacy means the backend predates F-09;
+            // probe.unavailable means the server could not be asked right now (a temporary problem).
+            final probe = await MfaFlow.probeSessionStatus();
+            final SessionStatus? status = probe.status;
+            if (probe.legacy) await MfaSessionManager.clearAll(); // rolled back / old backend: no server sessions exist
+            if (probe.unavailable) {
+              debugPrint('[EpicVerse][SPLASH] session-status unavailable (temporary)');
+              if (SessionGate.needsGateWhenStatusUnavailable(data)) {
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(MaterialPageRoute(
+                  builder: (_) => MfaRequiredGate(
+                    rateLimited: probe.retryAfterSeconds != null,
+                    retryAfterSeconds: probe.retryAfterSeconds,
+                    retryBuilder: () => const SplashScreen(),
+                  ),
+                ));
+                return;
+              }
             }
 
             final emailVerified = SessionGate.emailVerified(status, data);
@@ -164,8 +178,20 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
             if (SessionGate.needsServerMfaChallenge(status)) {
               debugPrint('[EpicVerse][SPLASH] MFA required by server → challenge');
               if (!mounted) return;
-              final verified = await MfaFlow.verifyLogin(Navigator.of(context));
-              if (!verified) {
+              final result = await MfaFlow.verifyLoginDetailed(Navigator.of(context));
+              if (result.isTemporary) {
+                // Rate limit or network/server trouble: keep the Firebase sign-in and let the user retry.
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(MaterialPageRoute(
+                  builder: (_) => MfaRequiredGate(
+                    rateLimited: result.outcome == MfaChallengeOutcome.rateLimited,
+                    retryAfterSeconds: result.retryAfterSeconds,
+                    retryBuilder: () => const SplashScreen(),
+                  ),
+                ));
+                return;
+              }
+              if (!result.verified) {
                 await MfaFlow.signOut();
                 await prefs.setBool('isLoggedIn', false);
                 if (!mounted) return;

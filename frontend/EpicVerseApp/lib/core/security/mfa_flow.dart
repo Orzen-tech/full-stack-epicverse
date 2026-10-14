@@ -23,6 +23,41 @@ class SessionStatus {
   });
 }
 
+/// Why an MFA challenge did or did not complete. Temporary problems (rate limit, network, server error) must not
+/// destroy the Firebase sign-in; only an explicit user choice does.
+enum MfaChallengeOutcome {
+  verified,
+  cancelled,
+  rateLimited,
+  unavailable,
+  failed,
+
+  /// The server refused because the Firebase sign-in is no longer recent (RECENT_SIGN_IN_REQUIRED). The caller should
+  /// ask for the password again and start over; nothing was enabled.
+  reauthRequired,
+}
+
+class MfaChallengeResult {
+  const MfaChallengeResult(this.outcome, {this.retryAfterSeconds});
+  final MfaChallengeOutcome outcome;
+  final int? retryAfterSeconds;
+
+  bool get verified => outcome == MfaChallengeOutcome.verified;
+  bool get isTemporary => outcome == MfaChallengeOutcome.rateLimited || outcome == MfaChallengeOutcome.unavailable;
+  bool get needsReauth => outcome == MfaChallengeOutcome.reauthRequired;
+}
+
+/// Result of asking the server for the security state, keeping "the backend predates F-09" (legacy) apart from
+/// "could not ask right now" (unavailable).
+class SessionProbe {
+  const SessionProbe({this.status, this.unavailable = false, this.retryAfterSeconds});
+  final SessionStatus? status;
+  final bool unavailable;
+  final int? retryAfterSeconds;
+
+  bool get legacy => status == null && !unavailable;
+}
+
 typedef MfaStatusGet = Future<Response<dynamic>> Function(String path);
 
 MfaStatusGet? _statusTransportOverride;
@@ -93,6 +128,40 @@ class MfaFlow {
     }
   }
 
+  /// Never throws: separates a modern backend, a legacy one (route missing) and a temporary failure.
+  static Future<SessionProbe> probeSessionStatus() async {
+    try {
+      return SessionProbe(status: await fetchSessionStatus());
+    } on AppException catch (e) {
+      return SessionProbe(unavailable: true, retryAfterSeconds: retryAfterOf(e));
+    } catch (_) {
+      return const SessionProbe(unavailable: true);
+    }
+  }
+
+  @visibleForTesting
+  static int? retryAfterOf(AppException e) {
+    final err = e.originalException;
+    if (err is DioException) return int.tryParse(err.response?.headers.value('retry-after') ?? '');
+    return null;
+  }
+
+  @visibleForTesting
+  static MfaChallengeOutcome failureFor(AppException e) {
+    switch (e.type) {
+      case AppExceptionType.recentSignInRequired:
+        return MfaChallengeOutcome.reauthRequired;
+      case AppExceptionType.rateLimit:
+        return MfaChallengeOutcome.rateLimited;
+      case AppExceptionType.network:
+      case AppExceptionType.timeout:
+      case AppExceptionType.server:
+        return MfaChallengeOutcome.unavailable;
+      default:
+        return MfaChallengeOutcome.failed;
+    }
+  }
+
   static bool _isMissingRoute(AppException e) {
     final err = e.originalException;
     final data = err is DioException ? err.response?.data : null;
@@ -105,32 +174,56 @@ class MfaFlow {
     NavigatorState nav, {
     required String challengePath,
     required String verifyPath,
+  }) async =>
+      (await runChallengeDetailed(nav, challengePath: challengePath, verifyPath: verifyPath)).verified;
+
+  /// Like [runChallenge] but reports why it did not complete.
+  static Future<MfaChallengeResult> runChallengeDetailed(
+    NavigatorState nav, {
+    required String challengePath,
+    required String verifyPath,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return false;
+    if (user == null) return const MfaChallengeResult(MfaChallengeOutcome.failed);
     String? challengeId;
-    final startError = await requestChallenge(challengePath, (id) => challengeId = id);
-    if (startError != null) {
-      _snack(nav, startError);
-      return false;
+    final start = await _startChallenge(challengePath, (id) => challengeId = id);
+    if (start.error != null) {
+      _snack(nav, start.error!);
+      return MfaChallengeResult(start.failure ?? MfaChallengeOutcome.failed, retryAfterSeconds: start.retryAfter);
     }
-    if (challengeId == null) return false;
+    if (challengeId == null) return const MfaChallengeResult(MfaChallengeOutcome.failed);
 
+    var staleSignIn = false;
     final ok = await nav.push<bool>(MaterialPageRoute(
       builder: (_) => OtpVerificationScreen(
         email: user.email ?? '',
         isMfaVerification: true,
-        onSubmitOtp: (otp) => verifyChallenge(verifyPath, challengeId!, otp, user.uid),
+        onSubmitOtp: (otp) async {
+          final step = await verifyStep(verifyPath, challengeId!, otp, user.uid);
+          if (step.failure == MfaChallengeOutcome.reauthRequired) {
+            // The sign-in is no longer recent: close this screen so the caller can ask for the password again.
+            staleSignIn = true;
+            if (nav.canPop()) nav.pop(false);
+          }
+          return step.error;
+        },
         onResend: () => requestChallenge(challengePath, (id) => challengeId = id),
         onVerified: () => nav.pop(true),
         onBack: () => nav.pop(false),
       ),
     ));
-    return ok == true && MfaSessionManager.getSessionForUid(user.uid) != null;
+    if (ok == true && MfaSessionManager.getSessionForUid(user.uid) != null) {
+      return const MfaChallengeResult(MfaChallengeOutcome.verified);
+    }
+    if (staleSignIn) return const MfaChallengeResult(MfaChallengeOutcome.reauthRequired);
+    return MfaChallengeResult(ok == true ? MfaChallengeOutcome.failed : MfaChallengeOutcome.cancelled);
   }
 
   static Future<bool> verifyLogin(NavigatorState nav) =>
       runChallenge(nav, challengePath: loginChallengePath, verifyPath: loginVerifyPath);
+
+  static Future<MfaChallengeResult> verifyLoginDetailed(NavigatorState nav) =>
+      runChallengeDetailed(nav, challengePath: loginChallengePath, verifyPath: loginVerifyPath);
 
   static Future<bool>? _reprompt;
 
@@ -146,38 +239,53 @@ class MfaFlow {
         await apiClient.post('/auth/mfa/logout').timeout(const Duration(seconds: 5));
       } catch (_) {}
     }
-    MfaSessionManager.clear();
+    await MfaSessionManager.clearAll();
     await FirebaseAuth.instance.signOut();
   }
 
-  @visibleForTesting
-  static Future<String?> requestChallenge(String path, void Function(String) onId) async {
+  static Future<({String? error, MfaChallengeOutcome? failure, int? retryAfter})> _startChallenge(
+      String path, void Function(String) onId) async {
     try {
       final res = await apiClient.post(path);
       final id = res.data is Map ? res.data['challenge_id'] : null;
       if (id is String && id.isNotEmpty) onId(id);
-      return null;
+      return (error: null, failure: null, retryAfter: null);
     } on AppException catch (e) {
-      return _message(e, sending: true);
+      return (error: _message(e, sending: true), failure: failureFor(e), retryAfter: retryAfterOf(e));
     }
   }
 
   @visibleForTesting
-  static Future<String?> verifyChallenge(String path, String challengeId, String otp, String uid) async {
+  static Future<String?> requestChallenge(String path, void Function(String) onId) async =>
+      (await _startChallenge(path, onId)).error;
+
+  @visibleForTesting
+  static Future<String?> verifyChallenge(String path, String challengeId, String otp, String uid) async =>
+      (await verifyStep(path, challengeId, otp, uid)).error;
+
+  /// Like [verifyChallenge] but also says WHY it failed (for example a sign-in that is no longer recent).
+  @visibleForTesting
+  static Future<({String? error, MfaChallengeOutcome? failure})> verifyStep(
+      String path, String challengeId, String otp, String uid) async {
     try {
       final res = await apiClient.post(path,
           data: FormData.fromMap({'challenge_id': challengeId, 'otp': otp}));
       final token = res.data is Map ? res.data['mfa_session_token'] : null;
-      if (token is! String || token.isEmpty) return 'Verification failed. Please try again.';
-      MfaSessionManager.setSession(uid, token);
-      return null;
+      if (token is! String || token.isEmpty) {
+        return (error: 'Verification failed. Please try again.', failure: MfaChallengeOutcome.failed);
+      }
+      final expiresIn = res.data is Map ? res.data['expires_in'] : null;
+      MfaSessionManager.setSession(uid, token, expiresInSeconds: expiresIn is int ? expiresIn : null);
+      return (error: null, failure: null);
     } on AppException catch (e) {
-      return _message(e, sending: false);
+      return (error: _message(e, sending: false), failure: failureFor(e));
     }
   }
 
   static String _message(AppException e, {required bool sending}) {
     switch (e.type) {
+      case AppExceptionType.recentSignInRequired:
+        return 'For your security, please confirm your password again.';
       case AppExceptionType.rateLimit:
         return sending
             ? 'Too many code requests. Please wait a few minutes and try again.'

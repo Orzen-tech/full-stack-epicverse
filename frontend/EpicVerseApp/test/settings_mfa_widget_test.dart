@@ -1,7 +1,10 @@
 import 'package:dio/dio.dart';
 import 'package:epicverse/core/errors/app_exception.dart';
 import 'package:epicverse/core/network/api_config.dart';
+import 'package:epicverse/core/security/mfa_enable_flow.dart';
 import 'package:epicverse/core/security/mfa_flow.dart';
+import 'package:epicverse/core/security/password_reauth.dart';
+import 'package:firebase_auth/firebase_auth.dart' show FirebaseAuthException;
 import 'package:epicverse/models/user_model.dart';
 import 'package:epicverse/presentation/screens/settings_screen.dart';
 import 'package:epicverse/providers/user_provider.dart';
@@ -58,6 +61,18 @@ AppException _serverError() => AppException(
 
 const _legacyText = 'Available after our next server update.';
 
+class _FakeReauth implements PasswordReauthenticator {
+  final passwords = <String>[];
+  Object? failWith;
+  @override
+  bool get canReauthenticate => true;
+  @override
+  Future<void> reauthenticate(String password) async {
+    passwords.add(password);
+    if (failWith != null) throw failWith!;
+  }
+}
+
 void main() {
   var otherRequests = 0;
 
@@ -73,6 +88,8 @@ void main() {
   tearDown(() {
     ApiConfig.identityForTest = null;
     setMfaStatusTransportForTest(null);
+    PasswordReauth.useForTest(null);
+    MfaEnableFlow.useChallengeForTest(null);
   });
 
   Future<void> pumpSettings(WidgetTester tester, UserModel user) async {
@@ -170,5 +187,128 @@ void main() {
     expect(find.text(_legacyText), findsOneWidget);
     expect(find.text('Retry'), findsNothing);
     expect(otherRequests, 0);
+  });
+
+  // ---------------------------------------------------------------- explicit password + enable retry (Settings UI)
+  Map<String, dynamic> status({required bool mfa}) => {'email_verified': true, 'mfa_enabled': mfa, 'mfa_session_valid': mfa};
+
+  Future<void> tapToggle(WidgetTester tester) async {
+    await tester.tap(find.byType(SwitchListTile).first);
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> answerPrompt(WidgetTester tester, String? password) async {
+    expect(find.text('Confirm your password'), findsOneWidget, reason: 'the password prompt must be shown');
+    if (password == null) {
+      await tester.tap(find.text('Cancel'));
+    } else {
+      await tester.enterText(find.byType(TextField), password);
+      await tester.tap(find.text('Continue'));
+    }
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('enable: the password prompt appears on EVERY attempt, even right after a previous one', (tester) async {
+    final reauth = _FakeReauth();
+    PasswordReauth.useForTest(reauth);
+    var challenges = 0;
+    MfaEnableFlow.useChallengeForTest((nav) async {
+      challenges++;
+      return const MfaChallengeResult(MfaChallengeOutcome.cancelled);
+    });
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: false)));
+    await pumpSettings(tester, _user(mfa: false));
+    await tapToggle(tester);
+    await answerPrompt(tester, 'pw-one');
+    await tapToggle(tester);
+    await answerPrompt(tester, 'pw-two');
+    expect(reauth.passwords, ['pw-one', 'pw-two']);
+    expect(challenges, 2);
+  });
+
+  testWidgets('enable: cancelling the prompt re-authenticates nothing, requests no code and leaves the toggle off', (tester) async {
+    final reauth = _FakeReauth();
+    PasswordReauth.useForTest(reauth);
+    var challenges = 0;
+    MfaEnableFlow.useChallengeForTest((nav) async {
+      challenges++;
+      return const MfaChallengeResult(MfaChallengeOutcome.verified);
+    });
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: false)));
+    await pumpSettings(tester, _user(mfa: false));
+    await tapToggle(tester);
+    await answerPrompt(tester, null);
+    expect([reauth.passwords, challenges, toggle(tester).value], [<String>[], 0, false]);
+    expect(otherRequests, 0);
+  });
+
+  testWidgets('enable: a wrong password shows an error and requests no code', (tester) async {
+    final reauth = _FakeReauth()..failWith = FirebaseAuthException(code: 'wrong-password');
+    PasswordReauth.useForTest(reauth);
+    var challenges = 0;
+    MfaEnableFlow.useChallengeForTest((nav) async {
+      challenges++;
+      return const MfaChallengeResult(MfaChallengeOutcome.verified);
+    });
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: false)));
+    await pumpSettings(tester, _user(mfa: false));
+    await tapToggle(tester);
+    await answerPrompt(tester, 'wrong');
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect([reauth.passwords, challenges, toggle(tester).value], [['wrong'], 0, false]);
+  });
+
+  testWidgets('enable: the toggle changes only after the server confirms, never before', (tester) async {
+    PasswordReauth.useForTest(_FakeReauth());
+    var serverMfa = false;
+    bool? valueDuringChallenge;
+    MfaEnableFlow.useChallengeForTest((nav) async {
+      valueDuringChallenge = toggle(tester).value; // the user is typing the code right now
+      serverMfa = true; // the server confirms
+      return const MfaChallengeResult(MfaChallengeOutcome.verified);
+    });
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: serverMfa)));
+    await pumpSettings(tester, _user(mfa: false));
+    await tapToggle(tester);
+    await answerPrompt(tester, 'pw');
+    expect(valueDuringChallenge, isFalse);
+    expect(toggle(tester).value, isTrue);
+    expect(find.text('Two-factor authentication is now on.'), findsOneWidget);
+  });
+
+  testWidgets('enable: a stale sign-in shows a clear message, asks for the password again and the retry succeeds', (tester) async {
+    final reauth = _FakeReauth();
+    PasswordReauth.useForTest(reauth);
+    final outcomes = [MfaChallengeOutcome.reauthRequired, MfaChallengeOutcome.verified];
+    var serverMfa = false;
+    var calls = 0;
+    MfaEnableFlow.useChallengeForTest((nav) async {
+      final o = outcomes[calls++];
+      if (o == MfaChallengeOutcome.verified) serverMfa = true;
+      return MfaChallengeResult(o);
+    });
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: serverMfa)));
+    await pumpSettings(tester, _user(mfa: false));
+    await tapToggle(tester);
+    await answerPrompt(tester, 'first');
+    expect(find.textContaining('confirm your password again'), findsOneWidget);
+    await answerPrompt(tester, 'second'); // the prompt appears again by itself
+    expect(reauth.passwords, ['first', 'second']);
+    expect(calls, 2);
+    expect(toggle(tester).value, isTrue);
+  });
+
+  testWidgets('disable: the password prompt is shown every time; cancelling makes no request; confirming does', (tester) async {
+    final reauth = _FakeReauth();
+    PasswordReauth.useForTest(reauth);
+    setMfaStatusTransportForTest((path) async => _ok(status(mfa: true)));
+    await pumpSettings(tester, _user(mfa: true));
+    await tapToggle(tester);
+    await answerPrompt(tester, null);
+    expect([reauth.passwords, otherRequests], [<String>[], 0]);
+    await tapToggle(tester);
+    await answerPrompt(tester, 'pw');
+    expect(reauth.passwords, ['pw']);
+    expect(otherRequests, greaterThanOrEqualTo(1), reason: 'the disable request is only attempted after the password');
   });
 }

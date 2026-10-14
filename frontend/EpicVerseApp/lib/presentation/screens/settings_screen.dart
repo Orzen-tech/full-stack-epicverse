@@ -14,6 +14,8 @@ import '../../core/network/mfa_session_manager.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_mapper.dart';
 import '../../core/security/mfa_flow.dart';
+import '../../core/security/mfa_enable_flow.dart';
+import '../../core/security/password_reauth.dart';
 import 'login_screen.dart';
 import 'welcome_screen.dart';
 import 'legal_content_screen.dart';
@@ -321,12 +323,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     setState(() => _mfaBusy = true);
     try {
       if (enable) {
-        final ok = await MfaFlow.runChallenge(
-          Navigator.of(context),
-          challengePath: MfaFlow.enableRequestPath,
-          verifyPath: MfaFlow.enableConfirmPath,
+        // Explicit Firebase password re-authentication on EVERY attempt (the server also enforces a recent sign-in). If
+        // the sign-in goes stale while the code is being entered, the user is asked for the password again once.
+        final result = await MfaEnableFlow.run(
+          nav: Navigator.of(context),
+          reauthenticate: _confirmPassword,
+          notify: (m) => _showMfaSnack(m, error: true),
         );
-        if (ok) _showMfaSnack('Two-factor authentication is now on.');
+        if (result == MfaEnableResult.enabled) _showMfaSnack('Two-factor authentication is now on.');
       } else {
         await _disableMfa();
       }
@@ -337,11 +341,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _disableMfa() async {
-    if (!await _ensureRecentSignIn()) return;
+    if (!await _confirmPassword()) return; // explicit password every time
     try {
       await apiClient.post('/user/mfa/disable');
     } on AppException catch (e) {
-      if (e.type == AppExceptionType.recentSignInRequired && await _ensureRecentSignIn(force: true)) {
+      if (e.type == AppExceptionType.recentSignInRequired && await _confirmPassword()) {
         try {
           await apiClient.post('/user/mfa/disable');
         } on AppException catch (e2) {
@@ -353,7 +357,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         return;
       }
     }
-    MfaSessionManager.clear();
+    await MfaSessionManager.clearAll();
     _showMfaSnack('Two-factor authentication is now off.');
   }
 
@@ -371,55 +375,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  /// Firebase-native re-authentication when the sign-in is older than the
-  /// backend's 15-minute window. The password goes only to Firebase.
-  Future<bool> _ensureRecentSignIn({bool force = false}) async {
-    final user = FirebaseAuth.instance.currentUser;
-    final email = user?.email;
-    if (user == null || email == null) return false;
-    if (!force) {
-      final authTime = (await user.getIdTokenResult()).authTime;
-      if (authTime != null && DateTime.now().difference(authTime) < const Duration(minutes: 14)) {
-        return true;
-      }
-    }
+  /// Always asks for the password and re-authenticates with Firebase (no "signed in recently" shortcut), so the
+  /// sign-in time the server checks is fresh. The password goes only to Firebase. Returns false if the user cancels
+  /// or the password is wrong (the reason is shown).
+  Future<bool> _confirmPassword() async {
+    final reauth = PasswordReauth.current;
+    if (!reauth.canReauthenticate) return false;
     final password = await _promptPassword();
     if (password == null || password.isEmpty) return false;
     try {
-      await user.reauthenticateWithCredential(EmailAuthProvider.credential(email: email, password: password));
-      await user.getIdToken(true);
+      await reauth.reauthenticate(password);
       return true;
-    } on FirebaseAuthException catch (e) {
+    } catch (e) {
       _showMfaSnack(ErrorMapper.fromException(e).userMessage, error: true);
       return false;
     }
   }
 
-  Future<String?> _promptPassword() async {
-    final controller = TextEditingController();
-    try {
-      return await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppColors.surfaceElevated,
-          title: const Text('Confirm your password', style: TextStyle(color: AppColors.textPrimary)),
-          content: TextField(
-            controller: controller,
-            obscureText: true,
-            autofocus: true,
-            style: const TextStyle(color: AppColors.textPrimary),
-            decoration: const InputDecoration(hintText: 'Password'),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Continue')),
-          ],
-        ),
-      );
-    } finally {
-      controller.dispose();
-    }
-  }
+  Future<String?> _promptPassword() =>
+      showDialog<String>(context: context, builder: (_) => const _PasswordPromptDialog());
 
   void _showMfaSnack(String message, {bool error = false}) {
     if (!mounted) return;
@@ -703,4 +677,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+}
+
+
+/// The password prompt owns its text controller, so the controller is disposed only after the dialog has fully
+/// closed (disposing it right after showDialog returns used it while the closing animation was still running).
+class _PasswordPromptDialog extends StatefulWidget {
+  const _PasswordPromptDialog();
+
+  @override
+  State<_PasswordPromptDialog> createState() => _PasswordPromptDialogState();
+}
+
+class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.surfaceElevated,
+      title: const Text('Confirm your password', style: TextStyle(color: AppColors.textPrimary)),
+      content: TextField(
+        controller: _controller,
+        obscureText: true,
+        autofocus: true,
+        style: const TextStyle(color: AppColors.textPrimary),
+        decoration: const InputDecoration(hintText: 'Password'),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context, _controller.text), child: const Text('Continue')),
+      ],
+    );
+  }
 }

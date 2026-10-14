@@ -50,7 +50,7 @@ void main() {
     test('test-only hooks are never set by app code', () {
       final offenders = <String>[];
       // A call is a violation unless it is the definition itself (preceded by `void `); an assignment likewise.
-      final calls = RegExp(r'(?<!void )(setMfaStatusTransportForTest|setEmailVerificationTransportForTest)\(');
+      final calls = RegExp(r'(?<!void )(setMfaStatusTransportForTest|setEmailVerificationTransportForTest|useStoreForTest|simulateRestartForTest|useChallengeForTest|useForTest)\(');
       final assignment = RegExp(r'identityForTest\s*=(?!=)');
       for (final f in dartFiles) {
         final code = f.readAsLinesSync().where((l) => !l.trimLeft().startsWith('//')).join(' ');
