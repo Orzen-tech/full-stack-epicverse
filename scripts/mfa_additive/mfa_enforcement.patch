@@ -1,0 +1,662 @@
+diff -ruN nb/backend/app/api/dependencies.py nw/backend/app/api/dependencies.py
+--- nb/backend/app/api/dependencies.py	2026-10-15 11:27:11
++++ nw/backend/app/api/dependencies.py	2026-10-15 11:28:19
+@@ -1,7 +1,17 @@
+-from fastapi import HTTPException, Security
++import asyncio
++from collections import Counter
++from dataclasses import dataclass
++
++from fastapi import Depends, Header, HTTPException, Security
+ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+ from firebase_admin import auth
+ 
++from app.core.config import settings
++from app.services.mfa_challenge import (
++    auth_time_from_claims, get_mfa_session_ttl_seconds, validate_mfa_session,
++)
++from app.services.user_db import get_mfa_state
++
+ security = HTTPBearer()
+ 
+ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+@@ -13,3 +23,167 @@
+     except Exception as e:
+         print(f"Firebase token error: {str(e)}")
+         raise HTTPException(status_code=401, detail="Invalid Firebase Auth token")
++
++
++# ---------------------------------------------------------------------------
++# F-09 Phase 1: server-side MFA enforcement.
++#
++# One policy object (mfa_policy) decides, from the startup-validated mode and the verified
++# token UID only, whether a request is OBSERVED (counted) and whether it is ENFORCED
++# (blocked). The HTTP dependencies, the WebSocket handshake and the WebSocket watchdog all
++# use the same decision code, so they cannot disagree. Nothing the client sends (headers,
++# app version, body) selects the mode.
++#
++#   off     -> no check, no database access (existing behaviour)
++#   log     -> observe only, never block
++#   canary  -> enforce for the exact UIDs in MFA_ENFORCE_UIDS, observe everyone else
++#   enforce -> enforce for every MFA-enabled account
++#
++# Enforcement only ever blocks an account whose PostgreSQL row says mfa_enabled = TRUE
++# (or, when PostgreSQL cannot be read, the request that needs that answer). Accounts with
++# MFA off, and accounts without a row (Phase 1: log-only), behave exactly as before.
++# ---------------------------------------------------------------------------
++
++MFA_SESSION_REQUIRED_DETAIL = {
++    "code": "MFA_SESSION_REQUIRED",
++    "message": "MFA verification required. If you use an older version of EpicVerse, please update the app.",
++}
++MFA_CHECK_UNAVAILABLE_DETAIL = {
++    "code": "MFA_CHECK_UNAVAILABLE",
++    "message": "Security check temporarily unavailable. Please try again.",
++}
++
++# Upper bound for one MFA check so a hung database cannot hang a request or the watchdog.
++MFA_CHECK_TIMEOUT_SECONDS = 5.0
++
++# Event counters (fixed names only: never a UID, token, header or email). Logged as plain
++# lines so they can be counted from Cloud Run logs.
++MFA_COUNTERS: Counter = Counter()
++
++
++def mfa_record(event: str) -> None:
++    MFA_COUNTERS[event] += 1
++    print(f"[MFA-ENFORCE] {event}", flush=True)
++
++
++@dataclass(frozen=True)
++class MfaPolicy:
++    observe: bool   # run the check and count outcomes
++    enforce: bool   # act on the outcome (block / close)
++
++
++def mfa_policy(uid) -> MfaPolicy:
++    mode = settings.MFA_ENFORCEMENT_MODE
++    if mode == "off":
++        return MfaPolicy(False, False)
++    if mode == "log":
++        return MfaPolicy(True, False)
++    if mode == "canary":
++        return MfaPolicy(True, bool(uid) and uid in settings.mfa_canary_uid_set())
++    if mode == "enforce":
++        return MfaPolicy(True, True)
++    # Unreachable: the mode is validated at startup. Fail closed if it ever happens.
++    return MfaPolicy(True, True)
++
++
++@dataclass(frozen=True)
++class MfaDecision:
++    # no_row | not_enabled | valid | invalid | db_error
++    outcome: str
++    mfa_required: bool = False          # the account has MFA on
++    reason: str | None = None           # missing_session | invalid_session (for outcome == invalid)
++    ttl_seconds: float | None = None    # PostgreSQL-measured validity left (only when requested)
++
++
++async def evaluate_mfa(uid, auth_time, raw_session, want_ttl: bool = False) -> MfaDecision:
++    """Server-side MFA decision from trusted state: the PostgreSQL account row and the existing
++    MFA session validator (validate_mfa_session, unchanged). Never raises for database trouble:
++    that is reported as outcome 'db_error' so each caller can apply its own mode rules."""
++    if not uid:
++        return MfaDecision("invalid", mfa_required=True, reason="invalid_session")
++    try:
++        state = await asyncio.wait_for(get_mfa_state(uid), MFA_CHECK_TIMEOUT_SECONDS)
++        if state is None:
++            return MfaDecision("no_row")
++        if not state["mfa_enabled"]:
++            return MfaDecision("not_enabled")
++        if not raw_session:
++            return MfaDecision("invalid", mfa_required=True, reason="missing_session")
++        ok = await asyncio.wait_for(validate_mfa_session(raw_session, uid, auth_time), MFA_CHECK_TIMEOUT_SECONDS)
++        if not ok:
++            return MfaDecision("invalid", mfa_required=True, reason="invalid_session")
++        ttl = None
++        if want_ttl:
++            ttl = await asyncio.wait_for(
++                get_mfa_session_ttl_seconds(raw_session, uid, auth_time), MFA_CHECK_TIMEOUT_SECONDS)
++            if ttl is None:
++                return MfaDecision("invalid", mfa_required=True, reason="invalid_session")
++        return MfaDecision("valid", mfa_required=True, ttl_seconds=ttl)
++    except Exception:
++        # Includes asyncio.TimeoutError and asyncpg/connection errors. (CancelledError is not an
++        # Exception subclass, so cancellation still propagates.)
++        return MfaDecision("db_error")
++
++
++def _count_decision(endpoint: str, policy: MfaPolicy, decision: MfaDecision) -> None:
++    if decision.outcome == "invalid":
++        mfa_record(f"{'blocked' if policy.enforce else 'would_block'} endpoint={endpoint} reason={decision.reason}")
++    elif decision.outcome == "db_error":
++        mfa_record(f"{'db_error_blocked' if policy.enforce else 'db_error_allowed'} endpoint={endpoint}")
++    elif decision.outcome == "no_row":
++        mfa_record(f"no_row endpoint={endpoint}")
++
++
++def require_mfa_session(endpoint: str):
++    """HTTP dependency factory: Firebase authentication (unchanged) plus, in log/canary/enforce
++    mode, the MFA check. Returns the verified token claims like get_current_user does."""
++    async def _dependency(
++        current_user: dict = Depends(get_current_user),
++        x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
++    ) -> dict:
++        uid = current_user.get("uid")
++        policy = mfa_policy(uid)
++        if not policy.observe:
++            return current_user
++        decision = await evaluate_mfa(uid, auth_time_from_claims(current_user), x_mfa_session)
++        _count_decision(endpoint, policy, decision)
++        if policy.enforce:
++            if decision.outcome == "invalid":
++                raise HTTPException(status_code=401, detail=MFA_SESSION_REQUIRED_DETAIL)
++            if decision.outcome == "db_error":
++                raise HTTPException(status_code=503, detail=MFA_CHECK_UNAVAILABLE_DETAIL,
++                                    headers={"Retry-After": "5"})
++        return current_user
++    return _dependency
++
++
++def mfa_log_only(endpoint: str):
++    """HTTP dependency that only observes: it never blocks in any mode (Phase 1: account deletion)."""
++    async def _dependency(
++        current_user: dict = Depends(get_current_user),
++        x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
++    ) -> None:
++        uid = current_user.get("uid")
++        if not mfa_policy(uid).observe:
++            return None
++        try:
++            decision = await evaluate_mfa(uid, auth_time_from_claims(current_user), x_mfa_session)
++            # Always counted as "would_block": this endpoint is observation-only in Phase 1.
++            _count_decision(endpoint, MfaPolicy(True, False), decision)
++        except Exception:
++            pass
++        return None
++    return _dependency
++
++
++async def mfa_ws_gate(claims: dict, raw_session: str | None):
++    """WebSocket handshake check. Returns (policy, decision). The caller applies the policy:
++    refuse with MFA_SESSION_REQUIRED on 'invalid' and with a bare 1013 close on 'db_error',
++    but only when policy.enforce is true. The TTL is read only when it will be enforced."""
++    uid = claims.get("uid")
++    policy = mfa_policy(uid)
++    if not policy.observe:
++        return policy, MfaDecision("not_enabled")
++    decision = await evaluate_mfa(uid, auth_time_from_claims(claims), raw_session, want_ttl=policy.enforce)
++    _count_decision("websocket", policy, decision)
++    return policy, decision
+diff -ruN nb/backend/app/api/routes.py nw/backend/app/api/routes.py
+--- nb/backend/app/api/routes.py	2026-10-15 11:27:11
++++ nw/backend/app/api/routes.py	2026-10-15 11:29:02
+@@ -47,7 +47,10 @@
+     verify_login_challenge, confirm_enable_mfa, validate_mfa_session,
+     revoke_mfa_session, disable_mfa_and_revoke_state,
+ )
+-from app.api.dependencies import get_current_user
++from app.api.dependencies import (
++    get_current_user, require_mfa_session, mfa_log_only, mfa_ws_gate,
++    MFA_SESSION_REQUIRED_DETAIL,
++)
+ from app.services.app_check_monitor import log_app_check_status
+ from app.api.scheduler_auth import verify_scheduler_oidc
+ from app.api.admin_auth import verify_admin_user
+@@ -302,7 +305,7 @@
+ 
+ 
+ @router.post("/auth/update-session")
+-async def update_session(session_id: str = Form(...), current_user: dict = Depends(get_current_user)):
++async def update_session(session_id: str = Form(...), current_user: dict = Depends(require_mfa_session("update_session"))):
+     """Called on every login. Writes this device's session_id to DB.
+     Any other device holding a different session_id will be force-logged out."""
+     uid = current_user.get("uid")
+@@ -313,7 +316,7 @@
+ 
+ 
+ @router.get("/auth/check-session")
+-async def check_session(session_id: str, current_user: dict = Depends(get_current_user)):
++async def check_session(session_id: str, current_user: dict = Depends(require_mfa_session("check_session"))):
+     """Returns whether the given session_id is still the active session for this user.
+     If another device has logged in since, the stored session_id will differ."""
+     uid = current_user.get("uid")
+@@ -594,12 +597,36 @@
+         await websocket.close(code=1008)
+         return
+ 
++    # F-09 Phase 1: server-side MFA enforcement (off | log | canary | enforce). Decided from
++    # the verified token UID and PostgreSQL state only; the session is read from the handshake
++    # HEADER, never from the query string. In log/canary-unlisted mode this only observes.
++    mfa_policy_, mfa_decision = await mfa_ws_gate(decoded, websocket.headers.get("x-mfa-session"))
++    if mfa_policy_.enforce and mfa_decision.outcome == "invalid":
++        await websocket.send_text(json.dumps({
++            "type": "error",
++            "code": MFA_SESSION_REQUIRED_DETAIL["code"],
++            "message": MFA_SESSION_REQUIRED_DETAIL["message"],
++        }))
++        await websocket.close(code=1008)
++        return
++    if mfa_policy_.enforce and mfa_decision.outcome == "db_error":
++        # Bare close, deliberately without any frame: the app treats the first message as
++        # "connected" and would reset its reconnect back-off, causing a tight retry loop.
++        await websocket.close(code=1013, reason="mfa-check-unavailable")
++        return
++
+     print(f"[WS] Realtime connection uid={uid} mode={mode} session={session_id}", flush=True)
+     session = RealtimeSession(
+         client_ws=websocket,
+         uid=uid,
+         mode=mode,
+         session_id=session_id,
++        mfa_observe=mfa_policy_.observe,
++        mfa_enforce=mfa_policy_.enforce,
++        mfa_required=mfa_decision.mfa_required,
++        mfa_session=websocket.headers.get("x-mfa-session"),
++        mfa_auth_time=auth_time_from_claims(decoded),
++        mfa_ttl_seconds=mfa_decision.ttl_seconds,
+     )
+     try:
+         await session.run()
+@@ -617,7 +644,7 @@
+ async def process_voice_audio(
+     audio_file: UploadFile = File(...),
+     game_mode: str | None = Form(None),
+-    current_user: dict = Depends(get_current_user)
++    current_user: dict = Depends(require_mfa_session("process_audio"))
+ ):
+     """
+     Main pipeline entry for the Multilingual AI Voice Agent:
+@@ -681,6 +708,7 @@
+ async def delete_user(
+     firebase_id: str,
+     current_user: dict = Depends(get_current_user),
++    _mfa_log_only: None = Depends(mfa_log_only("delete_account")),   # Phase 1: observation only, never blocks
+ ):
+     """Soft-deletes a user account with a 30-day grace period.
+ 
+@@ -1065,7 +1093,7 @@
+ @router.post("/feedback")
+ async def submit_feedback(
+     body: FeedbackRequest,
+-    current_user: dict = Depends(get_current_user),
++    current_user: dict = Depends(require_mfa_session("feedback")),
+ ):
+     from app.services.email_service import send_feedback_notification
+     uid = current_user.get("uid")
+diff -ruN nb/backend/app/core/config.py nw/backend/app/core/config.py
+--- nb/backend/app/core/config.py	2026-10-15 11:27:11
++++ nw/backend/app/core/config.py	2026-10-15 11:30:45
+@@ -2,6 +2,8 @@
+ from pydantic import model_validator
+ from pydantic_settings import BaseSettings
+ 
++_MFA_MODES = ("off", "log", "canary", "enforce")
++
+ class Settings(BaseSettings):
+     PROJECT_NAME: str = "Multilingual AI Voice Agent"
+     VERSION: str = "1.0.0"
+@@ -86,6 +88,19 @@
+     # Not read by any code yet, so empty is safe during Phase 1.
+     MFA_OTP_HASH_SECRET: str = ""
+ 
++    # F-09 Phase 1: server-side MFA enforcement. The mode is read once at startup and
++    # validated strictly (see _validate_mfa_enforcement): an invalid value stops the process
++    # from starting, so a revision with a typo never receives traffic.
++    #   off     = existing behaviour: no MFA check and no database access (default)
++    #   log     = observe only: records what would be blocked, never blocks
++    #   canary  = enforce only for the exact UIDs in MFA_ENFORCE_UIDS, observe everyone else
++    #   enforce = enforce for every MFA-enabled account
++    MFA_ENFORCEMENT_MODE: str = "off"
++    MFA_ENFORCE_UIDS: str = ""             # comma-separated exact Firebase UIDs (canary mode only)
++    # A live MFA-protected voice session is closed (code 1013) when no MFA check has
++    # succeeded for this many seconds, e.g. because PostgreSQL is unreachable.
++    MFA_WS_FAILCLOSED_SECONDS: int = 90
++
+     @model_validator(mode="after")
+     def derive_async_database_url(self) -> "Settings":
+         if not self.ASYNC_DATABASE_URL:
+@@ -94,12 +109,46 @@
+             )
+         return self
+ 
++    def mfa_canary_uid_set(self) -> frozenset:
++        """Exact UIDs enforced in canary mode (no prefix matching)."""
++        return frozenset(u.strip() for u in (self.MFA_ENFORCE_UIDS or "").split(",") if u.strip())
++
+     class Config:
+         case_sensitive = True
+         env_file = ".env"
+         extra = "ignore"
+ 
++
++def _validate_mfa_enforcement(s: "Settings") -> None:
++    """Strict startup validation of the MFA enforcement settings.
++
++    Runs once at import (below). It raises a plain RuntimeError rather than a pydantic validator
++    error: pydantic would print the whole settings object (including secrets) in its message.
++    These messages never repeat any configured value. An invalid configuration stops the process,
++    so a revision with a typo never becomes ready and never receives traffic."""
++    mode = (s.MFA_ENFORCEMENT_MODE or "").strip().lower()
++    if mode not in _MFA_MODES:
++        raise RuntimeError("MFA_ENFORCEMENT_MODE must be exactly one of: off, log, canary, enforce")
++    s.MFA_ENFORCEMENT_MODE = mode
++
++    if mode == "canary":
++        uids = [u.strip() for u in (s.MFA_ENFORCE_UIDS or "").split(",")]
++        if not any(uids):
++            raise RuntimeError("MFA_ENFORCEMENT_MODE=canary requires MFA_ENFORCE_UIDS")
++        if any((not u) or len(u) < 8 or any(c.isspace() for c in u) for u in uids):
++            raise RuntimeError(
++                "MFA_ENFORCE_UIDS must be a comma-separated list of exact UIDs "
++                "(no empty entries, no spaces, at least 8 characters each)")
++
++    if mode != "off" and not (s.MFA_OTP_HASH_SECRET or "").strip():
++        raise RuntimeError("MFA enforcement requires MFA_OTP_HASH_SECRET to be set")
++
++    if not (30 <= s.MFA_WS_FAILCLOSED_SECONDS <= 600):
++        raise RuntimeError("MFA_WS_FAILCLOSED_SECONDS must be between 30 and 600")
++
++
+ settings = Settings()
++_validate_mfa_enforcement(settings)
+ 
+ # Securely bind Google credentials to the OS environment so all SDKs can find them
+ if settings.GOOGLE_APPLICATION_CREDENTIALS:
+diff -ruN nb/backend/app/services/mfa_challenge.py nw/backend/app/services/mfa_challenge.py
+--- nb/backend/app/services/mfa_challenge.py	2026-10-15 11:27:11
++++ nw/backend/app/services/mfa_challenge.py	2026-10-15 11:28:00
+@@ -176,6 +176,30 @@
+     return row is not None
+ 
+ 
++async def get_mfa_session_ttl_seconds(raw_token: str | None, uid: str,
++                                      auth_time: datetime | None) -> float | None:
++    """Seconds of validity left for this session, measured with PostgreSQL's own clock.
++
++    The WHERE clause is deliberately IDENTICAL to validate_mfa_session(), so this can never
++    report a session that the validator rejects. Returns None when the session is not valid.
++    Database errors propagate (callers fail closed). Used by the WebSocket to schedule the
++    close at expiry without needing the database again.
++    """
++    if not raw_token or not uid or auth_time is None:
++        return None
++    pool = await get_pool()
++    async with pool.acquire() as conn:
++        row = await conn.fetchrow('''
++            SELECT EXTRACT(EPOCH FROM (expires_at - NOW())) AS ttl_seconds FROM mfa_sessions
++            WHERE session_hash = $1 AND uid = $2 AND auth_time = $3
++              AND expires_at > NOW() AND revoked_at IS NULL
++        ''', _session_hash(raw_token), uid, auth_time)
++    if row is None:
++        return None
++    ttl = float(row["ttl_seconds"])
++    return ttl if ttl > 0 else None
++
++
+ async def revoke_mfa_session(raw_token: str | None, uid: str) -> None:
+     if not raw_token or not uid:
+         return
+diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/realtime_service.py
+--- nb/backend/app/services/realtime_service.py	2026-10-15 11:27:11
++++ nw/backend/app/services/realtime_service.py	2026-10-15 11:42:56
+@@ -595,7 +595,10 @@
+ # ── Session ───────────────────────────────────────────────────────────────────
+ 
+ class RealtimeSession:
+-    def __init__(self, client_ws: WebSocket, uid: str, mode: str, session_id: str):
++    def __init__(self, client_ws: WebSocket, uid: str, mode: str, session_id: str, *,
++                 mfa_observe: bool = False, mfa_enforce: bool = False, mfa_required: bool = False,
++                 mfa_session: Optional[str] = None, mfa_auth_time=None,
++                 mfa_ttl_seconds: Optional[float] = None):
+         self.client_ws  = client_ws
+         self.uid        = uid
+         self.mode       = mode
+@@ -604,6 +607,27 @@
+         self.openai_ws: Optional[websockets.WebSocketClientProtocol] = None
+         self._active    = True
+ 
++        # ── F-09 Phase 1: server-side MFA enforcement for this connection ─────
++        # Decided once at the handshake from the same policy object the HTTP routes use
++        # (app.api.dependencies.mfa_policy). With the defaults (all False) the watchdog
++        # behaves exactly as before. The raw MFA session is held in memory only and is
++        # never logged.
++        self._mfa_observe       = mfa_observe      # run the periodic MFA check (and count)
++        self._mfa_enforce       = mfa_enforce      # act on it (close the connection)
++        self._mfa_required      = mfa_required     # the account has MFA on
++        self._mfa_session       = mfa_session
++        self._mfa_auth_time     = mfa_auth_time
++        _now_mono               = time.monotonic()
++        # Monotonic deadline derived from PostgreSQL's own remaining-TTL, so expiry can be
++        # honoured even while PostgreSQL is unreachable.
++        self._mfa_expiry_mono: Optional[float] = (
++            _now_mono + mfa_ttl_seconds
++            if (mfa_enforce and mfa_required and mfa_ttl_seconds is not None) else None)
++        self._mfa_last_ok_mono  = _now_mono        # last successful MFA check (handshake counts)
++        self._mfa_would_close_counted = False
++        self._mfa_db_err_counted      = False      # one count per database-outage episode
++        self._mfa_err_streak          = 0          # consecutive unexpected failures of the MFA check
++
+         # ── State tracking ────────────────────────────────────────────────────
+         self._mic_streaming             = False   # True once first audio chunk arrives
+         self._tts_streaming             = False   # True while audio is flowing to client
+@@ -1179,6 +1203,11 @@
+                          f"total_bytes={self._audio_bytes_sent} turns={self._turn_count}")
+                     break
+ 
++                # F-09 Phase 1: a session deactivated while this receive() was waiting (MFA close, kick,
++                # renewal) must not forward the frame that arrived in the meantime.
++                if not self._active:
++                    break
++
+                 # ── Audio bytes (mic stream) ────────────────────────────────
+                 if "bytes" in message:
+                     raw = message["bytes"]
+@@ -1225,8 +1254,12 @@
+                              f"cooldown ended — forwarding {len(buffered)} buffered chunk(s) "
+                              f"captured while the echo guard was active")
+                         for chunk in buffered:
++                            if not self._active:   # deactivated mid-flush: forward nothing more
++                                break
+                             await self._append_audio_to_openai(chunk)
+ 
++                    if not self._active:
++                        break
+                     await self._append_audio_to_openai(raw)
+ 
+                 # ── Text/JSON messages ──────────────────────────────────────
+@@ -1685,7 +1718,7 @@
+         from app.services.user_db import get_session_id
+         try:
+             while self._active:
+-                await asyncio.sleep(poll_interval)
++                await asyncio.sleep(self._watchdog_sleep(poll_interval))
+                 if not self._active:
+                     break
+                 try:
+@@ -1708,8 +1741,160 @@
+                     except Exception:
+                         pass
+                     break
++                # F-09 Phase 1: MFA revalidation. Runs AFTER the single-device check above,
++                # so SESSION_KICKED always takes precedence and is unchanged.
++                if self._mfa_observe and await self._mfa_tick():
++                    break
+         except asyncio.CancelledError:
+             pass
++
++    def _watchdog_sleep(self, poll_interval: float) -> float:
++        """Seconds to sleep before the next watchdog tick.
++
++        Exactly `poll_interval` (existing behaviour) unless this is an ENFORCED MFA session,
++        in which case it wakes early enough to honour the session's expiry and the
++        fail-closed deadline instead of up to `poll_interval` late."""
++        try:
++            if not (self._mfa_enforce and self._mfa_required):
++                return poll_interval
++            now = time.monotonic()
++            wake = poll_interval
++            if self._mfa_expiry_mono is not None:
++                wake = min(wake, self._mfa_expiry_mono - now)
++            wake = min(wake, (self._mfa_last_ok_mono + settings.MFA_WS_FAILCLOSED_SECONDS) - now)
++            # While MFA checks are failing, never poll faster than every 5 s (no hot loop).
++            floor = 5.0 if self._mfa_err_streak > 0 else 0.2
++            return max(floor, wake)
++        except Exception:
++            return poll_interval          # normal scheduling if anything unexpected happens here
++
++    def _mfa_count(self, event: str) -> None:
++        """Counter/log line; a failure here must never change what the watchdog does."""
++        try:
++            from app.api.dependencies import mfa_record
++            mfa_record(event)
++        except Exception:
++            pass
++
++    async def _mfa_close(self, code: int, send_frame: bool, event: str) -> None:
++        """Closes this connection because of the MFA check. Same close pattern as the
++        single-device kick above. `send_frame` is False for database unavailability: a bare
++        close, so the app never mistakes it for a successful connection.
++
++        Best effort and exception-safe: the session is marked inactive FIRST, and neither the
++        error frame, the close nor the counter can stop the others from happening."""
++        self._active = False
++        if send_frame:
++            try:
++                try:
++                    from app.api.dependencies import MFA_SESSION_REQUIRED_DETAIL as _d
++                    frame = {"type": "error", "code": _d["code"], "message": _d["message"]}
++                except Exception:
++                    frame = {"type": "error", "code": "MFA_SESSION_REQUIRED"}
++                await asyncio.wait_for(self.client_ws.send_text(json.dumps(frame)), timeout=5.0)
++            except Exception:
++                pass
++        try:
++            if code == 1013:
++                await asyncio.wait_for(self.client_ws.close(code=1013, reason="mfa-check-unavailable"), timeout=5.0)
++            else:
++                await asyncio.wait_for(self.client_ws.close(code=code), timeout=5.0)
++        except Exception:
++            pass
++        self._mfa_count(event)
++
++    async def _mfa_tick(self) -> bool:
++        """One MFA revalidation. Returns True when it closed the connection. Never raises.
++
++        An unexpected exception can NOT silently disable enforcement: for an enforced MFA session
++        the known expiry and the fail-closed deadline are still applied (see
++        _mfa_fail_closed_after_error). Non-enforced sessions ignore the failure, as before."""
++        try:
++            closed = await self._mfa_tick_inner()
++            self._mfa_err_streak = 0
++            return closed
++        except Exception:
++            try:
++                return await self._mfa_fail_closed_after_error()
++            except Exception:
++                return False
++
++    async def _mfa_fail_closed_after_error(self) -> bool:
++        self._mfa_err_streak += 1
++        if not (self._mfa_enforce and self._mfa_required):
++            return False
++        now = time.monotonic()
++        if self._mfa_expiry_mono is not None and now >= self._mfa_expiry_mono:
++            await self._mfa_close(1008, True, "ws_closed_expired")
++            return True
++        if now - self._mfa_last_ok_mono >= settings.MFA_WS_FAILCLOSED_SECONDS:
++            await self._mfa_close(1013, False, "ws_closed_db_unavailable")
++            return True
++        return False
++
++    async def _mfa_tick_inner(self) -> bool:
++        """One revalidation pass (may raise; _mfa_tick turns an unexpected exception into the fail-closed handling)."""
++        from app.api.dependencies import evaluate_mfa
++        now = time.monotonic()
++
++        # 1. Expiry. The remaining TTL was measured by PostgreSQL at the handshake and is
++        #    tracked on the monotonic clock, so this needs no database.
++        if self._mfa_enforce and self._mfa_required and \
++                self._mfa_expiry_mono is not None and now >= self._mfa_expiry_mono:
++            # One look at the account first: if MFA was switched off since the last check,
++            # there is nothing to expire. A database error (or MFA still on) closes, so
++            # expiry is honoured even while PostgreSQL is unreachable.
++            recheck = await evaluate_mfa(self.uid, self._mfa_auth_time, None)
++            if recheck.outcome in ("not_enabled", "no_row"):
++                self._mfa_last_ok_mono = now
++                self._mfa_required = False
++                self._mfa_expiry_mono = None
++                return False
++            await self._mfa_close(1008, True, "ws_closed_expired")
++            return True
++
++        # 2. Revalidate against PostgreSQL (account flag, then the unchanged validator).
++        decision = await evaluate_mfa(self.uid, self._mfa_auth_time, self._mfa_session)
++
++        if decision.outcome != "db_error":
++            self._mfa_db_err_counted = False
++
++        if decision.outcome == "valid":
++            self._mfa_last_ok_mono = now
++            self._mfa_required = True
++            return False
++        if decision.outcome == "not_enabled":
++            # MFA is (or has been switched) off: nothing to enforce any more.
++            self._mfa_last_ok_mono = now
++            self._mfa_required = False
++            self._mfa_expiry_mono = None
++            return False
++        if decision.outcome == "no_row":
++            self._mfa_last_ok_mono = now
++            self._mfa_count("no_row endpoint=websocket_watchdog")
++            return False
++        if decision.outcome == "invalid":
++            # Revoked, expired, or MFA enabled on another device while this connection
++            # holds no valid MFA session.
++            if self._mfa_enforce:
++                await self._mfa_close(1008, True, "ws_closed_revoked")
++                return True
++            if not self._mfa_would_close_counted:
++                self._mfa_would_close_counted = True
++                self._mfa_count("would_close endpoint=websocket_watchdog")
++            return False
++
++        # db_error: only an ENFORCED connection that is known to need MFA is closed, and
++        # only after MFA_WS_FAILCLOSED_SECONDS without a successful check. Every other
++        # session ignores database errors here, exactly as before.
++        if self._mfa_enforce and self._mfa_required and \
++                now - self._mfa_last_ok_mono >= settings.MFA_WS_FAILCLOSED_SECONDS:
++            await self._mfa_close(1013, False, "ws_closed_db_unavailable")
++            return True
++        if not self._mfa_db_err_counted:
++            self._mfa_db_err_counted = True
++            self._mfa_count("db_error_allowed endpoint=websocket_watchdog")
++        return False
+ 
+     # ─────────────────────────────────────────────────────────────────────────
+     # Session lifecycle
+diff -ruN nb/backend/app/services/user_db.py nw/backend/app/services/user_db.py
+--- nb/backend/app/services/user_db.py	2026-10-15 11:27:11
++++ nw/backend/app/services/user_db.py	2026-10-15 11:27:49
+@@ -548,6 +548,21 @@
+     return await verify_session(uid, session_id)
+ 
+ 
++async def get_mfa_state(uid: str) -> dict | None:
++    """F-09 Phase 1 enforcement: the server-side MFA flag for this UID, read from PostgreSQL.
++
++    Returns {"mfa_enabled": bool}, or None when the account has no row. Unlike the
++    session helpers above, this function deliberately does NOT catch database errors:
++    callers must be able to tell "database unavailable" apart from "no row" and fail closed.
++    """
++    pool = await get_pool()
++    async with pool.acquire() as conn:
++        row = await conn.fetchrow("SELECT mfa_enabled FROM users WHERE uid = $1", uid)
++    if row is None:
++        return None
++    return {"mfa_enabled": bool(row["mfa_enabled"])}
++
++
+ async def validate_invite_code(code: str) -> bool:
+     try:
+         pool = await get_pool()

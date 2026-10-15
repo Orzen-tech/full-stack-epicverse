@@ -4,15 +4,18 @@
 #   * FAKE users (example.invalid) only; no cloud, Firebase, OpenAI, SendGrid or production data is ever contacted;
 #   * everything it creates is removed on exit (success, failure or Ctrl-C).
 #
-# Usage:  bash scripts/mfa_additive/run_local_tests.sh [--no-flutter] [--with-newer]
+# Usage:  bash scripts/mfa_additive/run_local_tests.sh [--no-flutter] [--with-newer] [--no-enforcement]
 # Needs:  Docker, Git Bash, a backend test image (MFA_TEST_IMAGE, default epicverse-backend:tests-c185263) and,
 #         unless --no-flutter, Flutter.   --with-newer also runs the app's older suite against commit e121583.
+#         The Phase 1 ENFORCEMENT tests (build_tree_enforcement.sh = d733776 + mfa_additive.patch + mfa_enforcement.patch;
+#         harness/test_config_validation.py and harness/test_enforcement.py) run last, in the same isolated network, and are
+#         skipped with --no-enforcement. test_enforcement.py takes several minutes (database-outage and watchdog timing).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(git -C "$HERE" rev-parse --show-toplevel)
 IMAGE=${MFA_TEST_IMAGE:-epicverse-backend:tests-c185263}
-FLUTTER=1; NEWER=0
-for a in "$@"; do case "$a" in --no-flutter) FLUTTER=0;; --with-newer) NEWER=1;; *) echo "unknown option $a" >&2; exit 2;; esac; done
+FLUTTER=1; NEWER=0; ENFORCE=1
+for a in "$@"; do case "$a" in --no-flutter) FLUTTER=0;; --with-newer) NEWER=1;; --no-enforcement) ENFORCE=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
 
 W=$(mktemp -d); WW=$(cygpath -w "$W"); BS='\'; HW=$(cygpath -w "$HERE/harness")
 NET=mfa-net; CONTAINERS="mfa-pg mfa-idstub mfa-be-L mfa-be-A mfa-be-M mfa-gw"
@@ -24,6 +27,7 @@ docker network inspect $NET >/dev/null 2>&1 && { echo "network $NET already exis
 mkdir -p "$W/src_L" "$W/src_A" "$W/src_M" "$W/outbox"
 git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive d733776 backend | tar -x -C "$W/src_L"     || exit 1
 bash "$HERE/build_tree.sh" "$W/src_A" >/dev/null                                                          || exit 1
+[ $ENFORCE = 1 ] && { mkdir -p "$W/src_E"; bash "$HERE/build_tree_enforcement.sh" "$W/src_E" >/dev/null || exit 1; }
 [ $NEWER = 1 ] && { git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive e121583 backend | tar -x -C "$W/src_M" || exit 1; }
 
 docker network create --internal $NET >/dev/null || exit 1
@@ -71,6 +75,24 @@ if [ $FLUTTER = 1 ]; then
   run L 18081 test/compat/compat_contract_test.dart test/compat/compat_mfa_additive_test.dart
   run A 18083 test/compat/compat_contract_test.dart test/compat/compat_mfa_additive_test.dart
   [ $NEWER = 1 ] && run M 18082 test/compat/compat_contract_test.dart
+fi
+
+if [ $ENFORCE = 1 ]; then
+  # Phase 1 enforcement. The comparison backends above are stopped first (they are not needed any more and the enforcement
+  # tests start five more backends of their own); the throwaway PostgreSQL and the fake identity service stay up.
+  docker stop mfa-be-L mfa-be-A mfa-be-M mfa-gw >/dev/null 2>&1
+  echo "################ ENFORCEMENT: mfa_additive.patch hash and unchanged files"
+  ah=$(sed 's/\r$//' "$HERE/mfa_additive.patch" | sha256sum | cut -d' ' -f1)
+  [ "$ah" = "edab0188c0b01bd70704812efa4166a64d876e33b5da5f938274220b98f94ba2" ] && echo "PASS  mfa_additive.patch is the verified one ($ah)" || { echo "FAIL  mfa_additive.patch changed ($ah)"; rc=1; }
+  lim_e=$(sed 's/\r$//' "$W/src_E/backend/app/services/otp_rate_limiter.py" | sha256sum | cut -d' ' -f1)
+  lim_d=$(git -C "$ROOT" show d733776:backend/app/services/otp_rate_limiter.py | sha256sum | cut -d' ' -f1)
+  [ "$lim_e" = "$lim_d" ] && echo "PASS  otp_rate_limiter.py still identical in the enforcement tree" || { echo "FAIL  otp_rate_limiter.py differs in the enforcement tree"; rc=1; }
+  echo "################ ENFORCEMENT: startup configuration validation"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_E:/src:ro" --entrypoint python "$IMAGE" -I /h/test_config_validation.py || rc=1
+  echo "################ ENFORCEMENT: WebSocket watchdog failure injection (in-process, seconds)"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_E:/src:ro" --entrypoint python "$IMAGE" -I /h/test_watchdog_failures.py || rc=1
+  echo "################ ENFORCEMENT: endpoints, WebSocket, modes, outages (takes several minutes)"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_E:/src:ro" --entrypoint python "$IMAGE" -I /h/test_enforcement.py || rc=1
 fi
 [ $rc = 0 ] && echo "ALL LOCAL MFA TESTS PASSED" || echo "SOME LOCAL MFA TESTS FAILED"
 exit $rc
