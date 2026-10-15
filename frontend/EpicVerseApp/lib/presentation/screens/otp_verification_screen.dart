@@ -46,6 +46,10 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
   String? _errorMessage;
   bool _isVerified = false;
 
+  // Only a transition from an incomplete to a complete code submits it automatically (see _onDigitChanged). A code that
+  // was already complete and got rejected is never re-submitted by editing the same boxes.
+  bool _wasComplete = false;
+
   // Countdown timer
   int _remainingSeconds = 60;
   Timer? _timer;
@@ -106,10 +110,34 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     });
   }
 
+  bool get _isComplete => _controllers.every((c) => c.text.isNotEmpty);
+
+  /// Keyboard autofill fills the six boxes one after another and becomes complete on the sixth, so it submits once.
+  /// Backspace makes the code incomplete again; the next completion submits once. A code pasted into a single box is
+  /// cut to its first digit by `maxLength: 1` (existing behaviour, unchanged here).
+  void _onDigitChanged(int index, String value) {
+    if (value.isNotEmpty && index < 5) _focusNodes[index + 1].requestFocus();
+    if (value.isEmpty && index > 0) _focusNodes[index - 1].requestFocus();
+    final complete = _isComplete;
+    final justCompleted = complete && !_wasComplete;
+    _wasComplete = complete;
+    if (justCompleted) _verifyOtp();
+  }
+
+  /// Empties the boxes after a rejected or replaced code. `TextEditingController.clear()` does not call `onChanged`, so
+  /// clearing can never submit anything; `_wasComplete` is reset by hand.
+  void _clearCode() {
+    for (final c in _controllers) {
+      c.clear();
+    }
+    _wasComplete = false;
+    if (mounted) _focusNodes[0].requestFocus();
+  }
+
   Future<void> _verifyOtp() async {
     if (_isVerified || _isLoading) return;
-    String otp = _controllers.map((c) => c.text).join();
-    if (otp.length < 6) return;
+    final otp = _controllers.map((c) => c.text).join();
+    if (!_isComplete || otp.length != 6) return; // an incomplete code never reaches the backend
 
     debugPrint('[EpicVerse][OTP] Verify tapped (auto)');
     setState(() {
@@ -125,7 +153,11 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
           _isVerified = true;
           widget.onVerified();
         } else {
+          // Limitation: `onSubmitOtp` returns only a message, so a network or server error is indistinguishable from a
+          // rejected code here; both clear the boxes (the user re-enters the code). The backend limits (5 attempts, 1 minute)
+          // are unchanged.
           setState(() => _errorMessage = error);
+          _clearCode();
         }
       } else if (widget.phone != null && widget.verificationId != null) {
         debugPrint('[EpicVerse][OTP] Verifying via Firebase phone');
@@ -162,6 +194,9 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         setState(() {
           _errorMessage = "Invalid or expired verification code. Please try again.";
         });
+        // Only a confirmed rejection clears the boxes; other failures keep the typed code, and editing it does not
+        // auto-submit because it was already complete.
+        if (isExpectedInvalidOtp) _clearCode();
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -176,6 +211,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         final error = await widget.onResend!();
         if (error == null) {
           _startTimer();
+          _clearCode(); // the previous code is no longer valid
           _showSnackBar("A new code has been sent to your email.");
         } else {
           _showSnackBar(error);
@@ -291,11 +327,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
               fillColor: Colors.white.withOpacity(0.05),
               filled: true,
             ),
-            onChanged: (value) {
-              if (value.isNotEmpty && index < 5) _focusNodes[index + 1].requestFocus();
-              if (value.isEmpty && index > 0) _focusNodes[index - 1].requestFocus();
-              if (_controllers.every((c) => c.text.isNotEmpty)) _verifyOtp();
-            },
+            onChanged: (value) => _onDigitChanged(index, value),
           ),
         );
       }),
