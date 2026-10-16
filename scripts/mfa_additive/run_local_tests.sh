@@ -27,7 +27,7 @@ docker network inspect $NET >/dev/null 2>&1 && { echo "network $NET already exis
 mkdir -p "$W/src_L" "$W/src_A" "$W/src_M" "$W/outbox"
 git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive d733776 backend | tar -x -C "$W/src_L"     || exit 1
 bash "$HERE/build_tree.sh" "$W/src_A" >/dev/null                                                          || exit 1
-[ $ENFORCE = 1 ] && { mkdir -p "$W/src_E"; bash "$HERE/build_tree_enforcement.sh" "$W/src_E" >/dev/null || exit 1; }
+{ [ $ENFORCE = 1 ] || [ $PRIVACY = 1 ]; } && { mkdir -p "$W/src_E"; bash "$HERE/build_tree_enforcement.sh" "$W/src_E" >/dev/null || exit 1; }
 [ $PRIVACY = 1 ] && { mkdir -p "$W/src_P"; bash "$HERE/build_tree_privacy.sh" "$W/src_P" >/dev/null || exit 1; }
 [ $NEWER = 1 ] && { git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive e121583 backend | tar -x -C "$W/src_M" || exit 1; }
 
@@ -111,7 +111,9 @@ if [ $PRIVACY = 1 ]; then
   echo "################ PRIVACY TREE: endpoints, WebSocket, modes, outages (takes several minutes)"
   MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_enforcement.py || rc=1
   echo "################ PRIVACY: logging privacy tests"
-  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_logging_privacy.py || rc=1
+  # /srcE is the tree WITHOUT the privacy patch: the privacy test runs the same replayed provider events against both and compares
+  # everything the backend sends to OpenAI and to the app.
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" -v "${WW}${BS}src_E:/srcE:ro" --entrypoint python "$IMAGE" -I /h/test_logging_privacy.py || rc=1
 fi
 [ $rc = 0 ] && echo "ALL LOCAL MFA TESTS PASSED" || echo "SOME LOCAL MFA TESTS FAILED"
 exit $rc

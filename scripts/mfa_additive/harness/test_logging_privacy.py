@@ -34,6 +34,7 @@ sys.path.insert(0, "/h")
 from fb import token  # noqa: E402
 
 SRC = "/src/backend"
+SRC_BASE = "/srcE/backend"      # the tree WITHOUT the privacy patch (additive + enforcement), for the equivalence run
 PG = "postgresql://postgres@mfa-pg/"
 HASH_SECRET = "local-test-secret-2"
 AT = int(time.time()) - 120
@@ -57,10 +58,20 @@ SQL_EXC = "canary-sql-detail-7b6a5948"
 MAIL_BODY_SECRET = "canary-sendgrid-body-3c2b1a09"
 MAILFILE = "/tmp/priv_mail.jsonl"
 PROVIDER_TEXT = "canary-provider-message-6e5d4c3b"
+# Step 8K: provider ids and model-generated tool values. Every id starts with MARK, so even the old "first 12/16 characters"
+# style of partial logging would put MARK in a log line and be caught.
+MARK = "zq9cn8k"
+CID = "5e1f4a7b"
+TOOL_WORDS = "canary say my name is zed " + CID
+MODE_TEXT = "canary-mode-text-" + CID
+ATTR_TEXT = "canary-attr-text-" + CID
+LANG_TEXT = "canary-lang-text-" + CID
+TOOL_NAME_TEXT = "canary_unknown_tool_" + CID
+SINGLE_WORD = "canarysingleword" + CID
 
 LAUNCHER = r'''
 import os, sys, asyncio, json
-sys.path.insert(0, "/src/backend")
+sys.path.insert(0, os.environ["SRC_BACKEND"])
 import firebase_admin
 from firebase_admin import credentials
 from google.auth.credentials import AnonymousCredentials
@@ -102,9 +113,13 @@ routes.transcribe_audio = _stt
 # --- OpenAI: a fake realtime socket replaying events that contain the canary transcript / AI text ---
 import app.services.realtime_service as rs
 class _FakeOpenAI:
+    """Replays provider events (with canary ids/values) and RECORDS everything the backend sends back, for the equivalence run."""
     def __init__(self):
+        M, C = "zq9cn8k", os.environ["PRIV_CID"]
+        self.wire = os.environ.get("PRIV_WIRE")
+        ids = {k: M + k + C for k in ("sess", "commit", "created", "resp", "fc", "msg", "call1", "call2", "call3", "call5")}
         self.events = [
-            {"type": "session.created", "session": {}},
+            {"type": "session.created", "session": {"id": ids["sess"]}},
             {"type": "input_audio_buffer.speech_started"},
             {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 900},
             {"type": "conversation.item.input_audio_transcription.delta", "delta": CAN_PA},
@@ -116,9 +131,51 @@ class _FakeOpenAI:
             {"type": "error", "error": {"code": "invalid_request_error", "type": "canary_type", "message": "bad request " + CAN_PROV,
                                         "event_id": "evt-1"}},
             {"type": "error", "error": {"code": "free text with spaces " + CAN_PROV, "message": "x"}},
+            # ---- 8K: provider ids -------------------------------------------------------------------------------
+            {"type": "input_audio_buffer.committed", "item_id": ids["commit"]},
+            {"type": "conversation.item.created", "item": {"id": ids["msg"], "type": "message", "role": "assistant"}},
+            {"type": "response.created", "response": {"id": ids["resp"]}},
+            {"type": "response.output_item.added", "item": {"id": ids["fc"], "type": "function_call", "name": "canary_tool_" + C}},
+            {"type": "response.output_item.added", "item": {"id": ids["msg"], "type": "message"}},
+            # ---- 8K: language path (single word + LLM guess that differs from the locked language) ----------------
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": "canarysingleword" + C},
+            # ---- 8K: tool calls ---------------------------------------------------------------------------------
+            {"type": "response.function_call_arguments.done", "call_id": ids["call1"], "name": "query_database_for_combo",
+             "arguments": json.dumps({"mode": "OriginArc (Balakanda)", "character": "3", "attribute": "45", "detected_language": "English"})},
+            {"type": "response.function_call_arguments.done", "call_id": ids["call2"], "name": "query_database_for_combo",
+             "arguments": json.dumps({"mode": "canary-mode-text-" + C, "character": "canary say my name is zed " + C,
+                                      "attribute": "canary-attr-text-" + C, "detected_language": "canary-lang-text-" + C})},
+            {"type": "response.function_call_arguments.done", "call_id": ids["call3"], "name": "canary_unknown_tool_" + C,
+             "arguments": json.dumps({"x": "canary say my name is zed " + C})},
+            {"type": "response.function_call_arguments.done", "call_id": ids["call5"] + "failsend", "name": "query_database_for_combo",
+             "arguments": json.dumps({"mode": "OriginArc (Balakanda)", "character": "5", "attribute": "50", "detected_language": "English"})},
         ]
+        if os.environ.get("PRIV_MALFORMED_CALL") == "1":
+            ok_args = json.dumps({"mode": "OriginArc (Balakanda)", "character": "3", "attribute": "45", "detected_language": "English"})
+            self.events += [
+                {"type": "response.function_call_arguments.done", "call_id": ["zq9cn8kcalllist" + C], "name": "query_database_for_combo", "arguments": ok_args},
+                {"type": "response.function_call_arguments.done", "call_id": 7777123456, "name": "query_database_for_combo", "arguments": ok_args},
+                {"type": "response.function_call_arguments.done", "call_id": None, "name": "query_database_for_combo", "arguments": ok_args},
+                {"type": "response.text.done", "text": "malformed-call-final-marker"},
+            ]
+        if os.environ.get("PRIV_MALFORMED_CALL") != "1" and os.environ.get("PRIV_MALFORMED") == "1":
+            # Missing / non-string provider ids. The unpatched code would raise on `sid[:16]` for these; the patched code must not.
+            self.events += [
+                {"type": "session.created", "session": {"id": 12345}},
+                {"type": "response.created", "response": {"id": {"x": 1}}},
+                {"type": "conversation.item.created", "item": {"id": ["a"], "type": "message", "role": "user"}},
+                {"type": "input_audio_buffer.committed"},
+                {"type": "response.output_item.added", "item": {"type": "function_call", "name": 12345}},
+                {"type": "response.output_item.added", "item": {"id": None, "type": "message"}},
+                {"type": "response.text.done", "text": "malformed-run-final-marker"},
+            ]
     async def close(self): return None
-    async def send(self, *a, **k): return None
+    async def send(self, data=None, *a, **k):
+        if self.wire and data is not None:
+            with open(self.wire, "a") as f: f.write(data + "\n")
+        if isinstance(data, str) and "function_call_output" in data and "failsend" in data:
+            raise RuntimeError("send failed " + CAN_EXC)
+        return None
     def __aiter__(self): return self._gen()
     async def _gen(self):
         for e in self.events:
@@ -137,7 +194,27 @@ class _BoomClient:
     chat = type("c", (), {"completions": _Boom()})()
     audio = type("a", (), {"transcriptions": _Boom()})()
 def _client(): return _BoomClient()
-rs.get_openai_client = _client
+class _Msg:
+    def __init__(self, c): self.content = c
+class _Choice:
+    def __init__(self, c): self.message = _Msg(c)
+class _LLMResp:
+    def __init__(self, c): self.choices = [_Choice(c)]
+class _LLMCompletions:
+    async def create(self, *a, **k):
+        msgs = k.get('messages') or []
+        system = (msgs[0].get('content') if msgs else '') or ''
+        user = (msgs[-1].get('content') if msgs else '') or ''
+        if system.startswith('Identify the language'):
+            return _LLMResp('Hindi' if 'canarysingleword' in user else 'Tamil')
+        return _LLMResp('NONE')     # number extractor: not a number
+class _LLMClient:
+    chat = type('c', (), {'completions': _LLMCompletions()})()
+    audio = type('a', (), {'transcriptions': _Boom()})()
+def _llm_client(): return _LLMClient()
+rs.get_openai_client = _llm_client
+# The app picks a random 'flavor' phrase for card-combo answers; make it deterministic so two trees can be compared byte for byte.
+rs._pick_combo_message = lambda *a, **k: 'Fixed test flavor.'
 import app.services.speech_to_text as stt
 import app.services.ai_pipeline as aip
 stt.get_openai_client = _client
@@ -196,8 +273,9 @@ def sql(db, query, *args, fetch=False):
 
 
 class Server:
-    def __init__(self, name, port, env=None):
-        self.name, self.port, self.env = name, port, env or {}
+    def __init__(self, name, port, env=None, src=SRC):
+        self.name, self.port, self.env, self.src = name, port, env or {}, src
+        self.wire = '/tmp/priv_wire_%s.jsonl' % name
         self.db = "priv_" + name
         self.base = "http://127.0.0.1:%d/api/v1" % port
         self.proc, self.log = None, []
@@ -214,9 +292,12 @@ class Server:
             "ALLOWED_ORIGINS": "http://localhost",
             "PRIV_MAILFILE": MAILFILE, "PRIV_AI": AI_TEXT, "PRIV_TR": TRANSCRIPT, "PRIV_PA": PARTIAL, "PRIV_EXC": SUBJECT_EXC,
             "PRIV_BODY": MAIL_BODY_SECRET, "PRIV_PROBE_EMAIL": EMAIL, "PRIV_PROV": PROVIDER_TEXT,
+            "PRIV_CID": CID, "PRIV_WIRE": self.wire, "SRC_BACKEND": self.src,
         }
         e.update(self.env)
-        self.proc = subprocess.Popen([sys.executable, "-I", "-c", LAUNCHER], env=e, cwd=SRC,
+        if os.path.exists(self.wire):
+            os.remove(self.wire)
+        self.proc = subprocess.Popen([sys.executable, "-I", "-c", LAUNCHER], env=e, cwd=self.src,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         threading.Thread(target=self._drain, daemon=True).start()
 
@@ -369,13 +450,19 @@ def main():
     base = {"MFA_OTP_HASH_SECRET": HASH_SECRET}
     L = Server("log", 18201, dict(base, MFA_ENFORCEMENT_MODE="log"))
     E = Server("enf", 18202, dict(base, MFA_ENFORCEMENT_MODE="enforce"))
-    S = (L, E)
+    B = Server("base", 18203, dict(base, MFA_ENFORCEMENT_MODE="log"), src=SRC_BASE)      # no privacy patch
+    M = Server("mal", 18204, dict(base, MFA_ENFORCEMENT_MODE="log", PRIV_MALFORMED="1"))   # privacy tree, malformed provider ids
+    MCP = Server("mcallp", 18205, dict(base, MFA_ENFORCEMENT_MODE="log", PRIV_MALFORMED_CALL="1"))                    # privacy tree
+    MCB = Server("mcallb", 18206, dict(base, MFA_ENFORCEMENT_MODE="log", PRIV_MALFORMED_CALL="1"), src=SRC_BASE)      # unpatched tree
+    S = (L, E, B, M, MCP, MCB)
     try:
         for s in S:
             s.start()
         for s in S:
             s.wait_ready()
         run(L, E)
+        run_8k(L, E, B, M)
+        run_8kd(MCP, MCB)
     finally:
         for s in S:
             s.stop()
@@ -545,6 +632,225 @@ def run(L, E):
         check("P20 %s: no canary e-mail / UID / OTP / token / transcript / AI text / exception text in ANY captured line" % name, not f, f)
     check("P21 masked correlation ids ARE present (users can still be followed)", any(re.search(r"\bu-[0-9a-f]{10}\b", l) for l in L.log))
     check("P22 'uid=' never followed by a raw 12+ char id", not any(re.search(r"uid=(?!u-|\*\*\*)[A-Za-z0-9_\-]{12,}", l) for l in L.log + E.log))
+
+
+
+def wire(server):
+    """Everything the backend sent to the (fake) OpenAI socket, as canonical JSON strings, order-insensitive."""
+    try:
+        return sorted(json.dumps(json.loads(l), sort_keys=True) for l in open(server.wire) if l.strip())
+    except FileNotFoundError:
+        return []
+
+
+def frames(r):
+    out = []
+    for f in r["frames"]:
+        try:
+            out.append(json.dumps(json.loads(f), sort_keys=True))
+        except Exception:
+            out.append(f if isinstance(f, str) else repr(f))
+    return sorted(out)
+
+
+NEW = (MARK, CID, TOOL_WORDS, MODE_TEXT, ATTR_TEXT, LANG_TEXT, TOOL_NAME_TEXT, SINGLE_WORD)
+
+
+def run_8k(L, E, B, M):
+    """Step 8K: provider ids, raw tool arguments, model-generated strings; and proof that behavior is unchanged."""
+    for srv in (B, M):
+        user(srv.db, UID, EMAIL, mfa=False)
+    T = tok(UID, EMAIL)
+    sid = "8k-session-" + CID
+    # Full-length runs against the patched server (L), the unpatched baseline (B) and the malformed-ids server (M).
+    # L already served earlier test connections that replayed (parts of) the same events: compare only THIS run's traffic.
+    time.sleep(1.0)
+    for srv in (L, B, M):
+        if os.path.exists(srv.wire):
+            os.remove(srv.wire)
+    rL = asyncio.run(watch(L, UID, T, seconds=9.0, session_id=sid))
+    rB = asyncio.run(watch(B, UID, T, seconds=9.0, session_id=sid))
+    rM = asyncio.run(watch(M, UID, T, seconds=9.0, session_id=sid))
+    txt = L.text()
+    lines = list(L.log)
+
+    # ---- provider ids: no raw or partial id anywhere ---------------------------------------------------------------
+    check("K1 provider ids (session/item/response/call): neither the id nor its first 12-16 characters appear in any log line",
+          MARK not in txt and CID not in txt, [l[:90] for l in lines if MARK in l or CID in l][:2])
+    check("K1b masked provider session id is logged (OpenAI session created | session=o-<10hex>)",
+          any(re.search(r"OpenAI session created \| session=o-[0-9a-f]{10}$", l) for l in lines), [l for l in lines if "session created" in l][:2])
+    check("K1c masked item id on committed / created / composing lines",
+          any("audio buffer committed | item=o-" in l for l in lines) and any("CONV ITEM CREATED" in l and re.search(r"item=o-[0-9a-f]{10}", l) for l in lines)
+          and any("LLM COMPOSING" in l and re.search(r"item=o-[0-9a-f]{10}", l) for l in lines))
+    check("K1d masked response id and masked call id",
+          any(re.search(r"response=o-[0-9a-f]{10}", l) for l in lines) and any(re.search(r"fn=query_database_for_combo \| call=o-[0-9a-f]{10}", l) for l in lines))
+    created = re.findall(r"CONV ITEM CREATED.*item=(o-[0-9a-f]{10})", txt)
+    composing = re.findall(r"LLM COMPOSING.*item=(o-[0-9a-f]{10})", txt)
+    check("K1e the same provider id gives the same masked id on different lines (correlation still works)",
+          bool(created) and bool(composing) and created[0] == composing[0], (created[:1], composing[:1]))
+    check("K1f an id that differs gives a different masked id", len(set(re.findall(r"item=(o-[0-9a-f]{10})", txt))) >= 3,
+          set(re.findall(r"item=(o-[0-9a-f]{10})", txt)))
+
+    # ---- raw function-call JSON / tool arguments -------------------------------------------------------------------
+    check("K2 raw function-call JSON and argument values never appear (canary words, mode, attribute, language, tool name)",
+          not any(x in txt for x in (TOOL_WORDS, "canary say my name", MODE_TEXT, ATTR_TEXT, LANG_TEXT, TOOL_NAME_TEXT, SINGLE_WORD, "canary-mode-text", "canary-attr-text")),
+          [l[:100] for l in lines if "canary say" in l or "canary-" in l][:2])
+    check("K2b TOOL ARGS READY keeps the allow-listed function name and only the length of the raw arguments",
+          any(re.search(r"TOOL ARGS READY.*fn=query_database_for_combo \| args_len=\d+$", l) for l in lines)
+          and any(re.search(r"TOOL ARGS READY.*fn=other \| args_len=\d+$", l) for l in lines), [l for l in lines if "TOOL ARGS READY" in l][:3])
+    check("K2c TOOL ARGS RAW: known mode shown, digits flagged; unexpected mode is 'other'; free text flagged 'text' with length only",
+          any(re.search(r"TOOL ARGS RAW.*mode=OriginArc \(Balakanda\) \| char_len=1 char_kind=digits \| attribute_len=2 attribute_kind=digits", l) for l in lines)
+          and any(re.search(r"TOOL ARGS RAW.*mode=other \| char_len=\d+ char_kind=text \| attribute_len=\d+ attribute_kind=text", l) for l in lines),
+          [l for l in lines if "TOOL ARGS RAW" in l][:3])
+    check("K2d NUMBER PARSE FAIL logs lengths and kinds only",
+          any(re.search(r"NUMBER PARSE FAIL.*could not extract card numbers \| char_len=\d+ char_kind=text \| attribute_len=\d+ attribute_kind=text", l) for l in lines),
+          [l for l in lines if "NUMBER PARSE" in l][:2])
+    check("K2e DB QUERY START keeps the (digit-only) card numbers and a safe mode",
+          any(re.search(r"DB QUERY START.*mode=OriginArc \(Balakanda\) AND char='3' AND attribute='45'", l) for l in lines), [l for l in lines if "DB QUERY" in l][:2])
+    check("K2f unknown tool name is reported as 'other'", any("TOOL UNKNOWN" in l and "unknown tool other" in l for l in lines))
+    check("K2g language values: allow-listed name for 'English', 'other' for arbitrary text",
+          any("LANG FROM LLM" in l and "audio-detected → English" in l for l in lines) and any("LANG FROM LLM" in l and "audio-detected → other" in l for l in lines),
+          [l for l in lines if "LANG FROM" in l][:3])
+    check("K2h LANG SWITCH BLOCKED no longer prints the transcript (length and allow-listed languages only)",
+          any(re.search(r"LANG SWITCH BLOCKED.*utterance \(len=\d+\) guessed Hindi — keeping locked language Tamil", l) for l in lines) and SINGLE_WORD not in txt,
+          [l for l in lines if "LANG SWITCH" in l][:2])
+    check("K2i send failures and error paths log the exception class only (no exception text)",
+          any("TOOL SEND ERROR" in l and "RuntimeError" in l for l in lines) and SUBJECT_EXC not in txt and "send failed" not in txt,
+          [l[:100] for l in lines if "TOOL SEND ERROR" in l][:2])
+
+    # ---- malformed / missing identifiers ---------------------------------------------------------------------------
+    mt = M.text()
+    check("K3 malformed ids (int, dict, list, None, missing) do not break the relay: the replay ran to its final event",
+          any("malformed-run-final-marker" in f for f in rM["frames"]) and "OPENAI RELAY ERR" not in mt, [l[:100] for l in M.log if "RELAY ERR" in l][:2])
+    check("K3b malformed ids are logged as 'invalid' or 'none', never as their content",
+          "session=invalid" in mt and "item=invalid" in mt and "response=invalid" in mt and "item=none" in mt, [l[:100] for l in M.log if "session created" in l][:2])
+
+    # ---- behavior equivalence: unpatched baseline (B) vs patched (L) -----------------------------------------------
+    wl, wb = wire(L), wire(B)
+    check("K4 messages sent to OpenAI (function_call_output, response.create, session.update, ...) are IDENTICAL: %d vs %d" % (len(wl), len(wb)),
+          wl == wb and len(wl) > 0, (len(wl), len(wb), [x for x in wl if x not in wb][:1], [x for x in wb if x not in wl][:1]))
+    check("K4b the tool call outputs (the 'output' of each function_call_output) are identical",
+          sorted(x for x in wl if "function_call_output" in x) == sorted(x for x in wb if "function_call_output" in x) and any("function_call_output" in x for x in wl))
+    check("K4c response.create is sent the same number of times",
+          sum('"response.create"' in x for x in wl) == sum('"response.create"' in x for x in wb) and sum('"response.create"' in x for x in wl) >= 1,
+          (sum('"response.create"' in x for x in wl), sum('"response.create"' in x for x in wb)))
+    if wl != wb:      # diagnostics for a failed comparison (synthetic data only)
+        import difflib
+        for x in wl:
+            if x not in wb:
+                close = difflib.get_close_matches(x, wb, n=1, cutoff=0.5)
+                print("  [diag] patched-only message vs closest baseline message (differing pieces):")
+                if close:
+                    sm = difflib.SequenceMatcher(None, x, close[0])
+                    for op, i1, i2, j1, j2 in sm.get_opcodes():
+                        if op != "equal":
+                            print("    patched[%r]  baseline[%r]" % (x[max(0, i1 - 15):i2 + 15][:160], close[0][max(0, j1 - 15):j2 + 15][:160]))
+        for nm, srv in (("baseline", B), ("patched", L)):
+            print("  [diag] %s server, lifecycle/error lines:" % nm)
+            for l in srv.log:
+                if any(t in l for t in ("ERR", "ERROR", "RELAY", "CLOSED", "TOOL", "DB ", "SESSION")):
+                    print("    " + l[:170])
+    fl, fb = frames(rL), frames(rB)
+    check("K4d messages delivered to the app over the WebSocket are IDENTICAL: %d vs %d" % (len(fl), len(fb)), fl == fb and len(fl) > 0,
+          (len(fl), len(fb), [x[:80] for x in fl if x not in fb][:1], [x[:80] for x in fb if x not in fl][:1]))
+    check("K4e the unpatched baseline really does log the raw values (the comparison is sensitive)",
+          MARK in B.text() and TOOL_WORDS in B.text(), "baseline log missing canaries")
+    check("K4f close behaviour is the same (both connected, same close outcome)",
+          any("connection_success" in f for f in rL["frames"]) and any("connection_success" in f for f in rB["frames"]) and rL["closed"] == rB["closed"], (rL["closed"], rB["closed"]))
+    for name, srv in (("patched", L), ("malformed-run", M)):
+        check("K5 %s server: no raw canary (anywhere) in any captured line" % name, not leaks(srv, extra=NEW), leaks(srv, extra=NEW))
+
+
+def db_state(server):
+    """Row counts and the user's session columns: what a request could have changed in the database."""
+    out = {}
+    for tbl in ("mfa_sessions", "mfa_login_challenges", "user_otps", "otp_send_rate_limits", "user_feedback"):
+        out[tbl] = sql(server.db, "select count(*) from %s" % tbl, fetch=True)[0][0]
+    row = sql(server.db, "select count(*), max(session_id), bool_or(mfa_enabled), bool_or(email_verified) from users", fetch=True)[0]
+    out["users"] = tuple(row)
+    return out
+
+
+def wire_outputs(server):
+    """The call_id of every function_call_output the backend sent to the (fake) OpenAI socket, with its original JSON type."""
+    res, texts = [], []          # texts[i] belongs to res[i]
+    if os.path.exists(server.wire):
+        for l in open(server.wire):
+            try:
+                m = json.loads(l)
+            except Exception:
+                continue
+            if m.get("item", {}).get("type") == "function_call_output":
+                res.append(m["item"]["call_id"])
+                texts.append(m["item"]["output"])
+    return res, texts
+
+
+def run_8kd(P, Bm):
+    """Step 8K-D: tool calls whose OpenAI call_id is NOT a string (list, integer, null), on the patched and the unpatched tree.
+
+    Documents the one behavior difference found in the 8K-C review: the old log line did call_id[:12], which raised for an integer
+    or null and ended the relay; the new log line cannot raise. Observed, not assumed."""
+    for srv in (P, Bm):
+        user(srv.db, UID, EMAIL, mfa=False)
+    T = tok(UID, EMAIL)
+    sid = "8kd-session-" + CID
+    time.sleep(1.0)
+    for srv in (P, Bm):
+        if os.path.exists(srv.wire):
+            os.remove(srv.wire)
+    rP = asyncio.run(watch(P, UID, T, seconds=9.0, session_id=sid))
+    rB = asyncio.run(watch(Bm, UID, T, seconds=9.0, session_id=sid))
+    lp, lb = list(P.log), list(Bm.log)
+    tp, tb = P.text(), Bm.text()
+    op, otp = wire_outputs(P)
+    ob, otb = wire_outputs(Bm)
+    kinds = lambda xs: sorted(type(x).__name__ for x in xs)
+    # Every server also plays the standard replay events (well-formed calls with string call_ids); look only at the malformed ones.
+    bad_p = [(c, t) for c, t in zip(op, otp) if not isinstance(c, str)]
+    bad_b = [(c, t) for c, t in zip(ob, otb) if not isinstance(c, str)]
+    good_p = [t for c, t in zip(op, otp) if c == "zq9cn8kcall1" + CID]        # the standard well-formed lookup of cards 3 / 45
+    print("  [observed] patched: function_call_output call_id types sent to OpenAI (all): %s" % kinds(op))
+    print("  [observed] unpatched: function_call_output call_id types sent to OpenAI (all): %s" % kinds(ob))
+    print("  [observed] patched: DB QUERY START=%d, NUMBER PARSE FAIL=%d, relay errors=%d" %
+          (sum("DB QUERY START" in l for l in lp), sum("NUMBER PARSE FAIL" in l for l in lp), sum("RELAY ERR" in l for l in lp)))
+    print("  [observed] unpatched: DB QUERY START=%d, relay errors=%d" % (sum("DB QUERY START" in l for l in lb), sum("RELAY ERR" in l for l in lb)))
+
+    # ---- logging: classified safely, nothing raw, no exception from the logging operation -------------------------------
+    calls = [l for l in lp if "TOOL CALL RECEIVED" in l]
+    check("K6 non-string call_id values are logged only as 'invalid' (list, integer) and 'none' (null); well-formed ones as masked ids",
+          sum("call=invalid" in l for l in calls) == 2 and sum("call=none" in l for l in calls) == 1
+          and sum(bool(re.search(r"call=o-[0-9a-f]{10}$", l)) for l in calls) == len(calls) - 3, [c[-40:] for c in calls])
+    check("K6b the raw call_id (list content, integer, partial values) appears in no log line of the patched server",
+          "7777123456" not in tp and MARK not in tp and "zq9cn8kcalllist" not in tp, [l[:100] for l in lp if "7777123456" in l or MARK in l][:2])
+    check("K6c no exception escaped from the logging code: no relay error, and the replay ran to its final event",
+          "RELAY ERR" not in tp and "RELAY ERROR" not in tp and any("malformed-call-final-marker" in f for f in rP["frames"]),
+          [l[:100] for l in lp if "ERR" in l][:2])
+
+    # ---- what the relay does with them (explicitly observed) -------------------------------------------------------------
+    std_lookups = sum("DB QUERY START" in l for l in lb) - 1              # unpatched tree: standard lookups + the one list-id call it processed
+    check("K7 the game lookup is attempted once per malformed tool call (%d standard + 3 malformed = %d DB QUERY START) and no other tool is run"
+          % (std_lookups, std_lookups + 3),
+          sum("DB QUERY START" in l for l in lp) == std_lookups + 3 and sum("TOOL UNKNOWN" in l for l in lp) == sum("TOOL UNKNOWN" in l for l in lb) == 1,
+          (sum("DB QUERY START" in l for l in lp), std_lookups, sum("TOOL UNKNOWN" in l for l in lp)))
+    check("K7b a function_call_output is produced for each malformed call and echoes the malformed id back to OpenAI (list, int, null): documented behavior",
+          sorted(type(c).__name__ for c, _ in bad_p) == ["NoneType", "int", "list"], kinds([c for c, _ in bad_p]))
+    check("K7c the tool result inside those 3 outputs is exactly the result of the well-formed lookup of the same cards (identical output text)",
+          len(bad_p) == 3 and len(good_p) == 1 and all(t == good_p[0] for _, t in bad_p), (len(bad_p), len(good_p)))
+
+    # ---- no state change beyond the normal connection ------------------------------------------------------------------------
+    sp, sb = db_state(P), db_state(Bm)
+    check("K8 database state after the malformed tool calls: no MFA, OTP or feedback rows; the user row only has the normal session_id",
+          sp["mfa_sessions"] == sp["mfa_login_challenges"] == sp["user_otps"] == sp["otp_send_rate_limits"] == sp["user_feedback"] == 0
+          and sp["users"][0] == 1 and sp["users"][1] == sid and sp["users"][2] is False, sp)
+    check("K8b the patched and the unpatched trees leave identical database state", sp == sb, (sp, sb))
+
+    # ---- the unpatched tree's old behavior, for the record ---------------------------------------------------------------------
+    check("K9 unpatched tree: a log line raised for the integer call_id and ended the relay (the old behavior this test documents)",
+          any("RELAY ERR" in l for l in lb) and not any("malformed-call-final-marker" in f for f in rB["frames"]), [l[:100] for l in lb if "ERR" in l][:2])
+    check("K9b unpatched tree: only the list-id call (slicing a list does not raise) reached OpenAI, and its raw id was logged",
+          sorted(type(c).__name__ for c, _ in bad_b) == ["list"] and "zq9cn8kcalllist" in tb, kinds([c for c, _ in bad_b]))
+    check("K10 no raw canary anywhere in the patched server's output", not leaks(P, extra=NEW + ("7777123456",)), leaks(P, extra=NEW + ("7777123456",)))
 
 
 if __name__ == "__main__":

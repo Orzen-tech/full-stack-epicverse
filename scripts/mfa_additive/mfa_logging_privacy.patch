@@ -20,12 +20,12 @@ diff -ruN nb/backend/app/api/dependencies.py nw/backend/app/api/dependencies.py
  
 diff -ruN nb/backend/app/api/routes.py nw/backend/app/api/routes.py
 --- nb/backend/app/api/routes.py	2026-10-16 10:11:24.834961700 +0530
-+++ nw/backend/app/api/routes.py	2026-10-16 10:14:44.438357600 +0530
++++ nw/backend/app/api/routes.py	2026-10-16 12:16:15.477151200 +0530
 @@ -55,6 +55,7 @@
  from app.api.scheduler_auth import verify_scheduler_oidc
  from app.api.admin_auth import verify_admin_user
  from app.services.otp_rate_limiter import check_otp_send_allowed
-+from app.core.log_privacy import mask_id, safe_exc, safe_traceback
++from app.core.log_privacy import mask_id, safe_exc, safe_mode, safe_traceback
  
  router = APIRouter()
  
@@ -93,7 +93,7 @@ diff -ruN nb/backend/app/api/routes.py nw/backend/app/api/routes.py
          return
  
 -    print(f"[WS] Realtime connection uid={uid} mode={mode} session={session_id}", flush=True)
-+    print(f"[WS] Realtime connection uid={mask_id(uid, 'u')} mode={mode} session={mask_id(session_id, 's')}", flush=True)
++    print(f"[WS] Realtime connection uid={mask_id(uid, 'u')} mode={safe_mode(mode)} session={mask_id(session_id, 's')}", flush=True)
      session = RealtimeSession(
          client_ws=websocket,
          uid=uid,
@@ -150,8 +150,8 @@ diff -ruN nb/backend/app/api/routes.py nw/backend/app/api/routes.py
          "status": "success",
 diff -ruN nb/backend/app/core/log_privacy.py nw/backend/app/core/log_privacy.py
 --- nb/backend/app/core/log_privacy.py	1970-01-01 05:30:00.000000000 +0530
-+++ nw/backend/app/core/log_privacy.py	2026-10-16 10:38:24.386334700 +0530
-@@ -0,0 +1,184 @@
++++ nw/backend/app/core/log_privacy.py	2026-10-16 12:15:38.679236200 +0530
+@@ -0,0 +1,283 @@
 +"""Keeps personal data and credentials out of the application's own logs (stdout/stderr, which Cloud Run ships to Cloud Logging).
 +
 +What this module provides
@@ -236,6 +236,105 @@ diff -ruN nb/backend/app/core/log_privacy.py nw/backend/app/core/log_privacy.py
 +    """A provider error code/type such as ``invalid_request_error`` when it looks like one; ``?`` otherwise (never free text)."""
 +    text = str(value) if value is not None else ""
 +    return text if _CODE.fullmatch(text) else "?"
++
++
++# ---------------------------------------------------------------------------------------------------------------------
++# Log-safe views of provider ids and model-generated values (8K). Logging only: callers keep using the original values.
++# Strict allow-lists (not "looks like a token" checks): a value that is not on the list is reported as "other", so
++# user-supplied or model-generated free text can never reach a log line through these helpers.
++# ---------------------------------------------------------------------------------------------------------------------
++_KNOWN_TOOLS = ("query_database_for_combo", "stay_silent", "get_combo_reason")
++_KNOWN_MODES = ("OriginArc (Balakanda)", "CrownShift (AyodhyaKanda)", "WildRun (AranyaKanda)",
++                "GlowLine (KishkindhaKanda)", "lankaLeap (SundaraKanda)", "WarRoom (YuddhaKanda)",
++                "AfterLight (UttaraKanda)", "N/A (No tool call)")
++_KNOWN_LANGUAGES = (
++    "English", "French", "Spanish", "German", "Portuguese", "Italian", "Dutch", "Swedish", "Danish", "Norwegian",
++    "Finnish", "Polish", "Czech", "Slovak", "Romanian", "Hungarian", "Turkish", "Indonesian", "Malay", "Vietnamese",
++    "Swahili", "Afrikaans", "Catalan", "Croatian", "Slovenian", "Estonian", "Latvian", "Lithuanian", "Filipino",
++    "Tagalog", "Tamil", "Malayalam", "Telugu", "Kannada", "Bengali", "Gujarati", "Odia", "Punjabi", "Thai",
++    "Georgian", "Greek", "Hebrew", "Korean", "Chinese", "Japanese", "Hindi", "Marathi", "Urdu", "Arabic", "Persian",
++    "Russian", "Ukrainian", "Bulgarian", "Serbian", "Nepali", "Sanskrit", "Pashto", "Konkani",
++    "Devanagari", "ArabicScript", "Cyrillic", "Latin",
++)
++_MODE_NUMBER = re.compile(r"Mode [0-9]{1,2}")
++
++
++def _lookup(table):
++    return {name.lower(): name for name in table}
++
++
++_TOOL_BY_KEY = _lookup(_KNOWN_TOOLS)
++_MODE_BY_KEY = _lookup(_KNOWN_MODES)
++_LANGUAGE_BY_KEY = _lookup(_KNOWN_LANGUAGES)
++
++
++def _allowed(value, table) -> str:
++    """The canonical spelling when ``value`` is on the allow-list, ``none`` when absent, otherwise ``other``."""
++    try:
++        if value is None:
++            return "none"
++        if not isinstance(value, str):
++            return "other"
++        return table.get(value.strip().lower(), "other")
++    except Exception:
++        return "other"
++
++
++def safe_tool(value) -> str:
++    """Tool/function name from the allow-list of tools this backend defines, else ``other``."""
++    return _allowed(value, _TOOL_BY_KEY)
++
++
++def safe_mode(value) -> str:
++    """Game mode: one of the seven known mode names, ``Mode <n>``, or ``other`` (never the original text)."""
++    try:
++        if isinstance(value, str) and _MODE_NUMBER.fullmatch(value.strip()):
++            return value.strip()
++    except Exception:
++        return "other"
++    return _allowed(value, _MODE_BY_KEY)
++
++
++def safe_language(value) -> str:
++    """Language or script-family name from a fixed list, else ``other``."""
++    return _allowed(value, _LANGUAGE_BY_KEY)
++
++
++def safe_len(value) -> int:
++    """Length of a string/bytes value, without its content; -1 for anything else."""
++    try:
++        return len(value) if isinstance(value, (str, bytes)) else -1
++    except Exception:
++        return -1
++
++
++def arg_kind(value) -> str:
++    """``digits``, ``empty``, ``text`` or ``invalid``: what kind of value it is, not what it says."""
++    try:
++        if not isinstance(value, str):
++            return "invalid"
++        stripped = value.strip()
++        if not stripped:
++            return "empty"
++        return "digits" if (stripped.isascii() and stripped.isdigit()) else "text"
++    except Exception:
++        return "invalid"
++
++
++def mask_provider(value) -> str:
++    """Correlation id for an id issued by the AI provider (session, response, item, call): ``o-<10 hex>``.
++
++    Same input -> same output, so lines can still be followed; nothing of the original is shown. Absent or malformed
++    values give ``none`` / ``invalid`` and never raise."""
++    try:
++        if value is None or value in ("", "?"):
++            return "none"
++        if not isinstance(value, str):
++            return "invalid"
++        return mask_id(value, "o")
++    except Exception:
++        return "invalid"
++
 +
 +
 +def safe_traceback(exc: BaseException, limit: int = 12) -> str:
@@ -389,23 +488,26 @@ diff -ruN nb/backend/app/main.py nw/backend/app/main.py
      print("Server shutting down.")
 diff -ruN nb/backend/app/services/ai_pipeline.py nw/backend/app/services/ai_pipeline.py
 --- nb/backend/app/services/ai_pipeline.py	2026-10-05 13:00:00.000000000 +0530
-+++ nw/backend/app/services/ai_pipeline.py	2026-10-16 10:14:44.470200800 +0530
++++ nw/backend/app/services/ai_pipeline.py	2026-10-16 12:15:38.679236200 +0530
 @@ -2,6 +2,7 @@
  import json
  from app.core.config import settings
  from app.services.openai_client import get_openai_client
-+from app.core.log_privacy import safe_exc
++from app.core.log_privacy import safe_exc, safe_mode
  from app.services.retriever import query_postgres_database
  from app.services.memory_store import session_store
  from app.services.realtime_service import _pick_combo_message
-@@ -192,9 +193,9 @@
+@@ -191,10 +192,10 @@
+             
          # --- TERMINAL LOGGING ---
          print("\n" + "="*50, flush=True)
-         print(f"USER SELECTED MODE : {game_mode}", flush=True)
+-        print(f"USER SELECTED MODE : {game_mode}", flush=True)
 -        print(f"QUESTION           : {text}", flush=True)
-+        print(f"QUESTION           : {len(text or '')} chars", flush=True)
-         print(f"LLM SELECTED MODE  : {llm_selected_mode}", flush=True)
+-        print(f"LLM SELECTED MODE  : {llm_selected_mode}", flush=True)
 -        print(f"RESPONSE           : {final_text}", flush=True)
++        print(f"USER SELECTED MODE : {safe_mode(game_mode)}", flush=True)
++        print(f"QUESTION           : {len(text or '')} chars", flush=True)
++        print(f"LLM SELECTED MODE  : {safe_mode(llm_selected_mode)}", flush=True)
 +        print(f"RESPONSE           : {len(final_text or '')} chars", flush=True)
          print("="*50 + "\n", flush=True)
          
@@ -499,16 +601,18 @@ diff -ruN nb/backend/app/services/memory_store.py nw/backend/app/services/memory
          return self.redis
 diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/realtime_service.py
 --- nb/backend/app/services/realtime_service.py	2026-10-16 10:11:24.866551500 +0530
-+++ nw/backend/app/services/realtime_service.py	2026-10-16 10:38:14.407850100 +0530
-@@ -11,6 +11,7 @@
++++ nw/backend/app/services/realtime_service.py	2026-10-16 12:16:15.477151200 +0530
+@@ -11,6 +11,9 @@
  from fastapi import WebSocket
  
  from app.core.config import settings
-+from app.core.log_privacy import mask_id, safe_code, safe_exc
++from app.core.log_privacy import (
++    arg_kind, mask_id, mask_provider, safe_code, safe_exc, safe_language, safe_len, safe_mode, safe_tool,
++)
  from app.services.retriever import query_postgres_database
  from app.services.openai_client import get_openai_client
  
-@@ -115,7 +116,7 @@
+@@ -115,7 +118,7 @@
      ts  = _dt.datetime.utcnow().strftime("%H:%M:%S.%f")[:-3]
      tag = f"[{step:<22}]"
      suffix = f" → {data}" if data else ""
@@ -517,7 +621,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
  
  # Separator printed once per session for readability
-@@ -310,7 +311,7 @@
+@@ -310,7 +313,7 @@
          _NUMBER_WORD_CACHE[stripped] = parsed
          return parsed
      except Exception as e:
@@ -526,7 +630,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
          _NUMBER_WORD_CACHE[stripped] = None
          return None
  
-@@ -694,8 +695,8 @@
+@@ -694,8 +697,8 @@
              return
          rec = {
              "telemetry":      event,
@@ -537,19 +641,34 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
              "session_age_s":  round(time.monotonic() - self._session_start_ts),
              "active_sessions": len(_ACTIVE_SESSIONS),
              "history_on":     self._history_on,
-@@ -776,9 +777,9 @@
-                      f"— keeping locked language {self._current_language}")
+@@ -725,7 +728,7 @@
+ 
+         # Unique script + same as last turn → language can't have changed, reuse cache
+         if script in _UNIQUE_SCRIPT_LANGUAGES and script == self._last_script:
+-            _log("LANG CACHED",    self.uid, f"unique script ({script}) → reusing {self._current_language}")
++            _log("LANG CACHED",    self.uid, f"unique script ({script}) → reusing {safe_language(self._current_language)}")
+             return
+ 
+         # For shared scripts keep the previously detected language as fallback
+@@ -772,13 +775,13 @@
+             word_count = len(transcript.strip().split())
+             if word_count < 2 and lang != "English" and lang != self._current_language:
+                 _log("LANG SWITCH BLOCKED", self.uid,
+-                     f"single-word/ambiguous utterance '{transcript}' guessed {lang} "
+-                     f"— keeping locked language {self._current_language}")
++                     f"single-word/ambiguous utterance (len={len(transcript)}) guessed {safe_language(lang)} "
++                     f"— keeping locked language {safe_language(self._current_language)}")
              else:
                  self._current_language = lang
 -                _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript='{transcript[:50]}'")
-+                _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript_len={len(transcript)}")
++                _log("LANG DETECTED",  self.uid, f"LLM → {safe_language(lang)} | transcript_len={len(transcript)}")
          except Exception as e:
 -            _log("LANG DETECT ERR", self.uid, f"{e} — keeping {self._current_language}")
-+            _log("LANG DETECT ERR", self.uid, f"{safe_exc(e)} — keeping {self._current_language}")
++            _log("LANG DETECT ERR", self.uid, f"{safe_exc(e)} — keeping {safe_language(self._current_language)}")
  
      # ─────────────────────────────────────────────────────────────────────────
      # OpenAI connection
-@@ -812,7 +813,7 @@
+@@ -812,7 +815,7 @@
              _log("OPENAI ERROR", self.uid, f"HTTP {e.status_code} — check API key")
              return False
          except Exception as e:
@@ -558,7 +677,16 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
              return False
  
      # ─────────────────────────────────────────────────────────────────────────
-@@ -939,7 +940,7 @@
+@@ -821,7 +824,7 @@
+ 
+     async def _setup_session(self):
+         _log("SESSION SETUP", self.uid,
+-             f"mode={self.db_mode} | voice=alloy | vad=server_vad | "
++             f"mode={safe_mode(self.db_mode)} | voice=alloy | vad=server_vad | "
+              f"stt=whisper-1 | silence=400ms | threshold=0.5")
+         if settings.FORCE_ENGLISH_TEST_MODE:
+             _log("ENGLISH-ONLY TEST MODE", self.uid, "ACTIVE — responses forced to English")
+@@ -939,7 +942,7 @@
              }))
              await self.openai_ws.send(json.dumps({"type": "response.create"}))
          except Exception as e:
@@ -567,7 +695,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
      async def _handle_stay_silent(self, call_id: str) -> None:
          """Acknowledges the tool call but deliberately does NOT request a new response,
-@@ -956,7 +957,7 @@
+@@ -956,7 +959,7 @@
                  },
              }))
          except Exception as e:
@@ -576,7 +704,48 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
      async def _handle_tool_call(self, call_id: str, name: str, arguments: dict):
          if name == "stay_silent" and self._policy_on:
-@@ -1023,7 +1024,7 @@
+@@ -966,7 +969,7 @@
+             await self._handle_reason_tool(call_id)
+             return
+         if name != "query_database_for_combo":
+-            _log("TOOL UNKNOWN", self.uid, f"unknown tool '{name}' — ignoring")
++            _log("TOOL UNKNOWN", self.uid, f"unknown tool {safe_tool(name)} — ignoring")
+             return
+ 
+         ai_mode    = arguments.get("mode", "")
+@@ -990,16 +993,17 @@
+             transcript_script = self._last_script
+             if transcript_script == "Latin" and llm_language not in _LATIN_SCRIPT_LANGUAGES:
+                 _log("LANG CONFLICT (not overridden)", self.uid,
+-                     f"LLM audio→{llm_language} vs transcript script=Latin — trusting LLM audio detection")
++                     f"LLM audio→{safe_language(llm_language)} vs transcript script=Latin — trusting LLM audio detection")
+             self._current_language = llm_language
+-            _log("LANG FROM LLM", self.uid, f"audio-detected → {llm_language}")
++            _log("LANG FROM LLM", self.uid, f"audio-detected → {safe_language(llm_language)}")
+         # else: _current_language stays as whatever _detect_language_for_turn found
+ 
+         _log_sep(self.uid, "DATABASE LOOKUP")
+         _log("TOOL CALL RECEIVED",  self.uid,
+-             f"fn={name} | call_id={call_id[:12]}")
++             f"fn={safe_tool(name)} | call={mask_provider(call_id)}")
+         _log("TOOL ARGS RAW",       self.uid,
+-             f"mode='{target_mode}' | char='{char}' | attribute='{attribute}'")
++             f"mode={safe_mode(target_mode)} | char_len={safe_len(char)} char_kind={arg_kind(char)} | "
++             f"attribute_len={safe_len(attribute)} attribute_kind={arg_kind(attribute)}")
+ 
+         # Normalise multilingual number words → digits (async: LLM fallback for 100+ langs)
+         char_int  = await _normalize_number_async(char)
+@@ -1010,7 +1014,8 @@
+         # If either number is unrecognisable, ask the user to repeat
+         if char_int is None or attr_int is None:
+             _log("NUMBER PARSE FAIL", self.uid,
+-                 f"could not extract card numbers from char='{char}' attribute='{attribute}' — asking repeat")
++                 f"could not extract card numbers | char_len={safe_len(char)} char_kind={arg_kind(char)} | "
++                 f"attribute_len={safe_len(attribute)} attribute_kind={arg_kind(attribute)} — asking repeat")
+             unclear = json.dumps({"ask_to_repeat": True})
+             try:
+                 await self.openai_ws.send(json.dumps({
+@@ -1023,14 +1028,14 @@
                  }))
                  await self.openai_ws.send(json.dumps({"type": "response.create"}))
              except Exception as e:
@@ -585,7 +754,15 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
              return
  
          char  = str(char_int)
-@@ -1053,11 +1054,11 @@
+         attribute = str(attr_int)
+ 
+         _log("DB QUERY START",      self.uid,
+-             f"SELECT * FROM card_combos WHERE mode='{target_mode}' AND char='{char}' AND attribute='{attribute}'")
++             f"SELECT * FROM card_combos WHERE mode={safe_mode(target_mode)} AND char='{char}' AND attribute='{attribute}'")
+ 
+         self._db_query_start_ts = time.monotonic()
+         output_str = ""
+@@ -1053,11 +1058,11 @@
                      _log("DB NO MATCH", self.uid,
                           f"combo NOT found | query took {elapsed_ms}ms | {result.get('error')}")
                  else:
@@ -599,7 +776,16 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                  # Inject avatar_response so LLM speaks it exactly (not its own words)
                  if result.get("both_character"):
-@@ -1110,7 +1111,7 @@
+@@ -1086,7 +1091,7 @@
+                 result["respond_in_language"] = (
+                     "English" if settings.FORCE_ENGLISH_TEST_MODE else self._current_language
+                 )
+-                _log("LANG INJECTED",  self.uid, f"respond_in_language={self._current_language} source={source}")
++                _log("LANG INJECTED",  self.uid, f"respond_in_language={safe_language(self._current_language)} source={source}")
+ 
+                 if self._history_on:
+                     # Keep the full reason server-side; give the model only the verdict.
+@@ -1110,7 +1115,7 @@
          except Exception as e:
              elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
              _log("DB ERROR", self.uid,
@@ -608,7 +794,16 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
              output_str = json.dumps({"error": str(e)})
  
          try:
-@@ -1175,7 +1176,7 @@
+@@ -1130,7 +1135,7 @@
+             self._response_start_ts = time.monotonic()
+         except Exception as e:
+             _log("TOOL SEND ERROR",   self.uid,
+-                 f"failed to deliver tool result: {e}")
++                 f"failed to deliver tool result: {safe_exc(e)}")
+ 
+     # ─────────────────────────────────────────────────────────────────────────
+     # Client → OpenAI relay
+@@ -1175,7 +1180,7 @@
              _log("HISTORY PRUNED", self.uid,
                   f"deleted={len(ids)} kept_items={len(self._conv_items)} total_pruned={self._pruned_total}")
          except Exception as e:
@@ -617,7 +812,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
      async def _notify_mic_ready(self) -> None:
          """Waits out the echo cooldown, then tells the client it's safe to record
-@@ -1189,7 +1190,7 @@
+@@ -1189,7 +1194,7 @@
          except asyncio.CancelledError:
              pass
          except Exception as e:
@@ -626,7 +821,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
      async def _relay_from_client(self):
          try:
-@@ -1315,7 +1316,7 @@
+@@ -1315,7 +1320,7 @@
                                      _log("SILENCE PADDING", self.uid,
                                           "500ms silence appended → VAD will detect end-of-speech")
                                  except Exception as _e:
@@ -635,7 +830,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
                              self._audio_appended_since_commit = False
                              self._mic_streaming   = False
                              self._audio_chunks_sent = 0
-@@ -1339,9 +1340,9 @@
+@@ -1339,9 +1344,9 @@
                               "input_audio_buffer.commit forwarded to OpenAI")
  
                      elif msg_type == "session.update":
@@ -647,7 +842,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                      elif msg_type == "conversation.item.create":
                          _log("CLIENT MSG",       self.uid,
-@@ -1350,7 +1351,7 @@
+@@ -1350,7 +1355,7 @@
                      await self.openai_ws.send(message["text"])
  
          except Exception as e:
@@ -656,7 +851,34 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
          finally:
              self._active = False
  
-@@ -1464,7 +1465,7 @@
+@@ -1385,7 +1390,7 @@
+                 if etype == "session.created":
+                     sid = event.get("session", {}).get("id", "?")
+                     _log("OPENAI SESSION OK",    self.uid,
+-                         f"OpenAI session created | session_id={sid[:16]}")
++                         f"OpenAI session created | session={mask_provider(sid)}")
+ 
+                 elif etype == "session.updated":
+                     _log("OPENAI SESSION UPD",   self.uid,
+@@ -1427,7 +1432,7 @@
+                 elif etype == "input_audio_buffer.committed":
+                     item_id = event.get("item_id", "?")
+                     _log("BUFFER COMMITTED",     self.uid,
+-                         f"audio buffer committed | item_id={item_id[:12]} → sending to Whisper STT")
++                         f"audio buffer committed | item={mask_provider(item_id)} → sending to Whisper STT")
+                     continue  # don't forward to client
+ 
+                 elif etype == "input_audio_buffer.cleared":
+@@ -1456,7 +1461,7 @@
+                     item_id   = item.get("id", "?")
+                     role      = item.get("role", "?")
+                     _log("CONV ITEM CREATED",    self.uid,
+-                         f"type={item_type} | role={role} | id={item_id[:12]}")
++                         f"type={item_type} | role={role} | item={mask_provider(item_id)}")
+ 
+                 elif etype == "conversation.item.input_audio_transcription.delta":
+                     delta = event.get("delta", "")
+@@ -1464,7 +1469,7 @@
                      # Log partial every ~20 chars to show live progress
                      if len(self._partial_transcript) % 20 < len(delta):
                          _log("STT PARTIAL",      self.uid,
@@ -665,7 +887,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                  elif etype == "conversation.item.input_audio_transcription.completed":
                      transcript = event.get("transcript", "").strip()
-@@ -1477,7 +1478,7 @@
+@@ -1477,7 +1482,7 @@
                      if transcript:
                          _log_sep(self.uid, "USER SPOKE")
                          _log("STT COMPLETE",     self.uid,
@@ -674,7 +896,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
                          _log("STT SEND TO LLM",  self.uid,
                               f"transcript forwarded to LLM context | len={len(transcript)}chars")
                          # Fire language detection concurrently — result stored in
-@@ -1492,7 +1493,7 @@
+@@ -1492,7 +1497,7 @@
                  elif etype == "conversation.item.input_audio_transcription.failed":
                      err = event.get("error", {})
                      _log("STT FAILED",           self.uid,
@@ -683,7 +905,38 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                  # ══ LLM RESPONSE ══════════════════════════════════════════════
  
-@@ -1567,7 +1568,7 @@
+@@ -1501,7 +1506,7 @@
+                     resp_id = event.get("response", {}).get("id", "?")
+                     _log_sep(self.uid, "LLM PROCESSING")
+                     _log("LLM THINKING",         self.uid,
+-                         f"response started | response_id={resp_id[:16]}")
++                         f"response started | response={mask_provider(resp_id)}")
+ 
+                 elif etype == "response.output_item.added":
+                     item      = event.get("item", {})
+@@ -1510,10 +1515,10 @@
+                     if item_type == "function_call":
+                         fn = item.get("name", "?")
+                         _log("LLM TOOL DECISION", self.uid,
+-                             f"LLM decided to call tool '{fn}' | item_id={item_id[:12]}")
++                             f"LLM decided to call tool {safe_tool(fn)} | item={mask_provider(item_id)}")
+                     elif item_type == "message":
+                         _log("LLM COMPOSING",    self.uid,
+-                             f"LLM composing message response | item_id={item_id[:12]}")
++                             f"LLM composing message response | item={mask_provider(item_id)}")
+ 
+                 elif etype == "response.output_item.done":
+                     item      = event.get("item", {})
+@@ -1542,7 +1547,7 @@
+                     name    = event.get("name", "")
+                     raw_args = event.get("arguments", "{}")
+                     _log("TOOL ARGS READY",      self.uid,
+-                         f"fn='{name}' | raw_args={raw_args[:80]}")
++                         f"fn={safe_tool(name)} | args_len={safe_len(raw_args)}")
+                     try:
+                         args = json.loads(raw_args)
+                     except Exception:
+@@ -1567,7 +1572,7 @@
                              elapsed = f" | latency={round((time.monotonic()-self._response_start_ts)*1000)}ms"
                          _log_sep(self.uid, "AI SPEAKING")
                          _log("AI RESPONSE TEXT",     self.uid,
@@ -692,7 +945,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                  # ══ TTS AUDIO ══════════════════════════════════════════════════
  
-@@ -1645,7 +1646,7 @@
+@@ -1645,7 +1650,7 @@
                      text = event.get("text", "").strip()
                      if text:
                          _log("LLM TEXT DONE",    self.uid,
@@ -701,7 +954,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
                  # ══ RESPONSE COMPLETE ══════════════════════════════════════════
  
-@@ -1688,7 +1689,7 @@
+@@ -1688,7 +1693,7 @@
                  elif etype == "error":
                      err = event.get("error", {})
                      _log("OPENAI ERROR",         self.uid,
@@ -710,7 +963,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
                      if str(err.get("event_id", "")).startswith("prune-"):
                          # A history-pruning delete failed (e.g. item already gone) — harmless,
                          # and must not surface to the app as a session error.
-@@ -1698,7 +1699,7 @@
+@@ -1698,7 +1703,7 @@
                  await self.client_ws.send_text(raw)
  
          except Exception as e:
@@ -719,7 +972,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
          finally:
              self._active = False
  
-@@ -1724,11 +1725,11 @@
+@@ -1724,11 +1729,11 @@
                  try:
                      stored = await get_session_id(self.uid)
                  except Exception as e:
@@ -733,7 +986,7 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
                      self._active = False
                      try:
                          await self.client_ws.send_text(
-@@ -1953,7 +1954,7 @@
+@@ -1953,7 +1958,7 @@
              )
              for t in done:
                  if not t.cancelled() and t.exception() is not None:
@@ -742,16 +995,19 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
              ended = "client" if client_task in done else "openai"
              _log("RELAY ENDED", self.uid, f"{ended} side finished first — stopping remaining relays")
          finally:
-@@ -1971,7 +1972,7 @@
+@@ -1969,9 +1974,9 @@
+ 
+         _log_sep(self.uid, "SESSION START")
          _log("WS CONNECT",          self.uid,
-              f"user={login_status} | mode='{self.mode}' → db='{self.db_mode}'")
+-             f"user={login_status} | mode='{self.mode}' → db='{self.db_mode}'")
++             f"user={login_status} | mode={safe_mode(self.mode)} → db={safe_mode(self.db_mode)}")
          _log("SESSION ID",          self.uid,
 -             f"session={self.session_id}")
 +             f"session={mask_id(self.session_id, 's')}")
          _log("ACTIVE SESSIONS",     self.uid,
               f"total_sessions_before={len(_ACTIVE_SESSIONS)}")
  
-@@ -1982,7 +1983,7 @@
+@@ -1982,7 +1987,7 @@
                  await update_session_id(self.uid, self.session_id)
                  _log("SESSION PERSISTED",   self.uid, "session_id saved to DB")
              except Exception as e:
@@ -760,7 +1016,16 @@ diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/re
  
          # Kick previous session on same uid
          existing = _ACTIVE_SESSIONS.get(self.uid)
-@@ -2040,7 +2041,7 @@
+@@ -2022,7 +2027,7 @@
+         )
+         _log("CLIENT NOTIFIED",     self.uid, "connection_success sent to Flutter app")
+         _log("SESSION LIVE",        self.uid,
+-             f"ready — waiting for mic input | mode='{self.db_mode}'")
++             f"ready — waiting for mic input | mode={safe_mode(self.db_mode)}")
+         _log_sep(self.uid, "WAITING FOR USER")
+ 
+         # Run both relays concurrently with a cross-instance session watchdog.
+@@ -2040,7 +2045,7 @@
                      self._session_watchdog(),
                  )
          except Exception as e:
