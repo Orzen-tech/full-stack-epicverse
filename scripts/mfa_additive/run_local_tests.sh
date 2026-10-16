@@ -4,7 +4,7 @@
 #   * FAKE users (example.invalid) only; no cloud, Firebase, OpenAI, SendGrid or production data is ever contacted;
 #   * everything it creates is removed on exit (success, failure or Ctrl-C).
 #
-# Usage:  bash scripts/mfa_additive/run_local_tests.sh [--no-flutter] [--with-newer] [--no-enforcement]
+# Usage:  bash scripts/mfa_additive/run_local_tests.sh [--no-flutter] [--with-newer] [--no-enforcement] [--no-privacy]
 # Needs:  Docker, Git Bash, a backend test image (MFA_TEST_IMAGE, default epicverse-backend:tests-c185263) and,
 #         unless --no-flutter, Flutter.   --with-newer also runs the app's older suite against commit e121583.
 #         The Phase 1 ENFORCEMENT tests (build_tree_enforcement.sh = d733776 + mfa_additive.patch + mfa_enforcement.patch;
@@ -14,8 +14,8 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(git -C "$HERE" rev-parse --show-toplevel)
 IMAGE=${MFA_TEST_IMAGE:-epicverse-backend:tests-c185263}
-FLUTTER=1; NEWER=0; ENFORCE=1
-for a in "$@"; do case "$a" in --no-flutter) FLUTTER=0;; --with-newer) NEWER=1;; --no-enforcement) ENFORCE=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
+FLUTTER=1; NEWER=0; ENFORCE=1; PRIVACY=1
+for a in "$@"; do case "$a" in --no-flutter) FLUTTER=0;; --with-newer) NEWER=1;; --no-enforcement) ENFORCE=0;; --no-privacy) PRIVACY=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
 
 W=$(mktemp -d); WW=$(cygpath -w "$W"); BS='\'; HW=$(cygpath -w "$HERE/harness")
 NET=mfa-net; CONTAINERS="mfa-pg mfa-idstub mfa-be-L mfa-be-A mfa-be-M mfa-gw"
@@ -28,6 +28,7 @@ mkdir -p "$W/src_L" "$W/src_A" "$W/src_M" "$W/outbox"
 git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive d733776 backend | tar -x -C "$W/src_L"     || exit 1
 bash "$HERE/build_tree.sh" "$W/src_A" >/dev/null                                                          || exit 1
 [ $ENFORCE = 1 ] && { mkdir -p "$W/src_E"; bash "$HERE/build_tree_enforcement.sh" "$W/src_E" >/dev/null || exit 1; }
+[ $PRIVACY = 1 ] && { mkdir -p "$W/src_P"; bash "$HERE/build_tree_privacy.sh" "$W/src_P" >/dev/null || exit 1; }
 [ $NEWER = 1 ] && { git -C "$ROOT" -c core.autocrlf=false -c core.eol=lf archive e121583 backend | tar -x -C "$W/src_M" || exit 1; }
 
 docker network create --internal $NET >/dev/null || exit 1
@@ -93,6 +94,24 @@ if [ $ENFORCE = 1 ]; then
   MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_E:/src:ro" --entrypoint python "$IMAGE" -I /h/test_watchdog_failures.py || rc=1
   echo "################ ENFORCEMENT: endpoints, WebSocket, modes, outages (takes several minutes)"
   MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_E:/src:ro" --entrypoint python "$IMAGE" -I /h/test_enforcement.py || rc=1
+fi
+if [ $PRIVACY = 1 ]; then
+  # Production logging privacy (build_tree_privacy.sh = d733776 + both MFA patches + mfa_logging_privacy.patch). Every existing
+  # suite that runs against the enforcement tree is run again, UNCHANGED, against the privacy tree, then the privacy tests.
+  docker stop mfa-be-L mfa-be-A mfa-be-M mfa-gw >/dev/null 2>&1
+  echo "################ PRIVACY: patch hashes and unchanged files"
+  ph=$(sed 's/\r$//' "$HERE/mfa_logging_privacy.patch" | sha256sum | cut -d' ' -f1); echo "INFO  mfa_logging_privacy.patch sha256 $ph"
+  lim_p=$(sed 's/\r$//' "$W/src_P/backend/app/services/otp_rate_limiter.py" | sha256sum | cut -d' ' -f1)
+  lim_d=$(git -C "$ROOT" show d733776:backend/app/services/otp_rate_limiter.py | sha256sum | cut -d' ' -f1)
+  [ "$lim_p" = "$lim_d" ] && echo "PASS  otp_rate_limiter.py still identical in the privacy tree" || { echo "FAIL  otp_rate_limiter.py differs in the privacy tree"; rc=1; }
+  echo "################ PRIVACY TREE: startup configuration validation"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_config_validation.py || rc=1
+  echo "################ PRIVACY TREE: WebSocket watchdog failure injection"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_watchdog_failures.py || rc=1
+  echo "################ PRIVACY TREE: endpoints, WebSocket, modes, outages (takes several minutes)"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_enforcement.py || rc=1
+  echo "################ PRIVACY: logging privacy tests"
+  MSYS_NO_PATHCONV=1 docker run --rm --network $NET -v "$HW:/h:ro" -v "${WW}${BS}src_P:/src:ro" --entrypoint python "$IMAGE" -I /h/test_logging_privacy.py || rc=1
 fi
 [ $rc = 0 ] && echo "ALL LOCAL MFA TESTS PASSED" || echo "SOME LOCAL MFA TESTS FAILED"
 exit $rc

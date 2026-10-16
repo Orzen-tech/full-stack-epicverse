@@ -1,0 +1,1009 @@
+diff -ruN nb/backend/app/api/dependencies.py nw/backend/app/api/dependencies.py
+--- nb/backend/app/api/dependencies.py	2026-10-16 10:11:24.824783800 +0530
++++ nw/backend/app/api/dependencies.py	2026-10-16 10:14:44.438357600 +0530
+@@ -7,6 +7,7 @@
+ from firebase_admin import auth
+ 
+ from app.core.config import settings
++from app.core.log_privacy import safe_exc
+ from app.services.mfa_challenge import (
+     auth_time_from_claims, get_mfa_session_ttl_seconds, validate_mfa_session,
+ )
+@@ -21,7 +22,7 @@
+         decoded_token = auth.verify_id_token(token)
+         return decoded_token
+     except Exception as e:
+-        print(f"Firebase token error: {str(e)}")
++        print(f"Firebase token error: {safe_exc(e)}")
+         raise HTTPException(status_code=401, detail="Invalid Firebase Auth token")
+ 
+ 
+diff -ruN nb/backend/app/api/routes.py nw/backend/app/api/routes.py
+--- nb/backend/app/api/routes.py	2026-10-16 10:11:24.834961700 +0530
++++ nw/backend/app/api/routes.py	2026-10-16 10:14:44.438357600 +0530
+@@ -55,6 +55,7 @@
+ from app.api.scheduler_auth import verify_scheduler_oidc
+ from app.api.admin_auth import verify_admin_user
+ from app.services.otp_rate_limiter import check_otp_send_allowed
++from app.core.log_privacy import mask_id, safe_exc, safe_traceback
+ 
+ router = APIRouter()
+ 
+@@ -122,7 +123,7 @@
+                 fb_auth.verify_id_token(token)
+                 return
+             except Exception as e:
+-                print(f"[OTP] Bearer token rejected: {e}", flush=True)
++                print(f"[OTP] Bearer token rejected: {safe_exc(e)}", flush=True)
+ 
+     raise HTTPException(
+         status_code=403,
+@@ -172,7 +173,7 @@
+         if not email_sent:
+             raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
+     else:
+-        print(f"[OTP-SMS-LOG] OTP for {identifier}: {otp}")
++        print("[OTP-SMS-LOG] OTP requested for a non-email identifier: no delivery channel, nothing logged", flush=True)
+ 
+     return {"status": "success", "message": "OTP sent successfully"}
+ 
+@@ -247,10 +248,10 @@
+         reset_link = fb_auth.generate_password_reset_link(target)
+     except fb_auth.UserNotFoundError:
+         # Return 200 to avoid leaking whether the email is registered
+-        print(f"[AUTH] Password reset requested for unknown email: {target}", flush=True)
++        print("[AUTH] Password reset requested for an unknown account", flush=True)
+         return {"status": "sent"}
+     except Exception as e:
+-        print(f"[AUTH] generate_password_reset_link error: {e}", flush=True)
++        print(f"[AUTH] generate_password_reset_link error: {safe_exc(e)}", flush=True)
+         raise HTTPException(status_code=500, detail="Failed to generate reset link")
+ 
+     sent = await send_password_reset_email(target, reset_link)
+@@ -575,7 +576,7 @@
+ 
+     # Mandatory Firebase auth — reject unauthenticated/anonymous connections.
+     if not uid or uid == "anonymous" or not resolved_token:
+-        print(f"[WS] Auth rejected — missing uid or token (uid={uid!r} source={token_source})", flush=True)
++        print(f"[WS] Auth rejected — missing uid or token (uid={mask_id(uid, 'u')} source={token_source})", flush=True)
+         await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
+         await websocket.close(code=1008)
+         return
+@@ -584,15 +585,15 @@
+         from firebase_admin import auth as fb_auth
+         decoded = fb_auth.verify_id_token(resolved_token)
+         if decoded.get("uid") != uid:
+-            print(f"[WS] Auth rejected — uid mismatch (claim={decoded.get('uid')!r}, query={uid!r})", flush=True)
++            print(f"[WS] Auth rejected — uid mismatch (claim={mask_id(decoded.get('uid'), 'u')}, query={mask_id(uid, 'u')})", flush=True)
+             await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
+             await websocket.close(code=1008)
+             return
+         if token_source == "query(legacy)":
+             # Visibility for rollout: tells you when the last legacy client upgrades.
+-            print(f"[WS] LEGACY token in query string uid={uid} — client should upgrade to header auth", flush=True)
++            print(f"[WS] LEGACY token in query string uid={mask_id(uid, 'u')} — client should upgrade to header auth", flush=True)
+     except Exception as e:
+-        print(f"[WS] Auth failed uid={uid} source={token_source}: {e}", flush=True)
++        print(f"[WS] Auth failed uid={mask_id(uid, 'u')} source={token_source}: {safe_exc(e)}", flush=True)
+         await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
+         await websocket.close(code=1008)
+         return
+@@ -615,7 +616,7 @@
+         await websocket.close(code=1013, reason="mfa-check-unavailable")
+         return
+ 
+-    print(f"[WS] Realtime connection uid={uid} mode={mode} session={session_id}", flush=True)
++    print(f"[WS] Realtime connection uid={mask_id(uid, 'u')} mode={mode} session={mask_id(session_id, 's')}", flush=True)
+     session = RealtimeSession(
+         client_ws=websocket,
+         uid=uid,
+@@ -633,8 +634,7 @@
+     except WebSocketDisconnect:
+         pass
+     except Exception as e:
+-        import traceback
+-        traceback.print_exc()
++        print(safe_traceback(e), flush=True)
+         try:
+             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+         except Exception:
+@@ -700,8 +700,7 @@
+         )
+         
+     except Exception as e:
+-        import traceback
+-        traceback.print_exc()
++        print(safe_traceback(e), flush=True)
+         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
+ 
+ @router.delete("/user/{firebase_id}")
+@@ -728,10 +727,10 @@
+     """
+     caller_uid = current_user.get("uid")
+     if caller_uid != firebase_id:
+-        print(f"[DELETE] Forbidden — caller={caller_uid!r} target={firebase_id!r}", flush=True)
++        print(f"[DELETE] Forbidden — caller={mask_id(caller_uid, 'u')} target={mask_id(firebase_id, 'u')}", flush=True)
+         raise HTTPException(status_code=403, detail="You can only delete your own account.")
+ 
+-    print(f"[DELETE] Scheduling deletion (30-day grace) for uid={firebase_id}", flush=True)
++    print(f"[DELETE] Scheduling deletion (30-day grace) for uid={mask_id(firebase_id, 'u')}", flush=True)
+ 
+     ok = await request_user_deletion(firebase_id)
+     if not ok:
+@@ -790,7 +789,7 @@
+         try:
+             from firebase_admin import auth as fb_auth
+         except Exception as e:
+-            print(f"[PURGE] firebase_admin import failed: {e}", flush=True)
++            print(f"[PURGE] firebase_admin import failed: {safe_exc(e)}", flush=True)
+             fb_auth = None  # type: ignore
+         for uid in purged_uids:
+             if fb_auth is None:
+@@ -800,7 +799,7 @@
+                 fb_auth.delete_user(uid)
+                 fb_results.append({"uid": uid, "firebase": "deleted"})
+             except Exception as e:
+-                print(f"[PURGE] Firebase delete failed uid={uid}: {e}", flush=True)
++                print(f"[PURGE] Firebase delete failed uid={mask_id(uid, 'u')}: {safe_exc(e)}", flush=True)
+                 fb_results.append({"uid": uid, "firebase": f"error:{e}"})
+     return {
+         "status": "success",
+diff -ruN nb/backend/app/core/log_privacy.py nw/backend/app/core/log_privacy.py
+--- nb/backend/app/core/log_privacy.py	1970-01-01 05:30:00.000000000 +0530
++++ nw/backend/app/core/log_privacy.py	2026-10-16 10:38:24.386334700 +0530
+@@ -0,0 +1,184 @@
++"""Keeps personal data and credentials out of the application's own logs (stdout/stderr, which Cloud Run ships to Cloud Logging).
++
++What this module provides
++  * mask_id()            - a non-reversible correlation id (keyed HMAC) for UIDs and session ids, so one user's log lines can be
++                           followed without the raw identifier ever being written;
++  * safe_exc() / safe_traceback() - exception class (plus SQLSTATE / HTTP status when present) instead of the exception TEXT, which
++                           can echo submitted tokens, e-mail addresses, SQL parameters or connection details;
++  * QuerySanitizerFilter - rewrites the request lines uvicorn writes itself: every query-string VALUE becomes ``***`` and long
++                           user-id path segments (``/api/v1/user/<uid>``) and invite codes become correlation ids / ``***``.
++                           The query sanitising logic is the reviewed logic of commit cc305d4 (log_sanitizer.py), extended with
++                           the path-segment masking.
++  * the same filter also replaces any traceback uvicorn/Starlette/asyncio log for an unhandled exception (exception TEXT and
++                           source lines) with the exception class and call-site frames; the exception itself still propagates unchanged;
++  * safe_code()          - provider error code/type (short token) instead of provider message text.
++
++What this module does NOT cover
++  * Cloud Run's own request log (``run.googleapis.com/requests``) records the full request URL as received, UID path segments and
++    WebSocket query parameters included. No application log filter can change that.
++  * Responses sent to clients (a few error handlers still return ``str(e)`` to the caller): not a log, left unchanged.
++"""
++import functools
++import hashlib
++import hmac
++import logging
++import re
++import traceback
++
++from app.core.config import settings
++
++REDACTED = "***"
++LOGGER_NAMES = ("uvicorn", "uvicorn.access", "uvicorn.error", "asyncio", "starlette", "fastapi")
++
++_MAX_INPUT = 8192          # characters examined per string; the rest is dropped
++_MAX_ITEMS = 20            # query items kept per target
++_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,31}")
++# A request target inside a log string: "/path?query", also within "https://host/path?query".
++_TARGET = re.compile(r"/[^\s\"'?#]*\?[^\s\"'#]*")
++# A user id (Firebase UIDs are 28 characters) in the path; short literal route words such as "mfa" are left alone.
++_USER_PATH = re.compile(r"(/api/v1/user/)([^/\s\"'?#]{12,})")
++_INVITE_PATH = re.compile(r"(/api/v1/validate-invite/)([^/\s\"'?#]+)")
++
++
++@functools.lru_cache(maxsize=1)
++def _key() -> bytes:
++    secret = (getattr(settings, "OTP_RATE_LIMIT_HASH_SECRET", "") or getattr(settings, "MFA_OTP_HASH_SECRET", "") or "")
++    return hmac.new(secret.encode("utf-8"), b"epicverse-log-correlation-v1", hashlib.sha256).digest()
++
++
++@functools.lru_cache(maxsize=4096)
++def mask_id(value, kind: str = "id") -> str:
++    """Correlation id such as ``u-1a2b3c4d5e``: the same input always gives the same id, the input cannot be recovered from it."""
++    if value is None:
++        return "none"
++    text = str(value)
++    if text == "":
++        return "empty"
++    if text == "anonymous":
++        return text
++    digest = hmac.new(_key(), (kind + ":" + text).encode("utf-8"), hashlib.sha256).hexdigest()[:10]
++    return f"{kind}-{digest}"
++
++
++def safe_exc(exc: BaseException) -> str:
++    """The exception class and, when present, its SQLSTATE or HTTP status code. Never the exception text."""
++    try:
++        name = type(exc).__name__
++        code = getattr(exc, "sqlstate", None)
++        if code is None:
++            code = getattr(exc, "status_code", None)
++        if code is None:
++            response = getattr(exc, "response", None)
++            code = getattr(response, "status_code", None)
++        return f"{name}[{code}]" if code is not None else name
++    except Exception:
++        return "Exception"
++
++
++_CODE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
++
++
++def safe_code(value) -> str:
++    """A provider error code/type such as ``invalid_request_error`` when it looks like one; ``?`` otherwise (never free text)."""
++    text = str(value) if value is not None else ""
++    return text if _CODE.fullmatch(text) else "?"
++
++
++def safe_traceback(exc: BaseException, limit: int = 12) -> str:
++    """Call-site frames (file, line, function) and the exception class: no exception text, no source lines, no local values."""
++    try:
++        frames = traceback.extract_tb(exc.__traceback__)[-limit:]
++        where = " <- ".join(f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}:{f.name}" for f in reversed(frames))
++        return f"[TRACE] {safe_exc(exc)} at {where}" if where else f"[TRACE] {safe_exc(exc)}"
++    except Exception:
++        return "[TRACE] unavailable"
++
++
++# ---------------------------------------------------------------------------------------------------------------------
++# uvicorn request lines
++# ---------------------------------------------------------------------------------------------------------------------
++def sanitize_target(target: str) -> str:
++    """Return ``target`` ("/path?query") with every query value redacted."""
++    path, _, rest = target.partition("?")
++    query = rest.partition("#")[0]          # fragments are never sent; drop defensively
++    items = []
++    for raw in query.split("&"):
++        if raw == "":
++            continue
++        if len(items) >= _MAX_ITEMS:
++            items.append("...")
++            break
++        name, sep, _value = raw.partition("=")
++        items.append(f"{name}={REDACTED}" if sep and _NAME.fullmatch(name) else REDACTED)
++    return path + ("?" + "&".join(items) if items else "")
++
++
++def _mask_path_ids(text: str) -> str:
++    text = _USER_PATH.sub(lambda m: m.group(1) + mask_id(m.group(2), "u"), text)
++    return _INVITE_PATH.sub(lambda m: m.group(1) + REDACTED, text)
++
++
++def sanitize_text(text: str) -> str:
++    """Redact the query string of every request target found inside ``text`` and mask user ids / invite codes in the path."""
++    clipped = text[:_MAX_INPUT] + ("..." if len(text) > _MAX_INPUT else "")
++    try:
++        return _TARGET.sub(lambda m: sanitize_target(m.group(0)), _mask_path_ids(clipped))
++    except Exception:                        # fail closed: drop everything after each '?'
++        return re.sub(r"\?[^\s\"']*", "", clipped)
++
++
++def _needs_work(value) -> bool:
++    return isinstance(value, str) and ("?" in value or "/api/v1/" in value)
++
++
++class QuerySanitizerFilter(logging.Filter):
++    """Rewrites request targets in the message and in string arguments, in place."""
++
++    def filter(self, record: logging.LogRecord) -> bool:
++        try:
++            if _needs_work(record.msg):
++                record.msg = sanitize_text(record.msg)
++            args = record.args
++            if isinstance(args, tuple) and any(_needs_work(a) for a in args):
++                # Same length, same positions: uvicorn's AccessFormatter unpacks five values.
++                record.args = tuple(sanitize_text(a) if _needs_work(a) else a for a in args)
++            elif isinstance(args, dict):
++                record.args = {k: sanitize_text(v) if _needs_work(v) else v for k, v in args.items()}
++        except Exception:
++            # Never let logging break a request, and never leave an unsanitised target behind.
++            record.msg = "[log record withheld: could not be sanitised]"
++            record.args = ()
++        self._scrub_exception(record)
++        return True
++
++    @staticmethod
++    def _scrub_exception(record: logging.LogRecord) -> None:
++        """Replaces the formatted traceback (exception TEXT, source lines) with exception class + call-site frames.
++
++        logging.Formatter appends ``record.exc_text`` when ``exc_info`` is empty, so setting it here, and clearing exc_info,
++        keeps the diagnostic without the text. The exception itself still propagates exactly as before; only the log differs.
++        """
++        try:
++            exc = record.exc_info[1] if isinstance(record.exc_info, tuple) and len(record.exc_info) > 1 else None
++            if exc is not None:
++                record.exc_text = safe_traceback(exc)
++                record.exc_info = None
++            elif record.exc_text:
++                record.exc_text = "[TRACE] traceback withheld"
++        except Exception:
++            record.exc_info = None
++            record.exc_text = "[TRACE] unavailable"
++
++
++def install() -> list:
++    """Attach the filter to uvicorn's loggers. Safe to call more than once.
++
++    Returns the names of the loggers it attached to on this call.
++    """
++    attached = []
++    for name in LOGGER_NAMES:
++        logger = logging.getLogger(name)
++        if not any(isinstance(f, QuerySanitizerFilter) for f in logger.filters):
++            logger.addFilter(QuerySanitizerFilter())
++            attached.append(name)
++    return attached
+diff -ruN nb/backend/app/main.py nw/backend/app/main.py
+--- nb/backend/app/main.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/main.py	2026-10-16 10:14:44.502145200 +0530
+@@ -4,6 +4,7 @@
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import HTMLResponse
+ from app.api import routes
++from app.core.log_privacy import install as install_log_sanitizer, safe_exc
+ from app.core.config import settings
+ from app.services.retriever import load_excel_data
+ from app.services.user_db import init_db
+@@ -11,6 +12,10 @@
+ import firebase_admin
+ from firebase_admin import credentials
+ 
++# uvicorn logs every request target. Keep query VALUES and user ids out of those application logs
++# (idempotent; uvicorn has already configured its loggers by the time this module is imported).
++install_log_sanitizer()
++
+ # Initialize Firebase Admin
+ try:
+     if not firebase_admin._apps:
+@@ -19,7 +24,7 @@
+         options = {"projectId": firebase_project_id} if firebase_project_id else {}
+         firebase_admin.initialize_app(cred, options)
+ except Exception as e:
+-    print(f"Firebase Init Warning: {e}")
++    print(f"Firebase Init Warning: {safe_exc(e)}")
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+@@ -28,16 +33,16 @@
+         await get_pool()
+         print("[DB] Connection pool ready.")
+     except Exception as e:
+-        print(f"⚠️ [DB] Pool init failed: {e}")
++        print(f"⚠️ [DB] Pool init failed: {safe_exc(e)}")
+     try:
+         await init_db()
+     except Exception as e:
+-        print(f"⚠️ [DB] init_db failed (non-fatal): {e}")
++        print(f"⚠️ [DB] init_db failed (non-fatal): {safe_exc(e)}")
+     try:
+         await load_excel_data()
+         print("Server ready.")
+     except Exception as e:
+-        print(f"⚠️ [DATA] load_excel_data failed: {e}")
++        print(f"⚠️ [DATA] load_excel_data failed: {safe_exc(e)}")
+     yield
+     await close_pool()
+     print("Server shutting down.")
+diff -ruN nb/backend/app/services/ai_pipeline.py nw/backend/app/services/ai_pipeline.py
+--- nb/backend/app/services/ai_pipeline.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/services/ai_pipeline.py	2026-10-16 10:14:44.470200800 +0530
+@@ -2,6 +2,7 @@
+ import json
+ from app.core.config import settings
+ from app.services.openai_client import get_openai_client
++from app.core.log_privacy import safe_exc
+ from app.services.retriever import query_postgres_database
+ from app.services.memory_store import session_store
+ from app.services.realtime_service import _pick_combo_message
+@@ -192,9 +193,9 @@
+         # --- TERMINAL LOGGING ---
+         print("\n" + "="*50, flush=True)
+         print(f"USER SELECTED MODE : {game_mode}", flush=True)
+-        print(f"QUESTION           : {text}", flush=True)
++        print(f"QUESTION           : {len(text or '')} chars", flush=True)
+         print(f"LLM SELECTED MODE  : {llm_selected_mode}", flush=True)
+-        print(f"RESPONSE           : {final_text}", flush=True)
++        print(f"RESPONSE           : {len(final_text or '')} chars", flush=True)
+         print("="*50 + "\n", flush=True)
+         
+         # 5. Persist text-only history (trim to last 20 to prevent unbounded growth)
+@@ -207,7 +208,7 @@
+ 
+     except Exception as e:
+         print(f"--- AI PIPELINE ERROR ---")
+-        print(f"Error: {e}")
++        print(f"Error: {safe_exc(e)}")
+         # Log the messages list to see exactly what failed for debugging
+         # print(f"Messages sent: {json.dumps(messages, indent=2)}")
+         return {"final_response": f"Sorry, I encountered an internal error: {str(e)}"}
+diff -ruN nb/backend/app/services/email_service.py nw/backend/app/services/email_service.py
+--- nb/backend/app/services/email_service.py	2026-10-16 10:11:24.613948900 +0530
++++ nw/backend/app/services/email_service.py	2026-10-16 10:14:44.454154000 +0530
+@@ -1,5 +1,6 @@
+ import httpx
+ from app.core.config import settings
++from app.core.log_privacy import safe_exc
+ import logging
+ 
+ logger = logging.getLogger(__name__)
+@@ -41,10 +42,10 @@
+             if response.status_code >= 400:
+                 print(f"[SENDGRID-ERROR] Feedback notify failed: {response.status_code}")
+                 return False
+-            print(f"[SENDGRID-SUCCESS] Feedback notification sent for {display_name}")
++            print("[SENDGRID-SUCCESS] Feedback notification sent")
+             return True
+     except Exception as e:
+-        print(f"[SENDGRID-FATAL] Feedback notify error: {e}")
++        print(f"[SENDGRID-FATAL] Feedback notify error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -88,12 +89,12 @@
+         async with httpx.AsyncClient() as client:
+             response = await client.post(url, headers=headers, json=payload)
+             if response.status_code >= 400:
+-                print(f"[SENDGRID-ERROR] Status {response.status_code}: {response.text}")
++                print(f"[SENDGRID-ERROR] OTP email rejected: status {response.status_code}")
+                 return False
+-            print(f"[SENDGRID-SUCCESS] OTP sent to {email}")
++            print("[SENDGRID-SUCCESS] OTP email sent")
+             return True
+     except Exception as e:
+-        print(f"[SENDGRID-FATAL] Error sending to {email}: {e}")
++        print(f"[SENDGRID-FATAL] OTP email error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -141,10 +142,10 @@
+         async with httpx.AsyncClient() as client:
+             response = await client.post(url, headers=headers, json=payload)
+             if response.status_code >= 400:
+-                print(f"[SENDGRID-ERROR] Password reset email failed: {response.status_code}: {response.text}")
++                print(f"[SENDGRID-ERROR] Password reset email failed: status {response.status_code}")
+                 return False
+-            print(f"[SENDGRID-SUCCESS] Password reset email sent to {email}")
++            print("[SENDGRID-SUCCESS] Password reset email sent")
+             return True
+     except Exception as e:
+-        print(f"[SENDGRID-FATAL] Password reset email error: {e}")
++        print(f"[SENDGRID-FATAL] Password reset email error: {safe_exc(e)}")
+         return False
+diff -ruN nb/backend/app/services/memory_store.py nw/backend/app/services/memory_store.py
+--- nb/backend/app/services/memory_store.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/services/memory_store.py	2026-10-16 10:14:44.518323500 +0530
+@@ -3,6 +3,7 @@
+ from typing import Any, Optional
+ from redis.asyncio import Redis
+ from app.core.config import settings
++from app.core.log_privacy import safe_exc
+ 
+ class SessionStore:
+     def __init__(self):
+@@ -27,11 +28,11 @@
+                 )
+                 # Heartbeat check
+                 await asyncio.wait_for(self.redis.ping(), timeout=timeout)
+-                print(f"MemoryStore: Redis CONNECTED on {settings.REDIS_URL}")
++                print("MemoryStore: Redis CONNECTED")
+             except Exception as e:
+                 if self._redis_enabled:
+                     print(f"\n[INFRA] Redis Offline: Degraded Mode Active (Stateless Session).")
+-                    print(f"       Persistence layer disabled due to: {e}\n")
++                    print(f"       Persistence layer disabled due to: {safe_exc(e)}\n")
+                 self._redis_enabled = False
+                 self.redis = None
+         return self.redis
+diff -ruN nb/backend/app/services/realtime_service.py nw/backend/app/services/realtime_service.py
+--- nb/backend/app/services/realtime_service.py	2026-10-16 10:11:24.866551500 +0530
++++ nw/backend/app/services/realtime_service.py	2026-10-16 10:38:14.407850100 +0530
+@@ -11,6 +11,7 @@
+ from fastapi import WebSocket
+ 
+ from app.core.config import settings
++from app.core.log_privacy import mask_id, safe_code, safe_exc
+ from app.services.retriever import query_postgres_database
+ from app.services.openai_client import get_openai_client
+ 
+@@ -115,7 +116,7 @@
+     ts  = _dt.datetime.utcnow().strftime("%H:%M:%S.%f")[:-3]
+     tag = f"[{step:<22}]"
+     suffix = f" → {data}" if data else ""
+-    print(f"[{ts}] {tag} uid={uid[-8:]}{suffix}", flush=True)
++    print(f"[{ts}] {tag} uid={mask_id(uid, 'u')}{suffix}", flush=True)
+ 
+ 
+ # Separator printed once per session for readability
+@@ -310,7 +311,7 @@
+         _NUMBER_WORD_CACHE[stripped] = parsed
+         return parsed
+     except Exception as e:
+-        print(f"[NORM] LLM number fallback failed for '{stripped}': {e}", flush=True)
++        print(f"[NORM] LLM number fallback failed (input_len={len(stripped)}): {safe_exc(e)}", flush=True)
+         _NUMBER_WORD_CACHE[stripped] = None
+         return None
+ 
+@@ -694,8 +695,8 @@
+             return
+         rec = {
+             "telemetry":      event,
+-            "session_id":     self.session_id[:12],
+-            "turn_id":        f"{self.session_id[:8]}-{self._turn_seq}",
++            "session_id":     mask_id(self.session_id, 's'),
++            "turn_id":        f"{mask_id(self.session_id, 's')}-{self._turn_seq}",
+             "session_age_s":  round(time.monotonic() - self._session_start_ts),
+             "active_sessions": len(_ACTIVE_SESSIONS),
+             "history_on":     self._history_on,
+@@ -776,9 +777,9 @@
+                      f"— keeping locked language {self._current_language}")
+             else:
+                 self._current_language = lang
+-                _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript='{transcript[:50]}'")
++                _log("LANG DETECTED",  self.uid, f"LLM → {lang} | transcript_len={len(transcript)}")
+         except Exception as e:
+-            _log("LANG DETECT ERR", self.uid, f"{e} — keeping {self._current_language}")
++            _log("LANG DETECT ERR", self.uid, f"{safe_exc(e)} — keeping {self._current_language}")
+ 
+     # ─────────────────────────────────────────────────────────────────────────
+     # OpenAI connection
+@@ -812,7 +813,7 @@
+             _log("OPENAI ERROR", self.uid, f"HTTP {e.status_code} — check API key")
+             return False
+         except Exception as e:
+-            _log("OPENAI ERROR", self.uid, f"{type(e).__name__}: {e}")
++            _log("OPENAI ERROR", self.uid, f"{safe_exc(e)}")
+             return False
+ 
+     # ─────────────────────────────────────────────────────────────────────────
+@@ -939,7 +940,7 @@
+             }))
+             await self.openai_ws.send(json.dumps({"type": "response.create"}))
+         except Exception as e:
+-            _log("TOOL SEND ERROR", self.uid, f"reason tool delivery failed: {e}")
++            _log("TOOL SEND ERROR", self.uid, f"reason tool delivery failed: {safe_exc(e)}")
+ 
+     async def _handle_stay_silent(self, call_id: str) -> None:
+         """Acknowledges the tool call but deliberately does NOT request a new response,
+@@ -956,7 +957,7 @@
+                 },
+             }))
+         except Exception as e:
+-            _log("TOOL SEND ERROR", self.uid, f"stay_silent ack failed: {e}")
++            _log("TOOL SEND ERROR", self.uid, f"stay_silent ack failed: {safe_exc(e)}")
+ 
+     async def _handle_tool_call(self, call_id: str, name: str, arguments: dict):
+         if name == "stay_silent" and self._policy_on:
+@@ -1023,7 +1024,7 @@
+                 }))
+                 await self.openai_ws.send(json.dumps({"type": "response.create"}))
+             except Exception as e:
+-                _log("TOOL SEND ERROR", self.uid, f"{e}")
++                _log("TOOL SEND ERROR", self.uid, f"{safe_exc(e)}")
+             return
+ 
+         char  = str(char_int)
+@@ -1053,11 +1054,11 @@
+                     _log("DB NO MATCH", self.uid,
+                          f"combo NOT found | query took {elapsed_ms}ms | {result.get('error')}")
+                 else:
+-                    reason_preview = str(result.get("revised_scholar_reason", ""))[:80]
++                    reason_len = len(str(result.get("revised_scholar_reason", "")))
+                     _log("DB MATCH FOUND", self.uid,
+                          f"status={status} | took={elapsed_ms}ms")
+                     _log("DB REASON",     self.uid,
+-                         f"\"{reason_preview}{'...' if len(reason_preview) == 80 else ''}\"")
++                         f"reason_len={reason_len}")
+ 
+                 # Inject avatar_response so LLM speaks it exactly (not its own words)
+                 if result.get("both_character"):
+@@ -1110,7 +1111,7 @@
+         except Exception as e:
+             elapsed_ms = round((time.monotonic() - self._db_query_start_ts) * 1000)
+             _log("DB ERROR", self.uid,
+-                 f"{type(e).__name__}: {e} | took={elapsed_ms}ms")
++                 f"{safe_exc(e)} | took={elapsed_ms}ms")
+             output_str = json.dumps({"error": str(e)})
+ 
+         try:
+@@ -1175,7 +1176,7 @@
+             _log("HISTORY PRUNED", self.uid,
+                  f"deleted={len(ids)} kept_items={len(self._conv_items)} total_pruned={self._pruned_total}")
+         except Exception as e:
+-            _log("HISTORY PRUNE ERR", self.uid, f"{type(e).__name__}: {e}")
++            _log("HISTORY PRUNE ERR", self.uid, f"{safe_exc(e)}")
+ 
+     async def _notify_mic_ready(self) -> None:
+         """Waits out the echo cooldown, then tells the client it's safe to record
+@@ -1189,7 +1190,7 @@
+         except asyncio.CancelledError:
+             pass
+         except Exception as e:
+-            _log("MIC READY ERR", self.uid, f"{type(e).__name__}: {e}")
++            _log("MIC READY ERR", self.uid, f"{safe_exc(e)}")
+ 
+     async def _relay_from_client(self):
+         try:
+@@ -1315,7 +1316,7 @@
+                                     _log("SILENCE PADDING", self.uid,
+                                          "500ms silence appended → VAD will detect end-of-speech")
+                                 except Exception as _e:
+-                                    _log("SILENCE PAD ERR", self.uid, f"{type(_e).__name__}: {_e}")
++                                    _log("SILENCE PAD ERR", self.uid, f"{safe_exc(_e)}")
+                             self._audio_appended_since_commit = False
+                             self._mic_streaming   = False
+                             self._audio_chunks_sent = 0
+@@ -1339,9 +1340,9 @@
+                              "input_audio_buffer.commit forwarded to OpenAI")
+ 
+                     elif msg_type == "session.update":
+-                        new_mode = data.get("session", {}).get("instructions", "")[:60]
++                        instructions_len = len(str(data.get("session", {}).get("instructions", "")))
+                         _log("MODE CHANGE",      self.uid,
+-                             f"client sent session.update | preview={new_mode}")
++                             f"client sent session.update | instructions_len={instructions_len}")
+ 
+                     elif msg_type == "conversation.item.create":
+                         _log("CLIENT MSG",       self.uid,
+@@ -1350,7 +1351,7 @@
+                     await self.openai_ws.send(message["text"])
+ 
+         except Exception as e:
+-            _log("CLIENT RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
++            _log("CLIENT RELAY ERR", self.uid, f"{safe_exc(e)}")
+         finally:
+             self._active = False
+ 
+@@ -1464,7 +1465,7 @@
+                     # Log partial every ~20 chars to show live progress
+                     if len(self._partial_transcript) % 20 < len(delta):
+                         _log("STT PARTIAL",      self.uid,
+-                             f"[live] \"{self._partial_transcript[-40:]}\"")
++                             f"[live] partial_len={len(self._partial_transcript)}")
+ 
+                 elif etype == "conversation.item.input_audio_transcription.completed":
+                     transcript = event.get("transcript", "").strip()
+@@ -1477,7 +1478,7 @@
+                     if transcript:
+                         _log_sep(self.uid, "USER SPOKE")
+                         _log("STT COMPLETE",     self.uid,
+-                             f"\"{transcript}\"")
++                             f"transcript_len={len(transcript)}chars")
+                         _log("STT SEND TO LLM",  self.uid,
+                              f"transcript forwarded to LLM context | len={len(transcript)}chars")
+                         # Fire language detection concurrently — result stored in
+@@ -1492,7 +1493,7 @@
+                 elif etype == "conversation.item.input_audio_transcription.failed":
+                     err = event.get("error", {})
+                     _log("STT FAILED",           self.uid,
+-                         f"Whisper error: {err.get('message','unknown')}")
++                         f"Whisper error: code={safe_code(err.get('code'))} | type={safe_code(err.get('type'))} | msg_len={len(str(err.get('message') or ''))}")
+ 
+                 # ══ LLM RESPONSE ══════════════════════════════════════════════
+ 
+@@ -1567,7 +1568,7 @@
+                             elapsed = f" | latency={round((time.monotonic()-self._response_start_ts)*1000)}ms"
+                         _log_sep(self.uid, "AI SPEAKING")
+                         _log("AI RESPONSE TEXT",     self.uid,
+-                             f"[{lang}] \"{transcript[:140]}\"{elapsed}")
++                             f"[{lang}] response_len={len(transcript)}{elapsed}")
+ 
+                 # ══ TTS AUDIO ══════════════════════════════════════════════════
+ 
+@@ -1645,7 +1646,7 @@
+                     text = event.get("text", "").strip()
+                     if text:
+                         _log("LLM TEXT DONE",    self.uid,
+-                             f"\"{text[:120]}\"")
++                             f"text_len={len(text)}")
+ 
+                 # ══ RESPONSE COMPLETE ══════════════════════════════════════════
+ 
+@@ -1688,7 +1689,7 @@
+                 elif etype == "error":
+                     err = event.get("error", {})
+                     _log("OPENAI ERROR",         self.uid,
+-                         f"code={err.get('code','?')} | msg={err.get('message','?')}")
++                         f"code={safe_code(err.get('code'))} | type={safe_code(err.get('type'))} | msg_len={len(str(err.get('message') or ''))}")
+                     if str(err.get("event_id", "")).startswith("prune-"):
+                         # A history-pruning delete failed (e.g. item already gone) — harmless,
+                         # and must not surface to the app as a session error.
+@@ -1698,7 +1699,7 @@
+                 await self.client_ws.send_text(raw)
+ 
+         except Exception as e:
+-            _log("OPENAI RELAY ERR", self.uid, f"{type(e).__name__}: {e}")
++            _log("OPENAI RELAY ERR", self.uid, f"{safe_exc(e)}")
+         finally:
+             self._active = False
+ 
+@@ -1724,11 +1725,11 @@
+                 try:
+                     stored = await get_session_id(self.uid)
+                 except Exception as e:
+-                    _log("WATCHDOG DB ERR", self.uid, f"{type(e).__name__}: {e}")
++                    _log("WATCHDOG DB ERR", self.uid, f"{safe_exc(e)}")
+                     continue
+                 if stored and stored != self.session_id:
+                     _log("SESSION SUPERSEDED", self.uid,
+-                         f"another device took over | db={str(stored)[:12]} mine={self.session_id[:12]} — closing")
++                         f"another device took over | db={mask_id(str(stored), 's')} mine={mask_id(self.session_id, 's')} — closing")
+                     self._active = False
+                     try:
+                         await self.client_ws.send_text(
+@@ -1953,7 +1954,7 @@
+             )
+             for t in done:
+                 if not t.cancelled() and t.exception() is not None:
+-                    _log("RELAY ERROR", self.uid, f"{type(t.exception()).__name__}: {t.exception()}")
++                    _log("RELAY ERROR", self.uid, f"{safe_exc(t.exception())}")
+             ended = "client" if client_task in done else "openai"
+             _log("RELAY ENDED", self.uid, f"{ended} side finished first — stopping remaining relays")
+         finally:
+@@ -1971,7 +1972,7 @@
+         _log("WS CONNECT",          self.uid,
+              f"user={login_status} | mode='{self.mode}' → db='{self.db_mode}'")
+         _log("SESSION ID",          self.uid,
+-             f"session={self.session_id}")
++             f"session={mask_id(self.session_id, 's')}")
+         _log("ACTIVE SESSIONS",     self.uid,
+              f"total_sessions_before={len(_ACTIVE_SESSIONS)}")
+ 
+@@ -1982,7 +1983,7 @@
+                 await update_session_id(self.uid, self.session_id)
+                 _log("SESSION PERSISTED",   self.uid, "session_id saved to DB")
+             except Exception as e:
+-                _log("SESSION PERSIST ERR", self.uid, f"{e}")
++                _log("SESSION PERSIST ERR", self.uid, f"{safe_exc(e)}")
+ 
+         # Kick previous session on same uid
+         existing = _ACTIVE_SESSIONS.get(self.uid)
+@@ -2040,7 +2041,7 @@
+                     self._session_watchdog(),
+                 )
+         except Exception as e:
+-            _log("SESSION ERROR",   self.uid, f"{type(e).__name__}: {e}")
++            _log("SESSION ERROR",   self.uid, f"{safe_exc(e)}")
+         finally:
+             self._active = False
+             self._telemetry("session_end", total_turns=self._turn_count)
+diff -ruN nb/backend/app/services/retriever.py nw/backend/app/services/retriever.py
+--- nb/backend/app/services/retriever.py	2026-10-16 10:11:24.647534700 +0530
++++ nw/backend/app/services/retriever.py	2026-10-16 10:14:44.502145200 +0530
+@@ -7,6 +7,7 @@
+ from redis.asyncio import Redis
+ 
+ from app.core.config import settings
++from app.core.log_privacy import safe_exc, safe_traceback
+ from app.services.openai_client import get_openai_client
+ 
+ EXACT_LOOKUP_SQL = """
+@@ -120,12 +121,11 @@
+                 return db_pool
+             except Exception as e:
+                 if attempt < 3:
+-                    print(f"⚠️ [DB] Connection attempt {attempt} failed: {e}. Retrying in 2s...")
++                    print(f"⚠️ [DB] Connection attempt {attempt} failed: {safe_exc(e)}. Retrying in 2s...")
+                     await asyncio.sleep(2)
+                 else:
+-                    import traceback
+-                    print(f"❌ [DB] Pool creation failed after {attempt} attempts: {e}")
+-                    traceback.print_exc()
++                    print(f"❌ [DB] Pool creation failed after {attempt} attempts: {safe_exc(e)}")
++                    print(safe_traceback(e), flush=True)
+                     _db_pool_failed = True
+                     db_pool = None
+     return db_pool
+@@ -239,7 +239,7 @@
+                     continue
+         except Exception as e:
+             failed_files.append(file)
+-            print(f"[BOOT] Failed to load {file} into RAM cache: {e}")
++            print(f"[BOOT] Failed to load {file} into RAM cache: {safe_exc(e)}")
+ 
+     if missing_files:
+         print(f"[BOOT][ERROR] Knowledge-base file(s) not found in {data_dir}: {', '.join(missing_files)}")
+@@ -336,7 +336,7 @@
+             )
+         return [row["gameplay_mode"] for row in rows]
+     except Exception as e:
+-        print(f"[DB] get_available_modes error: {e}")
++        print(f"[DB] get_available_modes error: {safe_exc(e)}")
+         return []
+ 
+ 
+@@ -378,7 +378,7 @@
+         )
+         return response.data[0].embedding
+     except Exception as exc:
+-        print(f"Embedding Generation Error: {exc}")
++        print(f"Embedding Generation Error: {safe_exc(exc)}")
+         return None
+ 
+ 
+@@ -432,7 +432,7 @@
+                     gameplay_mode,
+                 )
+         except Exception as e:
+-            print(f"[DB-ERROR] Exact lookup failed: {e}. Falling back to RAM cache.")
++            print(f"[DB-ERROR] Exact lookup failed: {safe_exc(e)}. Falling back to RAM cache.")
+             row = None
+ 
+     # --- FALLBACK LOGIC ---
+diff -ruN nb/backend/app/services/speech_to_text.py nw/backend/app/services/speech_to_text.py
+--- nb/backend/app/services/speech_to_text.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/services/speech_to_text.py	2026-10-16 10:14:44.454154000 +0530
+@@ -29,7 +29,7 @@
+         response_format="verbose_json"
+     )
+ 
+-    print(f"[STT] Transcribed: '{response.text}' (lang: {response.language})", flush=True)
++    print(f"[STT] Transcribed: {len(response.text or '')} chars (lang: {response.language})", flush=True)
+     return {
+         "text": response.text,
+         "language": response.language
+diff -ruN nb/backend/app/services/storage.py nw/backend/app/services/storage.py
+--- nb/backend/app/services/storage.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/services/storage.py	2026-10-16 10:14:44.518323500 +0530
+@@ -14,7 +14,7 @@
+ async def upload_to_gcs(destination_blob_name: str, file_bytes: bytes):
+     client = get_storage_client()
+     if not client or not settings.GCS_BUCKET_NAME:
+-        print(f"[Mock Storage] Saving {destination_blob_name} ({len(file_bytes)} bytes)")
++        print(f"[Mock Storage] Saving audio blob ({len(file_bytes)} bytes)")
+         return
+ 
+     bucket = client.bucket(settings.GCS_BUCKET_NAME)
+@@ -37,7 +37,7 @@
+     }
+     client = get_storage_client()
+     if not client or not settings.GCS_BUCKET_NAME:
+-        print(f"[Mock Log] {json.dumps(log_data)}")
++        print(f"[Mock Log] interaction recorded (query_len={len(query or '')}, response_len={len(response or '')}, lang={user_language})")
+         return
+         
+     bucket = client.bucket(settings.GCS_BUCKET_NAME)
+diff -ruN nb/backend/app/services/user_db.py nw/backend/app/services/user_db.py
+--- nb/backend/app/services/user_db.py	2026-10-16 10:11:24.882594700 +0530
++++ nw/backend/app/services/user_db.py	2026-10-16 10:14:44.486041900 +0530
+@@ -1,5 +1,6 @@
+ from pydantic import BaseModel
+ from app.services.db_pool import get_pool
++from app.core.log_privacy import mask_id, safe_exc
+ 
+ 
+ class UserRecord(BaseModel):
+@@ -318,10 +319,10 @@
+                 'UPDATE users SET deletion_requested_at = NOW() WHERE uid = $1',
+                 uid,
+             )
+-            print(f"[USER_DB] Deletion requested uid={uid} result={result}", flush=True)
++            print(f"[USER_DB] Deletion requested uid={mask_id(uid, 'u')} result={result}", flush=True)
+             return True
+     except Exception as e:
+-        print(f"[USER_DB] request_user_deletion error: {e}")
++        print(f"[USER_DB] request_user_deletion error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -381,7 +382,7 @@
+             )
+         return True
+     except Exception as e:
+-        print(f"[USER_DB] save_feedback error: {e}")
++        print(f"[USER_DB] save_feedback error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -395,7 +396,7 @@
+             )
+             return True
+     except Exception as e:
+-        print(f"[USER_DB] cancel_user_deletion error: {e}")
++        print(f"[USER_DB] cancel_user_deletion error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -421,9 +422,9 @@
+                 await conn.execute('DELETE FROM users WHERE uid = $1', uid)
+                 purged.append(uid)
+         if purged:
+-            print(f"[USER_DB] Purged {len(purged)} expired accounts: {purged}", flush=True)
++            print(f"[USER_DB] Purged {len(purged)} expired accounts", flush=True)
+     except Exception as e:
+-        print(f"[USER_DB] purge_expired_deletions error: {e}")
++        print(f"[USER_DB] purge_expired_deletions error: {safe_exc(e)}")
+     return purged
+ 
+ 
+@@ -441,7 +442,7 @@
+             ''', identifier.lower(), otp)
+             return True
+     except Exception as e:
+-        print(f"[DB] OTP Save Error: {e}")
++        print(f"[DB] OTP Save Error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -491,7 +492,7 @@
+                 )
+                 return 'invalid'
+     except Exception as e:
+-        print(f"OTP Verification Error: {e}")
++        print(f"OTP Verification Error: {safe_exc(e)}")
+         return 'invalid'
+ 
+ 
+@@ -505,7 +506,7 @@
+             )
+             return True
+     except Exception as e:
+-        print(f"[DB] update_session_id error: {e}")
++        print(f"[DB] update_session_id error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -524,7 +525,7 @@
+             )
+             return row["session_id"] if row else None
+     except Exception as e:
+-        print(f"[DB] get_session_id error: {e}")
++        print(f"[DB] get_session_id error: {safe_exc(e)}")
+         return None
+ 
+ 
+@@ -540,7 +541,7 @@
+             stored = row.get("session_id")
+             return stored is None or stored == session_id
+     except Exception as e:
+-        print(f"[DB] verify_session error: {e}")
++        print(f"[DB] verify_session error: {safe_exc(e)}")
+         return True
+ 
+ 
+@@ -576,7 +577,7 @@
+             )
+             return row is not None
+     except Exception as e:
+-        print(f"[DB] validate_invite_code error: {e}")
++        print(f"[DB] validate_invite_code error: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -620,7 +621,7 @@
+             await conn.execute('DELETE FROM users WHERE uid = $1', uid)
+             return True
+     except Exception as e:
+-        print(f"CRITICAL: Could not delete user {uid} from DB: {e}")
++        print(f"CRITICAL: Could not delete user {mask_id(uid, 'u')} from DB: {safe_exc(e)}")
+         return False
+ 
+ 
+@@ -634,6 +635,6 @@
+             )
+             return True
+     except Exception as e:
+-        print(f"[DB] update_mfa error: {e}")
++        print(f"[DB] update_mfa error: {safe_exc(e)}")
+         return False
+ 
+diff -ruN nb/backend/app/services/wake_word.py nw/backend/app/services/wake_word.py
+--- nb/backend/app/services/wake_word.py	2026-10-05 13:00:00.000000000 +0530
++++ nw/backend/app/services/wake_word.py	2026-10-16 10:15:01.349726900 +0530
+@@ -11,6 +11,7 @@
+ 
+ import openwakeword
+ from openwakeword.model import Model
++from app.core.log_privacy import safe_exc
+ 
+ # --- PATHS (Exactly where the synced models are) ---
+ _BASE_DIR = r"e:\kriyora\EpicVerse\frontend\EpicVerseApp\assets\wakeword"
+@@ -70,5 +71,5 @@
+                 
+             return {"detected": detected, "score": score, "peak": peak}
+         except Exception as e:
+-            print(f"[WakeWord] Predict Error: {e}")
++            print(f"[WakeWord] Predict Error: {safe_exc(e)}")
+             return {"detected": False, "score": 0.0, "peak": 0}
