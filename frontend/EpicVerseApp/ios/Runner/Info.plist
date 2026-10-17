@@ -85,6 +85,22 @@
 	<dict>
 		<key>NSPinnedDomains</key>
 		<dict>
+			<key>www.googleapis.com</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<false/>
+				<key>NSPinnedCAIdentities</key>
+				<array>
+					<dict>
+						<key>SPKI-SHA256-BASE64</key>
+						<string>mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=</string>
+					</dict>
+					<dict>
+						<key>SPKI-SHA256-BASE64</key>
+						<string>hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=</string>
+					</dict>
+				</array>
+			</dict>
 			<key>identitytoolkit.googleapis.com</key>
 			<dict>
 				<key>NSIncludesSubdomains</key>
