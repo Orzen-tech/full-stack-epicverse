@@ -21,5 +21,5 @@ def idstub():
         req = urllib.request.Request("http://mfa-idstub:9099/_admin/add", data=json.dumps({"uid": uid, "email": em}).encode(), method="POST")
         urllib.request.urlopen(req, timeout=10).read()
 async def main():
-    print("seeded users L/M:", await one("dbl"), await one("dba"), await one("dbm", 3)); idstub(); print("identity stub ready")
+    print("seeded users L/A/M/X:", await one("dbl"), await one("dba"), await one("dbm", 3), await one("dbx", 3)); idstub(); print("identity stub ready")
 asyncio.run(main())

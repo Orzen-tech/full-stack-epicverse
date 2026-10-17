@@ -1,0 +1,558 @@
+diff -ruN a/backend/app/api/routes.py b/backend/app/api/routes.py
+--- a/backend/app/api/routes.py	2026-10-17 14:48:30.001412700 +0530
++++ b/backend/app/api/routes.py	2026-10-17 14:50:19.498343000 +0530
+@@ -1,5 +1,5 @@
+ from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form, Header, Request, WebSocket, WebSocketDisconnect
+-from fastapi.responses import StreamingResponse, HTMLResponse
++from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+ from pydantic import BaseModel
+ from collections import defaultdict
+ from datetime import datetime, timedelta
+@@ -36,7 +36,7 @@
+     UserRecord, get_user, save_otp, verify_otp,
+     validate_invite_code, sync_user_with_invite_check,
+     request_user_deletion, cancel_user_deletion, purge_expired_deletions,
+-    save_feedback, get_all_feedback, get_dashboard_data, mark_email_verified_for_uid,
++    save_feedback, get_all_feedback, get_dashboard_data,
+     verify_session, update_session_id,
+ )
+ from app.services.mfa_challenge import (
+@@ -51,6 +51,7 @@
+     get_current_user, require_mfa_session, mfa_log_only, mfa_ws_gate,
+     MFA_SESSION_REQUIRED_DETAIL,
+ )
++from app.services import email_verification as email_verify
+ from app.services.app_check_monitor import log_app_check_status
+ from app.api.scheduler_auth import verify_scheduler_oidc
+ from app.api.admin_auth import verify_admin_user
+@@ -180,13 +181,19 @@
+ 
+ @router.post("/auth/verify-otp")
+ async def verify_otp_route(request: Request, identifier: str = Form(None), email: str = Form(None), otp: str = Form(...)):
+-    """Verifies an email OTP. Nothing else.
++    """Verifies an email OTP and, for an email, returns a single-use signup PROOF.
+ 
+     F-06: never creates a Firebase user, never writes a SQL `users` row,
+     and never issues a sign-in token. Signup verifies the email before the
+     Firebase account exists, so a missing Firebase user is not an error
+     here. `/sync-user` remains the sole path that may create the SQL row,
+     and only with a server-validated invite.
++
++    Email ownership: this unauthenticated route can never decide WHICH account
++    becomes verified. A correct code earns the caller a random proof (30 minutes,
++    single use, stored only as a keyed hash) that the app later presents to the
++    authenticated /auth/mark-verified. The proof is created in the same
++    transaction that consumes the code, so a failure cannot burn the user's code.
+     """
+     log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
+ 
+@@ -194,34 +201,18 @@
+     if not identifier:
+         raise HTTPException(status_code=422, detail="identifier or email is required")
+ 
+-    result = await verify_otp(identifier, otp)
++    result, proof = await email_verify.verify_otp_and_issue_proof(identifier, otp)
+     if result == 'too_many_attempts':
+         raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new verification code.")
++    if result == 'error':
++        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
+     if result != 'success':
+         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+ 
+-    # Mark only the live Firebase account's own profile as verified.
+-    if "@" in identifier:
+-        await _mark_verified_for_firebase_email(identifier)
+-
+-    return {"status": "success", "message": "OTP verified"}
+-
+-
+-async def _mark_verified_for_firebase_email(email: str) -> None:
+-    """Resolves the Firebase account for an OTP-verified email server-side
+-    and marks only that UID's profile. No account yet (new signup) is not
+-    an error; a failed lookup is logged without the email and never fails
+-    the already-successful OTP verification."""
+-    try:
+-        from firebase_admin import auth as fb_auth
+-        try:
+-            fb_user = fb_auth.get_user_by_email(email)
+-        except fb_auth.UserNotFoundError:
+-            return
+-    except Exception as e:
+-        print(f"[AUTH] verify-otp Firebase lookup failed: {type(e).__name__}", flush=True)
+-        return
+-    await mark_email_verified_for_uid(fb_user.uid, email)
++    body = {"status": "success", "message": "OTP verified"}
++    if proof:
++        body["email_verification_proof"] = proof
++    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+ 
+ 
+ @router.post("/auth/send-password-reset")
+@@ -293,18 +284,97 @@
+     return {"status": "sent"}
+ 
+ 
++_EMAIL_PROOF_INVALID = {"code": "EMAIL_PROOF_INVALID", "message": "Email verification required"}
++
++
++def _raise_for_email_result(result: str) -> None:
++    """One response per failure class, so a caller cannot tell WHICH check failed."""
++    if result == email_verify.RESULT_TOO_MANY:
++        raise HTTPException(status_code=429, detail="Too many attempts. Please wait and try again.")
++    if result == email_verify.RESULT_ERROR:
++        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
++    raise HTTPException(status_code=403, detail=_EMAIL_PROOF_INVALID)
++
++
+ @router.post("/auth/mark-verified")
+-async def mark_email_verified_route(current_user: dict = Depends(get_current_user)):
+-    """Sets email_verified=TRUE for the authenticated user. Called after pre-registration
+-    email OTP is confirmed and Firebase account + sync-user have completed."""
++async def mark_email_verified_route(current_user: dict = Depends(get_current_user), proof: str = Form(None)):
++    """Sets email_verified=TRUE for the authenticated user, only with the single-use proof that /auth/verify-otp
++    returned to this client. The UID and the email come ONLY from the verified Firebase token; nothing in the
++    request can name another account or another email. The proof is consumed atomically with the update.
++    Without a valid proof nothing is verified (403). An already-verified account answers 200 without any change."""
+     uid = current_user.get("uid")
+-    email = current_user.get("email")
++    email = email_verify.norm_email(current_user.get("email"))
+     if not uid or not email:
+         raise HTTPException(status_code=400, detail="No email on token")
+-    await mark_email_verified_for_uid(uid, email)
++    result = await email_verify.consume_proof(uid, email, proof)
++    if result != email_verify.RESULT_OK:
++        _raise_for_email_result(result)
+     return {"status": "ok"}
+ 
+ 
++@router.post("/auth/email/verify-request")
++async def email_verify_request(request: Request, current_user: dict = Depends(get_current_user)):
++    """Starts email verification for the signed-in user (an existing account whose email is not verified yet).
++
++    UID and email come only from the Firebase token. The code is sent to the email stored on this user's row, and only
++    if that equals the token's email, so a code can never be steered to a different address."""
++    uid = current_user.get("uid")
++    token_email = email_verify.norm_email(current_user.get("email"))
++    if not uid or "@" not in token_email:
++        raise HTTPException(status_code=400, detail="No email on token")
++    row = await get_user(uid)
++    if not row:
++        raise HTTPException(status_code=404, detail="User not found")
++    if row.get("email_verified"):
++        return {"status": "already_verified"}
++    db_email = email_verify.norm_email(row.get("email"))
++    if db_email != token_email:
++        raise HTTPException(status_code=409, detail={
++            "code": "EMAIL_MISMATCH", "message": "Email does not match the signed-in account."})
++    allowed, retry_after = await check_otp_send_allowed(db_email, request)
++    if not allowed:
++        raise HTTPException(
++            status_code=429,
++            detail=f"Too many requests. Please wait {retry_after // 60} minutes.",
++            headers={"Retry-After": str(retry_after)},
++        )
++    from app.services.email_service import send_otp_email
++    created = await email_verify.create_challenge(uid, db_email)
++    if created is None:
++        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
++    challenge_id, otp = created
++    valid_minutes = int(email_verify.CHALLENGE_LIFETIME.total_seconds() // 60)
++    if not await send_otp_email(db_email, otp, valid_minutes=valid_minutes):
++        await email_verify.invalidate_challenge(challenge_id, uid)
++        raise HTTPException(status_code=503, detail="Email delivery failed. Please try again.")
++    return {"status": "sent", "challenge_id": challenge_id,
++            "expires_in": int(email_verify.CHALLENGE_LIFETIME.total_seconds())}
++
++
++@router.post("/auth/email/verify-confirm")
++async def email_verify_confirm(
++    challenge_id: str = Form(...),
++    otp: str = Form(...),
++    current_user: dict = Depends(get_current_user),
++):
++    """Completes email verification for the signed-in user. Only the authenticated UID can be verified, only with a
++    challenge created for that UID and its stored email."""
++    if not _mfa_otp_valid(otp):
++        raise HTTPException(status_code=400, detail="Invalid or expired code")
++    uid = current_user.get("uid")
++    token_email = email_verify.norm_email(current_user.get("email"))
++    if not uid or "@" not in token_email:
++        raise HTTPException(status_code=400, detail="No email on token")
++    result = await email_verify.confirm_challenge(uid, challenge_id, otp, token_email)
++    if result == email_verify.RESULT_OK:
++        return {"status": "verified"}
++    if result == email_verify.RESULT_TOO_MANY:
++        raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new code.")
++    if result == email_verify.RESULT_ERROR:
++        raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
++    raise HTTPException(status_code=400, detail="Invalid or expired code")
++
++
+ @router.post("/auth/update-session")
+ async def update_session(session_id: str = Form(...), current_user: dict = Depends(require_mfa_session("update_session"))):
+     """Called on every login. Writes this device's session_id to DB.
+diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/email_verification.py
+--- a/backend/app/services/email_verification.py	1970-01-01 05:30:00.000000000 +0530
++++ b/backend/app/services/email_verification.py	2026-10-17 14:49:26.656538000 +0530
+@@ -0,0 +1,314 @@
++"""Server-side email-ownership verification.
++
++Why this exists: `email_verified` used to be settable by ANY signed-in user through POST /auth/mark-verified, so the
++"verify your email" step during registration was enforced only by the app. Now the flag can only be set by one of two
++server-checked proofs of mailbox control:
++
++  * signup (the account does not exist yet)  - /auth/verify-otp issues a random, single-use, 30-minute PROOF. The
++    caller presents it to the authenticated /auth/mark-verified, which takes the UID and the email ONLY from the
++    verified Firebase token. Only the device that received the proof can use it.
++  * an existing signed-in user               - /auth/email/verify-request sends a code to the email stored on the
++    user's row; /auth/email/verify-confirm checks it. The challenge is bound to the UID and that email.
++
++Nothing here is logged with an identifier, proof, OTP or email. The proof and the email are stored only as keyed hashes
++(HMAC-SHA256 with MFA_OTP_HASH_SECRET and distinct domain-separation labels). Every multi-statement operation runs in ONE
++transaction, with every check BEFORE the first write; a failure after a write raises so the whole transaction rolls back
++(a plain `return` inside `async with conn.transaction()` would COMMIT, so no function below returns after a write
++unless the write set is complete).
++"""
++import hashlib
++import hmac
++import secrets
++from datetime import datetime, timedelta, timezone
++
++from app.core.config import settings
++from app.core.log_privacy import safe_exc
++from app.services.db_pool import get_pool
++from app.services.otp_rate_limiter import _hmac_hash, _incr_scope, _window_start
++
++PROOF_PREFIX = "evp1_"                      # the app ignores a proof without this prefix
++PROOF_LIFETIME = timedelta(minutes=30)
++PROOF_MAX_LEN = 128
++OTP_VALID_MINUTES_SIGNUP = 1                # unchanged: the emailed signup code stays valid for one minute
++MAX_OTP_ATTEMPTS = 5                        # unchanged signup-code attempt limit
++CHALLENGE_LIFETIME = timedelta(minutes=5)
++CHALLENGE_MAX_ATTEMPTS = 5
++UID_ATTEMPT_LIMIT = 10                      # failed or successful mark-verified / confirm calls per UID per 10 minutes
++
++RESULT_OK = "ok"
++RESULT_INVALID = "invalid"                  # any reason; callers must not reveal which check failed
++RESULT_WRONG_OTP = "wrong_otp"
++RESULT_TOO_MANY = "too_many_attempts"
++RESULT_ERROR = "error"                      # database / configuration trouble -> 503, never "invalid"
++
++
++class _Rollback(Exception):
++    """Raised inside a transaction to roll everything back."""
++
++
++def norm_email(value) -> str:
++    return value.strip().lower() if isinstance(value, str) else ""
++
++
++def secret_available() -> bool:
++    return bool(settings.MFA_OTP_HASH_SECRET)
++
++
++def _hmac_hex(label: str, value: str) -> str:
++    return hmac.new(settings.MFA_OTP_HASH_SECRET.encode("utf-8"), f"{label}:{value}".encode("utf-8"),
++                    hashlib.sha256).hexdigest()
++
++
++def _proof_hash(raw: str) -> str:
++    return _hmac_hex("email-proof", raw)
++
++
++def _email_hash(email: str) -> str:
++    return _hmac_hex("email-proof-email", email)
++
++
++def _challenge_email_hash(email: str) -> str:
++    return _hmac_hex("email-verify-email", email)
++
++
++def _challenge_otp_hash(challenge_id: str, otp: str) -> str:
++    return _hmac_hex("email-verify-otp", f"{challenge_id}:{otp}")
++
++
++async def ensure_schema(conn) -> None:
++    """Additive only: two new tables. No existing table or constraint is touched."""
++    await conn.execute('''
++        CREATE TABLE IF NOT EXISTS email_verification_proofs (
++            proof_hash TEXT PRIMARY KEY,
++            email_hash TEXT NOT NULL,
++            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++            expires_at TIMESTAMPTZ NOT NULL,
++            consumed_at TIMESTAMPTZ NULL,
++            consumed_by_uid TEXT NULL
++        )
++    ''')
++    await conn.execute(
++        "CREATE INDEX IF NOT EXISTS idx_email_proofs_email ON email_verification_proofs (email_hash)")
++    await conn.execute(
++        "CREATE INDEX IF NOT EXISTS idx_email_proofs_expires ON email_verification_proofs (expires_at)")
++    await conn.execute('''
++        CREATE TABLE IF NOT EXISTS email_verification_challenges (
++            challenge_id TEXT PRIMARY KEY,
++            uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
++            email_hash TEXT NOT NULL,
++            otp_hash TEXT NOT NULL,
++            attempts INT NOT NULL DEFAULT 0 CHECK (attempts >= 0),
++            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++            expires_at TIMESTAMPTZ NOT NULL,
++            consumed_at TIMESTAMPTZ NULL
++        )
++    ''')
++    await conn.execute(
++        "CREATE INDEX IF NOT EXISTS idx_email_challenges_uid ON email_verification_challenges (uid)")
++
++
++# --------------------------------------------------------------------------------------------------------------------
++# Signup proof
++# --------------------------------------------------------------------------------------------------------------------
++
++async def verify_otp_and_issue_proof(identifier: str, otp: str) -> tuple[str, str | None]:
++    """Checks the emailed code and, for an email identifier, issues the proof IN THE SAME TRANSACTION.
++
++    Returns (result, raw_proof). result is 'success' | 'invalid' | 'too_many_attempts' | 'error'.
++    The code is consumed only if the proof is stored: any exception rolls the code deletion back, so a failure never burns
++    the user's code. Wrong attempts are counted and committed exactly as before (same limits and same one-minute validity)."""
++    ident = (identifier or "").lower()               # exactly the key save_otp() stores (it only lower-cases)
++    email = norm_email(identifier)
++    wants_proof = "@" in email
++    if wants_proof and not secret_available():
++        return "error", None                          # fail closed BEFORE the code is touched
++    raw_proof = (PROOF_PREFIX + secrets.token_urlsafe(32)) if wants_proof else None
++    try:
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            async with conn.transaction():
++                row = await conn.fetchrow('''
++                    SELECT otp, attempts FROM user_otps
++                    WHERE identifier = $1 AND created_at > (NOW() - INTERVAL '1 minute')
++                    FOR UPDATE
++                ''', ident)
++                if not row:
++                    return "invalid", None
++                if row["attempts"] >= MAX_OTP_ATTEMPTS:
++                    await conn.execute("DELETE FROM user_otps WHERE identifier = $1", ident)
++                    return "too_many_attempts", None
++                if not hmac.compare_digest((row["otp"] or "").encode("utf-8"), (otp or "").encode("utf-8")):
++                    attempts = row["attempts"] + 1
++                    if attempts >= MAX_OTP_ATTEMPTS:
++                        await conn.execute("DELETE FROM user_otps WHERE identifier = $1", ident)
++                        return "too_many_attempts", None
++                    await conn.execute("UPDATE user_otps SET attempts = $2 WHERE identifier = $1", ident, attempts)
++                    return "invalid", None
++                # Correct code. From here on every statement is a write and any failure must roll back all of them.
++                await conn.execute("DELETE FROM user_otps WHERE identifier = $1", ident)
++                if wants_proof:
++                    eh = _email_hash(email)
++                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", eh)
++                    await conn.execute(
++                        "DELETE FROM email_verification_proofs WHERE expires_at < NOW() - INTERVAL '1 day'")
++                    # One active proof per email: an earlier unused one is superseded.
++                    await conn.execute(
++                        "UPDATE email_verification_proofs SET consumed_at = NOW() "
++                        "WHERE email_hash = $1 AND consumed_at IS NULL", eh)
++                    await conn.execute('''
++                        INSERT INTO email_verification_proofs (proof_hash, email_hash, created_at, expires_at)
++                        VALUES ($1, $2, NOW(), NOW() + $3::interval)
++                    ''', _proof_hash(raw_proof), eh, PROOF_LIFETIME)
++                return "success", raw_proof
++    except Exception as e:
++        print(f"[EMAIL-VERIFY] otp/proof transaction failed: {safe_exc(e)}", flush=True)
++        return "error", None
++
++
++async def _uid_attempt_allowed(conn, uid: str) -> bool:
++    """Per-UID cap on proof/confirm attempts, in the existing rate-limit table (the limiter module is not modified)."""
++    now = datetime.now(timezone.utc)
++    count = await _incr_scope(conn, _hmac_hash(settings.MFA_OTP_HASH_SECRET, f"email-verify-uid:{uid}"),
++                              "email_verify_uid", _window_start(now))
++    return count <= UID_ATTEMPT_LIMIT
++
++
++async def consume_proof(uid: str, token_email: str, raw_proof: str | None) -> str:
++    """Marks ONLY this UID verified, using a proof issued for this exact email. `uid` and `token_email` must come from a
++    verified Firebase ID token. Returns RESULT_OK | RESULT_INVALID | RESULT_TOO_MANY | RESULT_ERROR.
++
++    Order inside the transaction: lock the user row, check everything (no writes), then consume the proof and set the flag.
++    A user who is already verified returns OK without touching anything, so a retry after a lost response is harmless."""
++    email = norm_email(token_email)
++    if not secret_available():
++        return RESULT_ERROR
++    if not uid or "@" not in email:
++        return RESULT_INVALID
++    try:
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            async with conn.transaction():
++                if not await _uid_attempt_allowed(conn, uid):
++                    return RESULT_TOO_MANY                      # the counter is committed: attempts cannot be undone
++                user = await conn.fetchrow("SELECT email, email_verified FROM users WHERE uid = $1 FOR UPDATE", uid)
++                if user is None:
++                    return RESULT_INVALID
++                if user["email_verified"]:
++                    return RESULT_OK
++                if norm_email(user["email"]) != email:
++                    return RESULT_INVALID
++                if (not isinstance(raw_proof, str) or not raw_proof.startswith(PROOF_PREFIX)
++                        or len(raw_proof) > PROOF_MAX_LEN):
++                    return RESULT_INVALID
++                proof = await conn.fetchrow('''
++                    SELECT email_hash FROM email_verification_proofs
++                    WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
++                    FOR UPDATE
++                ''', _proof_hash(raw_proof))
++                if proof is None or not hmac.compare_digest(proof["email_hash"], _email_hash(email)):
++                    return RESULT_INVALID
++                # ---- writes: both or neither ----
++                await conn.execute(
++                    "UPDATE email_verification_proofs SET consumed_at = NOW(), consumed_by_uid = $2 WHERE proof_hash = $1",
++                    _proof_hash(raw_proof), uid)
++                status = await conn.execute(
++                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2", uid, email)
++                if int(status.split()[-1]) != 1:
++                    raise _Rollback()
++                return RESULT_OK
++    except _Rollback:
++        return RESULT_INVALID
++    except Exception as e:
++        print(f"[EMAIL-VERIFY] proof consume failed: {safe_exc(e)}", flush=True)
++        return RESULT_ERROR
++
++
++# --------------------------------------------------------------------------------------------------------------------
++# Existing signed-in user
++# --------------------------------------------------------------------------------------------------------------------
++
++async def create_challenge(uid: str, email: str) -> tuple[str, str] | None:
++    """Creates a code for this UID and email (any earlier open one for the UID is superseded). Returns (challenge_id, otp),
++    or None when the secret is missing or the database fails (the caller answers 503; nothing is sent)."""
++    email = norm_email(email)
++    if not secret_available() or not uid or "@" not in email:
++        return None
++    otp = str(secrets.randbelow(900000) + 100000)
++    challenge_id = secrets.token_urlsafe(32)
++    try:
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            async with conn.transaction():
++                await conn.execute(
++                    "DELETE FROM email_verification_challenges WHERE uid = $1 AND expires_at < NOW() - INTERVAL '1 hour'", uid)
++                await conn.execute(
++                    "UPDATE email_verification_challenges SET consumed_at = NOW() WHERE uid = $1 AND consumed_at IS NULL", uid)
++                await conn.execute('''
++                    INSERT INTO email_verification_challenges (challenge_id, uid, email_hash, otp_hash, attempts, created_at, expires_at)
++                    VALUES ($1, $2, $3, $4, 0, NOW(), NOW() + $5::interval)
++                ''', challenge_id, uid, _challenge_email_hash(email), _challenge_otp_hash(challenge_id, otp), CHALLENGE_LIFETIME)
++        return challenge_id, otp
++    except Exception as e:
++        print(f"[EMAIL-VERIFY] challenge create failed: {safe_exc(e)}", flush=True)
++        return None
++
++
++async def invalidate_challenge(challenge_id: str, uid: str) -> None:
++    try:
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            await conn.execute(
++                "UPDATE email_verification_challenges SET consumed_at = NOW() WHERE challenge_id = $1 AND uid = $2 AND consumed_at IS NULL",
++                challenge_id, uid)
++    except Exception as e:
++        print(f"[EMAIL-VERIFY] challenge invalidate failed: {safe_exc(e)}", flush=True)
++
++
++async def confirm_challenge(uid: str, challenge_id: str, otp: str, token_email: str) -> str:
++    """Verifies ONE user's email: only the authenticated UID, only if its row holds the token's email, and only with a
++    correct, unexpired, unconsumed challenge created for that same UID and email. The challenge is consumed and the flag set
++    in one transaction. Wrong attempts are recorded and committed (never rolled back)."""
++    email = norm_email(token_email)
++    if not secret_available():
++        return RESULT_ERROR
++    if not uid or "@" not in email or not isinstance(challenge_id, str) or len(challenge_id) > 128:
++        return RESULT_INVALID
++    try:
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            async with conn.transaction():
++                if not await _uid_attempt_allowed(conn, uid):
++                    return RESULT_TOO_MANY
++                user = await conn.fetchrow("SELECT email, email_verified FROM users WHERE uid = $1 FOR UPDATE", uid)
++                if user is None or norm_email(user["email"]) != email:
++                    return RESULT_INVALID
++                ch = await conn.fetchrow('''
++                    SELECT uid, email_hash, otp_hash, attempts, consumed_at, (expires_at <= NOW()) AS expired
++                    FROM email_verification_challenges WHERE challenge_id = $1 FOR UPDATE
++                ''', challenge_id)
++                if (ch is None or ch["uid"] != uid or ch["consumed_at"] is not None or ch["expired"]
++                        or not hmac.compare_digest(ch["email_hash"], _challenge_email_hash(email))):
++                    return RESULT_INVALID
++                if ch["attempts"] >= CHALLENGE_MAX_ATTEMPTS:
++                    return RESULT_TOO_MANY
++                if not hmac.compare_digest(_challenge_otp_hash(challenge_id, otp), ch["otp_hash"]):
++                    attempts = ch["attempts"] + 1
++                    locked = attempts >= CHALLENGE_MAX_ATTEMPTS
++                    await conn.execute(
++                        "UPDATE email_verification_challenges SET attempts = $2, "
++                        "consumed_at = CASE WHEN $3 THEN NOW() ELSE consumed_at END WHERE challenge_id = $1",
++                        challenge_id, attempts, locked)
++                    return RESULT_TOO_MANY if locked else RESULT_WRONG_OTP
++                # ---- writes: both or neither ----
++                await conn.execute("UPDATE email_verification_challenges SET consumed_at = NOW() WHERE challenge_id = $1",
++                                   challenge_id)
++                status = await conn.execute(
++                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2", uid, email)
++                if int(status.split()[-1]) != 1:
++                    raise _Rollback()
++                return RESULT_OK
++    except _Rollback:
++        return RESULT_INVALID
++    except Exception as e:
++        print(f"[EMAIL-VERIFY] challenge confirm failed: {safe_exc(e)}", flush=True)
++        return RESULT_ERROR
+diff -ruN a/backend/app/services/user_db.py b/backend/app/services/user_db.py
+--- a/backend/app/services/user_db.py	2026-10-17 14:48:30.109801700 +0530
++++ b/backend/app/services/user_db.py	2026-10-17 15:12:19.073208600 +0530
+@@ -1,5 +1,6 @@
+ from pydantic import BaseModel
+ from app.services.db_pool import get_pool
++from app.services.email_verification import ensure_schema as ensure_email_verification_schema
+ from app.core.log_privacy import mask_id, safe_exc
+ 
+ 
+@@ -142,6 +143,9 @@
+             ON mfa_sessions (expires_at)
+         ''')
+ 
++        # Email-ownership verification (single-use signup proofs and signed-in verification codes): additive tables only.
++        await ensure_email_verification_schema(conn)
++
+ 
+ async def save_user(user: UserRecord):
+     uid = user.get_uid()
+@@ -581,23 +585,9 @@
+         return False
+ 
+ 
+-async def mark_email_verified_for_uid(uid: str, email: str) -> int:
+-    """Marks only the profile of this exact Firebase UID as verified, and
+-    only if its stored email matches the verified email. Other rows sharing
+-    the email (e.g. orphaned profiles) are never touched. Returns rows updated."""
+-    if not uid or not email:
+-        return 0
+-    try:
+-        pool = await get_pool()
+-        async with pool.acquire() as conn:
+-            status = await conn.execute(
+-                "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = LOWER($2)",
+-                uid, email,
+-            )
+-            return int(status.split()[-1])
+-    except Exception as e:
+-        print(f"[DB] mark_email_verified_for_uid error: {type(e).__name__}", flush=True)
+-        return 0
++# mark_email_verified_for_uid() was removed: it set email_verified for a UID and email without any proof of mailbox
++# control. email_verified is now set only by app/services/email_verification.py (single-use signup proof, or a code sent
++# to the account's own email).
+ 
+ 
+ # F-06: mark_invite_code_used() was removed. It unconditionally deleted an

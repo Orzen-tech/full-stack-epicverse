@@ -47,3 +47,31 @@ What it adds (no database migration, no new dependency, no Redis):
 The enforcement tests (`harness/test_config_validation.py`, `harness/test_enforcement.py`) run only inside the same isolated Docker
 network with fake users; `test_enforcement.py` starts its own backends with stubbed OpenAI, Cloud Storage and speech-to-text
 and simulates database outages with `ALTER DATABASE ... ALLOW_CONNECTIONS`. They take several minutes.
+
+## Email-ownership verification (fourth patch, local implementation, NOT deployed)
+
+`email_verification_proof.patch` is applied **after** the three verified patches above (`build_tree_proof.sh` refuses to build if
+the hash of any of them, or of `otp_rate_limiter.py`, differs). It closes the bypass where any signed-in user could set
+`email_verified` through `POST /auth/mark-verified` without ever proving mailbox control.
+
+```bash
+bash scripts/mfa_additive/build_tree_proof.sh <empty-dir>          # d733776 + the three patches + email_verification_proof.patch
+bash scripts/mfa_additive/run_local_tests.sh --only-proof           # just the new suite (about 3 minutes)
+bash scripts/mfa_additive/run_local_tests.sh --no-enforcement --no-privacy   # base + Flutter contract (L, A, X) + proof tree + all re-run suites
+```
+
+* `POST /auth/verify-otp` (unauthenticated) verifies the code and, for an email, returns a random single-use proof
+  (`evp1_...`, 30 minutes) in `email_verification_proof`. The proof is created in the SAME transaction that consumes the code, so a
+  failure never burns the user's code. It never marks any account any more (the old login-time side effect is removed).
+* `POST /auth/mark-verified` takes the Firebase UID and email ONLY from the verified token plus the `proof` form field. The proof must
+  have been issued for that exact email and the profile row must hold that email; the proof is consumed atomically with the update.
+  No proof / a wrong, expired, used or other-email proof is a uniform 403; database trouble is 503; an already verified account is 200.
+* `POST /auth/email/verify-request` and `/auth/email/verify-confirm` verify an EXISTING signed-in user: a code is sent to the email stored on
+  the user's row (never to an address chosen by the caller) and confirmed against a challenge bound to the UID and that email.
+* Storage: two NEW tables (`email_verification_proofs`, `email_verification_challenges`); proofs, codes and emails are stored only as keyed
+  hashes (HMAC-SHA256 with `MFA_OTP_HASH_SECRET` and distinct labels). No existing table, constraint or setting is changed. No new secret.
+* Nothing blocks an existing user: the backend does not require a verified email for the voice WebSocket, audio, profile or session routes.
+* There is no compatibility path for apps that predate the proof (they cannot verify a NEW registration through `mark-verified`).
+  `harness/test_email_verification.py` (85 checks) covers the signup flow, ownership binding, forged/expired/replayed proofs, concurrency,
+  transaction rollback (including the "return inside a transaction commits" trap), database outage and a missing secret.
+  `frontend/EpicVerseApp/test/compat/compat_email_verification_test.dart` runs the app's real client code against this backend (backend `X`).

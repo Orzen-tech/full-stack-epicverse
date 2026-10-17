@@ -1,6 +1,6 @@
 """TCP forwarder: host 127.0.0.1:18081/18082 -> isolated backends. Pure byte forwarding; the backends keep no internet access."""
 import asyncio
-MAP = {8081: ("mfa-be-L", 8080), 8082: ("mfa-be-M", 8080), 8083: ("mfa-be-A", 8080)}
+MAP = {8081: ("mfa-be-L", 8080), 8082: ("mfa-be-M", 8080), 8083: ("mfa-be-A", 8080), 8084: ("mfa-be-X", 8080)}
 async def pipe(r, w):
     try:
         while (d := await r.read(65536)): w.write(d); await w.drain()
