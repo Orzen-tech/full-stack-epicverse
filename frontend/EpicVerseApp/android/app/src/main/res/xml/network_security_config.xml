@@ -35,11 +35,13 @@
       is used anywhere in this app.
     -->
     <domain-config>
+        <domain includeSubdomains="false">www.googleapis.com</domain>
         <domain includeSubdomains="false">identitytoolkit.googleapis.com</domain>
         <domain includeSubdomains="false">securetoken.googleapis.com</domain>
         <pin-set expiration="2027-12-31">
             <!-- GTS Root R4 — verified as the actual root in both domains' live chains -->
             <pin digest="SHA-256">mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=</pin>
+            <pin digest="SHA-256">hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=</pin>
         </pin-set>
     </domain-config>
 </network-security-config>
