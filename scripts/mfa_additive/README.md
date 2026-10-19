@@ -68,10 +68,14 @@ bash scripts/mfa_additive/run_local_tests.sh --no-enforcement --no-privacy   # b
   No proof / a wrong, expired, used or other-email proof is a uniform 403; database trouble is 503; an already verified account is 200.
 * `POST /auth/email/verify-request` and `/auth/email/verify-confirm` verify an EXISTING signed-in user: a code is sent to the email stored on
   the user's row (never to an address chosen by the caller) and confirmed against a challenge bound to the UID and that email.
-* Storage: two NEW tables (`email_verification_proofs`, `email_verification_challenges`); proofs, codes and emails are stored only as keyed
+* Storage: two NEW tables (`email_ownership_proofs`, `email_ownership_challenges`); proofs, codes and emails are stored only as keyed
   hashes (HMAC-SHA256 with `MFA_OTP_HASH_SECRET` and distinct labels). No existing table, constraint or setting is changed. No new secret.
+  The names are deliberately unique: the unreleased `main` backend creates its own, differently shaped `email_verification_proofs` and
+  `email_verification_proofs_v2` in the SAME production database, and `CREATE TABLE IF NOT EXISTS` on a taken name silently does nothing
+  (the first live test failed with `UndefinedColumnError` for exactly that reason). `harness/test_email_verification.py` section M pre-creates
+  those older tables and checks the new code works beside them and leaves them untouched.
 * Nothing blocks an existing user: the backend does not require a verified email for the voice WebSocket, audio, profile or session routes.
 * There is no compatibility path for apps that predate the proof (they cannot verify a NEW registration through `mark-verified`).
-  `harness/test_email_verification.py` (85 checks) covers the signup flow, ownership binding, forged/expired/replayed proofs, concurrency,
+  `harness/test_email_verification.py` covers the signup flow, ownership binding, forged/expired/replayed proofs, concurrency,
   transaction rollback (including the "return inside a transaction commits" trap), database outage and a missing secret.
   `frontend/EpicVerseApp/test/compat/compat_email_verification_test.dart` runs the app's real client code against this backend (backend `X`).

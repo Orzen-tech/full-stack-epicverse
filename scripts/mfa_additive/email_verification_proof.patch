@@ -193,7 +193,7 @@ diff -ruN a/backend/app/api/routes.py b/backend/app/api/routes.py
      """Called on every login. Writes this device's session_id to DB.
 diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/email_verification.py
 --- a/backend/app/services/email_verification.py	1970-01-01 05:30:00.000000000 +0530
-+++ b/backend/app/services/email_verification.py	2026-10-17 14:49:26.656538000 +0530
++++ b/backend/app/services/email_verification.py	2026-10-19 10:47:19.714997800 +0530
 @@ -0,0 +1,314 @@
 +"""Server-side email-ownership verification.
 +
@@ -275,7 +275,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +async def ensure_schema(conn) -> None:
 +    """Additive only: two new tables. No existing table or constraint is touched."""
 +    await conn.execute('''
-+        CREATE TABLE IF NOT EXISTS email_verification_proofs (
++        CREATE TABLE IF NOT EXISTS email_ownership_proofs (
 +            proof_hash TEXT PRIMARY KEY,
 +            email_hash TEXT NOT NULL,
 +            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -285,11 +285,11 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +        )
 +    ''')
 +    await conn.execute(
-+        "CREATE INDEX IF NOT EXISTS idx_email_proofs_email ON email_verification_proofs (email_hash)")
++        "CREATE INDEX IF NOT EXISTS idx_eop_email ON email_ownership_proofs (email_hash)")
 +    await conn.execute(
-+        "CREATE INDEX IF NOT EXISTS idx_email_proofs_expires ON email_verification_proofs (expires_at)")
++        "CREATE INDEX IF NOT EXISTS idx_eop_expires ON email_ownership_proofs (expires_at)")
 +    await conn.execute('''
-+        CREATE TABLE IF NOT EXISTS email_verification_challenges (
++        CREATE TABLE IF NOT EXISTS email_ownership_challenges (
 +            challenge_id TEXT PRIMARY KEY,
 +            uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
 +            email_hash TEXT NOT NULL,
@@ -301,7 +301,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +        )
 +    ''')
 +    await conn.execute(
-+        "CREATE INDEX IF NOT EXISTS idx_email_challenges_uid ON email_verification_challenges (uid)")
++        "CREATE INDEX IF NOT EXISTS idx_eoc_uid ON email_ownership_challenges (uid)")
 +
 +
 +# --------------------------------------------------------------------------------------------------------------------
@@ -347,13 +347,13 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +                    eh = _email_hash(email)
 +                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", eh)
 +                    await conn.execute(
-+                        "DELETE FROM email_verification_proofs WHERE expires_at < NOW() - INTERVAL '1 day'")
++                        "DELETE FROM email_ownership_proofs WHERE expires_at < NOW() - INTERVAL '1 day'")
 +                    # One active proof per email: an earlier unused one is superseded.
 +                    await conn.execute(
-+                        "UPDATE email_verification_proofs SET consumed_at = NOW() "
++                        "UPDATE email_ownership_proofs SET consumed_at = NOW() "
 +                        "WHERE email_hash = $1 AND consumed_at IS NULL", eh)
 +                    await conn.execute('''
-+                        INSERT INTO email_verification_proofs (proof_hash, email_hash, created_at, expires_at)
++                        INSERT INTO email_ownership_proofs (proof_hash, email_hash, created_at, expires_at)
 +                        VALUES ($1, $2, NOW(), NOW() + $3::interval)
 +                    ''', _proof_hash(raw_proof), eh, PROOF_LIFETIME)
 +                return "success", raw_proof
@@ -398,7 +398,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +                        or len(raw_proof) > PROOF_MAX_LEN):
 +                    return RESULT_INVALID
 +                proof = await conn.fetchrow('''
-+                    SELECT email_hash FROM email_verification_proofs
++                    SELECT email_hash FROM email_ownership_proofs
 +                    WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
 +                    FOR UPDATE
 +                ''', _proof_hash(raw_proof))
@@ -406,7 +406,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +                    return RESULT_INVALID
 +                # ---- writes: both or neither ----
 +                await conn.execute(
-+                    "UPDATE email_verification_proofs SET consumed_at = NOW(), consumed_by_uid = $2 WHERE proof_hash = $1",
++                    "UPDATE email_ownership_proofs SET consumed_at = NOW(), consumed_by_uid = $2 WHERE proof_hash = $1",
 +                    _proof_hash(raw_proof), uid)
 +                status = await conn.execute(
 +                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2", uid, email)
@@ -437,11 +437,11 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +        async with pool.acquire() as conn:
 +            async with conn.transaction():
 +                await conn.execute(
-+                    "DELETE FROM email_verification_challenges WHERE uid = $1 AND expires_at < NOW() - INTERVAL '1 hour'", uid)
++                    "DELETE FROM email_ownership_challenges WHERE uid = $1 AND expires_at < NOW() - INTERVAL '1 hour'", uid)
 +                await conn.execute(
-+                    "UPDATE email_verification_challenges SET consumed_at = NOW() WHERE uid = $1 AND consumed_at IS NULL", uid)
++                    "UPDATE email_ownership_challenges SET consumed_at = NOW() WHERE uid = $1 AND consumed_at IS NULL", uid)
 +                await conn.execute('''
-+                    INSERT INTO email_verification_challenges (challenge_id, uid, email_hash, otp_hash, attempts, created_at, expires_at)
++                    INSERT INTO email_ownership_challenges (challenge_id, uid, email_hash, otp_hash, attempts, created_at, expires_at)
 +                    VALUES ($1, $2, $3, $4, 0, NOW(), NOW() + $5::interval)
 +                ''', challenge_id, uid, _challenge_email_hash(email), _challenge_otp_hash(challenge_id, otp), CHALLENGE_LIFETIME)
 +        return challenge_id, otp
@@ -455,7 +455,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +        pool = await get_pool()
 +        async with pool.acquire() as conn:
 +            await conn.execute(
-+                "UPDATE email_verification_challenges SET consumed_at = NOW() WHERE challenge_id = $1 AND uid = $2 AND consumed_at IS NULL",
++                "UPDATE email_ownership_challenges SET consumed_at = NOW() WHERE challenge_id = $1 AND uid = $2 AND consumed_at IS NULL",
 +                challenge_id, uid)
 +    except Exception as e:
 +        print(f"[EMAIL-VERIFY] challenge invalidate failed: {safe_exc(e)}", flush=True)
@@ -481,7 +481,7 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +                    return RESULT_INVALID
 +                ch = await conn.fetchrow('''
 +                    SELECT uid, email_hash, otp_hash, attempts, consumed_at, (expires_at <= NOW()) AS expired
-+                    FROM email_verification_challenges WHERE challenge_id = $1 FOR UPDATE
++                    FROM email_ownership_challenges WHERE challenge_id = $1 FOR UPDATE
 +                ''', challenge_id)
 +                if (ch is None or ch["uid"] != uid or ch["consumed_at"] is not None or ch["expired"]
 +                        or not hmac.compare_digest(ch["email_hash"], _challenge_email_hash(email))):
@@ -492,12 +492,12 @@ diff -ruN a/backend/app/services/email_verification.py b/backend/app/services/em
 +                    attempts = ch["attempts"] + 1
 +                    locked = attempts >= CHALLENGE_MAX_ATTEMPTS
 +                    await conn.execute(
-+                        "UPDATE email_verification_challenges SET attempts = $2, "
++                        "UPDATE email_ownership_challenges SET attempts = $2, "
 +                        "consumed_at = CASE WHEN $3 THEN NOW() ELSE consumed_at END WHERE challenge_id = $1",
 +                        challenge_id, attempts, locked)
 +                    return RESULT_TOO_MANY if locked else RESULT_WRONG_OTP
 +                # ---- writes: both or neither ----
-+                await conn.execute("UPDATE email_verification_challenges SET consumed_at = NOW() WHERE challenge_id = $1",
++                await conn.execute("UPDATE email_ownership_challenges SET consumed_at = NOW() WHERE challenge_id = $1",
 +                                   challenge_id)
 +                status = await conn.execute(
 +                    "UPDATE users SET email_verified = TRUE WHERE uid = $1 AND LOWER(email) = $2", uid, email)

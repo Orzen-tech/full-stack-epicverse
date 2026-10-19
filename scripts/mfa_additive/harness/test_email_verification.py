@@ -76,10 +76,16 @@ class Server:
         self.outbox = "/tmp/outbox_%s.jsonl" % name
         self.proc, self.log, self._xff = None, [], 0
 
+    def prepare_db(self, statements=()):
+        """Fresh empty database, plus optional statements run BEFORE the backend ever starts."""
+        sql("postgres", 'DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % self.db)
+        sql("postgres", 'CREATE DATABASE "%s"' % self.db)
+        for st in statements:
+            sql(self.db, st)
+
     def start(self, recreate=True):
         if recreate:
-            sql("postgres", 'DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % self.db)
-            sql("postgres", 'CREATE DATABASE "%s"' % self.db)
+            self.prepare_db()
         for p in (self.outbox, self.outbox + ".fail"):
             if os.path.exists(p):
                 os.remove(p)
@@ -105,8 +111,8 @@ class Server:
                 raise RuntimeError("backend %s exited early:\n%s" % (self.name, "\n".join(self.log[-25:])))
             try:
                 urllib.request.urlopen(self.base + "/faq", timeout=2).read()
-                if sql(self.db, "select to_regclass('public.users') is not null and to_regclass('public.email_verification_proofs') is not null "
-                                "and to_regclass('public.email_verification_challenges') is not null "
+                if sql(self.db, "select to_regclass('public.users') is not null and to_regclass('public.email_ownership_proofs') is not null "
+                                "and to_regclass('public.email_ownership_challenges') is not null "
                                 "and to_regclass('public.invite_codes') is not null", fetch=True)[0][0]:
                     return
             except Exception:
@@ -195,7 +201,7 @@ def ph(raw):
 
 def proof_row(srv, raw):
     h = ph(raw)
-    r = sql(srv.db, "SELECT consumed_at, consumed_by_uid, expires_at FROM email_verification_proofs WHERE proof_hash=$1", h, fetch=True)
+    r = sql(srv.db, "SELECT consumed_at, consumed_by_uid, expires_at FROM email_ownership_proofs WHERE proof_hash=$1", h, fetch=True)
     return r[0] if r else None
 
 
@@ -253,7 +259,7 @@ def run_main(S):
     row = proof_row(S, proof)
     check("A6 the proof is stored (as a keyed hash), unused, and expires in about 30 minutes",
           row is not None and row[0] is None and 29 * 60 < (row[2].timestamp() - time.time()) < 31 * 60, row)
-    raw_cols = sql(S.db, "SELECT proof_hash, email_hash FROM email_verification_proofs", fetch=True)
+    raw_cols = sql(S.db, "SELECT proof_hash, email_hash FROM email_ownership_proofs", fetch=True)
     check("A7 neither the proof nor the email is stored in clear text",
           all(proof not in (x[0] + x[1]) and email not in (x[0] + x[1]) and re.fullmatch(r"[0-9a-f]{64}", x[0]) for x in raw_cols), raw_cols)
     c, b, _ = http(S, "POST", "/sync-user", tk=tk(uid, email), js={"firebase_id": uid, "display_name": "A", "email": email,
@@ -356,7 +362,7 @@ def run_main(S):
 
     print("################ E. EXPIRY, SUPERSEDING, OTP LIMITS")
     u, m = "ev-exp", em("exp"); user_row(S, u, m, False); p = get_proof(S, m)
-    sql(S.db, "UPDATE email_verification_proofs SET expires_at = NOW() - INTERVAL '1 minute' WHERE proof_hash = $1", ph(p))
+    sql(S.db, "UPDATE email_ownership_proofs SET expires_at = NOW() - INTERVAL '1 minute' WHERE proof_hash = $1", ph(p))
     c, b, _ = mark(S, u, m, p)
     check("E1 an expired proof is refused", c == 403 and verified(S, u) is False, (c, b))
     u, m = "ev-sup", em("sup"); user_row(S, u, m, False); p1 = get_proof(S, m); p2 = get_proof(S, m)
@@ -417,7 +423,7 @@ def run_main(S):
     c, b, _ = http(S, "POST", "/auth/email/verify-confirm", tk=tk(a, am), form={"challenge_id": cid_a, "otp": otp_a})
     check("H2 if the stored email no longer equals the token email, confirm is refused", c == 400 and verified(S, a) is False, (c, b))
     sql(S.db, "UPDATE users SET email = $2 WHERE uid = $1", a, am)
-    sql(S.db, "UPDATE email_verification_challenges SET expires_at = NOW() - INTERVAL '1 minute' WHERE challenge_id = $1", cid_a)
+    sql(S.db, "UPDATE email_ownership_challenges SET expires_at = NOW() - INTERVAL '1 minute' WHERE challenge_id = $1", cid_a)
     c, b, _ = http(S, "POST", "/auth/email/verify-confirm", tk=tk(a, am), form={"challenge_id": cid_a, "otp": otp_a})
     check("H3 an expired challenge is refused", c == 400 and verified(S, a) is False, (c, b))
     n0 = len(S.mails()); c, b1, _ = http(S, "POST", "/auth/email/verify-request", tk=tk(a, am), headers={"X-Forwarded-For": "10.250.1.1"}); o1 = S.otp_for(am, n0)
@@ -443,11 +449,11 @@ def run_main(S):
 
     print("################ I. TRANSACTION SAFETY (nothing is consumed halfway)")
     m = em("tx-issue"); n0 = len(S.mails()); http(S, "POST", "/auth/send-email-otp", form={"identifier": m}); good = S.otp_for(m, n0)
-    sql(S.db, "ALTER TABLE email_verification_proofs ADD CONSTRAINT tx_block CHECK (false) NOT VALID")
+    sql(S.db, "ALTER TABLE email_ownership_proofs ADD CONSTRAINT tx_block CHECK (false) NOT VALID")
     c, b, _ = http(S, "POST", "/auth/verify-otp", form={"identifier": m, "otp": good})
     left = sql(S.db, "SELECT count(*) FROM user_otps WHERE identifier=$1", m.lower(), fetch=True)[0][0]
     check("I1 if the proof cannot be stored: 503, and the user's code is NOT burned", c == 503 and left == 1, (c, b, left))
-    sql(S.db, "ALTER TABLE email_verification_proofs DROP CONSTRAINT tx_block")
+    sql(S.db, "ALTER TABLE email_ownership_proofs DROP CONSTRAINT tx_block")
     c, b, _ = http(S, "POST", "/auth/verify-otp", form={"identifier": m, "otp": good})
     check("I2 the same code then works once the problem is fixed", c == 200 and b.get("email_verification_proof"), (c, b))
     uid = "tx-skip"; m = em("tx-skip"); user_row(S, uid, m, False); p = get_proof(S, m)
@@ -462,7 +468,7 @@ def run_main(S):
     c, b, _ = http(S, "POST", "/auth/email/verify-request", tk=tk(uid, m)); otp = S.otp_for(m, n0)
     sql(S.db, "CREATE TRIGGER tx_skip_trg2 BEFORE UPDATE ON users FOR EACH ROW WHEN (OLD.uid = 'tx-skip2') EXECUTE FUNCTION tx_skip()")
     c, b2, _ = http(S, "POST", "/auth/email/verify-confirm", tk=tk(uid, m), form={"challenge_id": b["challenge_id"], "otp": otp})
-    consumed = sql(S.db, "SELECT consumed_at FROM email_verification_challenges WHERE challenge_id=$1", b["challenge_id"], fetch=True)[0][0]
+    consumed = sql(S.db, "SELECT consumed_at FROM email_ownership_challenges WHERE challenge_id=$1", b["challenge_id"], fetch=True)[0][0]
     check("I5 confirm: user update touches no row -> refused and the challenge is NOT consumed", c == 400 and consumed is None and verified(S, uid) is False, (c, b2, consumed))
     sql(S.db, "DROP TRIGGER tx_skip_trg2 ON users")
     c, b2, _ = http(S, "POST", "/auth/email/verify-confirm", tk=tk(uid, m), form={"challenge_id": b["challenge_id"], "otp": otp})
@@ -471,7 +477,7 @@ def run_main(S):
     uid = "tx-mail"; m = em("tx-mail"); user_row(S, uid, m, False); open(S.outbox + ".fail", "w").close()
     c, b, _ = http(S, "POST", "/auth/email/verify-request", tk=tk(uid, m))
     os.remove(S.outbox + ".fail")
-    open_ch = sql(S.db, "SELECT count(*) FROM email_verification_challenges WHERE uid=$1 AND consumed_at IS NULL", uid, fetch=True)[0][0]
+    open_ch = sql(S.db, "SELECT count(*) FROM email_ownership_challenges WHERE uid=$1 AND consumed_at IS NULL", uid, fetch=True)[0][0]
     check("I7 if the email cannot be sent: 503 and no usable challenge is left", c == 503 and open_ch == 0, (c, b, open_ch))
 
     print("################ J. DATABASE OUTAGE")
@@ -530,6 +536,77 @@ def run_main(S):
         check("L3 no secret: the rest of the app still starts and serves", http(N, "GET", "/faq")[0] == 200)
     finally:
         N.stop()
+
+    print("################ M. COLLISION REGRESSION: older, incompatible email_verification_proofs tables already exist")
+    # Exactly what the unreleased main backend (cc305d4) creates in the shared production database. The email-ownership code must
+    # work next to them and must not touch them at all (no rename, drop, migration, extra index or row).
+    OLD_V1 = ("CREATE TABLE email_verification_proofs (email_hash TEXT PRIMARY KEY, verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+              "expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ NULL)")
+    OLD_V2 = ("CREATE TABLE email_verification_proofs_v2 (proof_hash TEXT PRIMARY KEY, email_hash TEXT NOT NULL, "
+              "purpose TEXT NOT NULL CHECK (purpose = 'signup_email_verification'), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+              "expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ NULL, consumed_by_uid TEXT NULL, CHECK (expires_at > created_at), "
+              "CHECK (consumed_by_uid IS NULL OR consumed_at IS NOT NULL))")
+    OLD_V2_IDX = "CREATE INDEX idx_evp2_expires ON email_verification_proofs_v2 (expires_at)"
+    OLD_ROWS = ["INSERT INTO email_verification_proofs (email_hash, expires_at) VALUES ('legacy-row', NOW() + INTERVAL '1 hour')",
+                "INSERT INTO email_verification_proofs_v2 (proof_hash, email_hash, purpose, expires_at) "
+                "VALUES ('legacy-v2', 'legacy-row', 'signup_email_verification', NOW() + INTERVAL '1 hour')"]
+    OLD_T = "('email_verification_proofs','email_verification_proofs_v2')"
+
+    def old_state(db):
+        return (
+            [tuple(r) for r in sql(db, "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns "
+                                       "WHERE table_name IN %s ORDER BY 1, ordinal_position" % OLD_T, fetch=True)],
+            [tuple(r) for r in sql(db, "SELECT tablename, indexname FROM pg_indexes WHERE tablename IN %s ORDER BY 1, 2" % OLD_T, fetch=True)],
+            [tuple(r) for r in sql(db, "SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                                       "WHERE conrelid IN ('email_verification_proofs'::regclass, 'email_verification_proofs_v2'::regclass) ORDER BY 1, 2", fetch=True)],
+            [tuple(r) for r in sql(db, "SELECT 'v1', email_hash, expires_at::text FROM email_verification_proofs UNION ALL "
+                                       "SELECT 'v2', proof_hash, expires_at::text FROM email_verification_proofs_v2 ORDER BY 1, 2", fetch=True)],
+        )
+
+    C = Server("collide", 18402)
+    C.prepare_db([OLD_V1, OLD_V2, OLD_V2_IDX] + OLD_ROWS)
+    before = old_state(C.db)
+    check("M0 setup: the older v1/v2 tables exist with their own columns, one row each", len(before[3]) == 2 and any(c[1] == "verified_at" for c in before[0]), before[0][:3])
+    try:
+        C.start(recreate=False)
+        C.wait_ready()
+        check("M1 the backend starts and creates its own tables next to the older ones", True)
+        sql(C.db, "INSERT INTO invite_codes (code, current_uses, max_uses, created_at) VALUES ($1, 0, 500, now())", INVITE)
+        uid, mail = "ev-collide", em("collide")
+        proof = get_proof(C, mail)
+        check("M2 verify-otp issues a proof (this is the request that returned HTTP 503 on the live revision)", isinstance(proof, str) and proof.startswith("evp1_"))
+        c, b, _ = http(C, "POST", "/sync-user", tk=tk(uid, mail), js={"firebase_id": uid, "display_name": "C", "email": mail, "invite_code": INVITE, "session_id": "s"})
+        c, b, _ = mark(C, uid, mail, proof)
+        check("M3 mark-verified consumes the proof and verifies the account", c == 200 and verified(C, uid) is True, (c, b))
+        c, b, _ = mark(C, uid, mail, proof)
+        user_row(C, "ev-collide-2", mail, False)
+        c2, b2, _ = mark(C, "ev-collide-2", mail, proof)
+        check("M4 the proof is single-use here too (a second account cannot reuse it)", c2 == 403 and verified(C, "ev-collide-2") is False, (c2, b2))
+        uid3, mail3 = "ev-collide-3", em("collide-3")
+        user_row(C, uid3, mail3, False); n0 = len(C.mails())
+        c, b, _ = http(C, "POST", "/auth/email/verify-request", tk=tk(uid3, mail3)); otp = C.otp_for(mail3, n0)
+        c, b2, _ = http(C, "POST", "/auth/email/verify-confirm", tk=tk(uid3, mail3), form={"challenge_id": b.get("challenge_id"), "otp": otp})
+        check("M5 the signed-in verification routes (the second new table) work too", c == 200 and verified(C, uid3) is True, (c, b2))
+        newcols = [r[0] for r in sql(C.db, "SELECT column_name FROM information_schema.columns WHERE table_name='email_ownership_proofs'", fetch=True)]
+        check("M6 the new proofs table is its own table with proof_hash and without the older table's verified_at",
+              "proof_hash" in newcols and "verified_at" not in newcols, newcols)
+        stored = sql(C.db, "SELECT count(*) FROM email_ownership_proofs", fetch=True)[0][0]
+        check("M7 the proof went into the new table, not the older one", stored >= 1)
+        after = old_state(C.db)
+        check("M8 the older tables are byte-for-byte unchanged: same columns", after[0] == before[0])
+        check("M9 ...same indexes (nothing was added to them)", after[1] == before[1], (before[1], after[1]))
+        check("M10 ...same constraints", after[2] == before[2])
+        check("M11 ...same rows (nothing inserted, updated or deleted)", after[3] == before[3], (before[3], after[3]))
+        C.stop(drop=False)
+        C.start(recreate=False)
+        C.wait_ready()
+        p2 = get_proof(C, em("collide-restart"))
+        check("M12 a restart on the same database is idempotent and still works", isinstance(p2, str) and p2.startswith("evp1_"))
+        check("M13 ...and the older tables are still unchanged after the restart", old_state(C.db) == before)
+        bad_lines = [l for l in C.log if "UndefinedColumn" in l or "transaction failed" in l or "init_db failed" in l or "Traceback" in l]
+        check("M14 no database error was logged", not bad_lines, bad_lines[:2])
+    finally:
+        C.stop()
 
     total, bad = len(results), results.count(False)
     print("\n%d checks, %d failed" % (total, bad))
