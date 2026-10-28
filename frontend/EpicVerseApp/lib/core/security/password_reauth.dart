@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show kReleaseMode, visibleForTesting;
+import 'enc_auth/password_auth.dart';
 
 /// Firebase password re-authentication, behind a tiny interface so the Settings flows can be tested without Firebase.
 /// The password goes only to Firebase and is never stored or logged.
@@ -28,8 +29,8 @@ class FirebasePasswordReauthenticator implements PasswordReauthenticator {
     if (user == null || email == null || email.isEmpty) {
       throw StateError('No signed-in user with an email address');
     }
-    await user.reauthenticateWithCredential(EmailAuthProvider.credential(email: email, password: password));
-    await user.getIdToken(true);
+    // Plaintext Firebase re-authentication or, when ENC_AUTH_MODE=required, the encrypted gateway (see PasswordAuth).
+    await PasswordAuth.reauthenticate(password);
   }
 }
 

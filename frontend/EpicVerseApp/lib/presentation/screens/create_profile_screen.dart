@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/app_colors.dart';
 import '../widgets/network_background.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../core/security/enc_auth/password_auth.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:async';
@@ -309,35 +310,24 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
         return;
       }
 
-      // Step 2b: Create Firebase account
+      // Step 2b: create the Firebase account, or prove ownership of an unfinished one. Plaintext Firebase in a normal build; the
+      // encrypted gateway when ENC_AUTH_MODE=required (the gateway also does the ownership proof itself).
       debugPrint('[EpicVerse][REG] Step 2: createUserWithEmailAndPassword');
-      try {
-        final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-          email: email,
-          password: _passwordController.text.trim(),
-        );
-        debugPrint('[EpicVerse][REG] Firebase user created successfully');
-        await _completeRegistration(cred, inviteCode);
-        return;
-      } on FirebaseAuthException catch (e) {
-        if (e.code != 'email-already-in-use') rethrow;
+      final outcome = await PasswordAuth.signUpOrRecover(
+        email: email,
+        password: _passwordController.text.trim(),
+        emailProof: _emailProof,
+      );
+      switch (outcome) {
+        case SignUpOutcome.created:
+          debugPrint('[EpicVerse][REG] Firebase user created successfully');
+          await _completeRegistration(null, inviteCode);
+        case SignUpOutcome.recovered:
+          await _completeExistingFirebaseUser(inviteCode);
+        case SignUpOutcome.alreadyRegistered:
+          setState(() => _emailVerified = false);
+          _showError('This email is already registered. Please log in instead.');
       }
-
-      // Step 2c: Firebase account exists — prove ownership with Firebase
-      // itself (the password goes only to Firebase, never our backend).
-      debugPrint('[EpicVerse][REG] email-already-in-use → Firebase sign-in');
-      try {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(
-          email: email,
-          password: _passwordController.text.trim(),
-        );
-      } on FirebaseAuthException catch (e) {
-        debugPrint('[EpicVerse][REG] recovery sign-in failed code=${e.code}');
-        setState(() => _emailVerified = false);
-        _showError('This email is already registered. Please log in instead.');
-        return;
-      }
-      await _completeExistingFirebaseUser(inviteCode);
     } on FirebaseAuthException catch (e) {
       debugPrint('[EpicVerse][REG] FirebaseAuthException code=${e.code}');
       _showError(e.message ?? 'Registration failed.');

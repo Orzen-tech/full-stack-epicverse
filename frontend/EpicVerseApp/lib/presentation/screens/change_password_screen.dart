@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../core/security/enc_auth/password_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 
@@ -58,18 +59,12 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
 
     setState(() => _isLoading = true);
     try {
-      final credential = EmailAuthProvider.credential(
-        email: email,
-        password: _currentPasswordController.text,
+      // Verifies the current password and sets the new one: plaintext Firebase in a normal build, the encrypted gateway when
+      // ENC_AUTH_MODE=required. Equal passwords raise 'password-unchanged' after the current password was checked, as before.
+      await PasswordAuth.changePassword(
+        current: _currentPasswordController.text,
+        next: _newPasswordController.text,
       );
-      await firebaseUser.reauthenticateWithCredential(credential);
-
-      if (_newPasswordController.text == _currentPasswordController.text) {
-        _showMessage('New password must be different from your current password.', true);
-        return;
-      }
-
-      await firebaseUser.updatePassword(_newPasswordController.text);
       _currentPasswordController.clear();
       _newPasswordController.clear();
       _confirmPasswordController.clear();
@@ -83,6 +78,9 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
         'network-request-failed' =>
           'Unable to connect. Please check your internet connection and try again.',
         'weak-password' => 'New password does not meet the password policy.',
+        'password-unchanged' => 'New password must be different from your current password.',
+        'password-change-unknown' => 'We could not confirm the password change. Try signing in with your new password, or try again.',
+        'too-many-requests' => 'Too many attempts. Please wait a few minutes and try again.',
         _ => 'Unable to change password. Please try again.',
       };
       _showMessage(message, true);

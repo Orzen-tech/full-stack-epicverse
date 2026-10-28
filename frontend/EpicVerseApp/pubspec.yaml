@@ -57,6 +57,8 @@ dependencies:
   crypto: ^3.0.6
   audio_session: ^0.2.4
   flutter_secure_storage: ^11.2.0
+  # Encrypted-auth envelope sealer (RSA-OAEP + AES-GCM, pure Dart), vendored under lib/core/security/enc_auth/sealer/. Pinned to the tested version.
+  pointycastle: 4.0.0
 
 
 dev_dependencies:

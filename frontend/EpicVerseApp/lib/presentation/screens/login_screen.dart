@@ -21,6 +21,7 @@ import '../../core/security/session_gate.dart';
 import 'mfa_required_gate.dart';
 import 'splash_screen.dart';
 import '../../core/security/email_verification_flow.dart';
+import '../../core/security/enc_auth/password_auth.dart';
 import '../widgets/security_alert_dialog.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -59,7 +60,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
       // 1. Sign in with Firebase (Primary Identity Check)
       debugPrint('[EpicVerse][LOGIN] Firebase signInWithEmailAndPassword...');
-      final UserCredential credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+      final UserCredential credential = await PasswordAuth.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
