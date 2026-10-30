@@ -1,0 +1,527 @@
+"""Real-Firebase identity adapter of the encrypted-credential gateway. SELECTABLE and FAIL-CLOSED: it is used only when
+ENC_AUTH_IDENTITY_BACKEND=firebase and every setting below is present and consistent. The emulator adapter (enc_auth_identity.py) is unchanged
+and remains the default.
+
+It exposes the same module-level operations as the emulator adapter (verify_password, get_account, create_user, update_password,
+revoke_refresh_tokens, mint_custom_token, verify_id_token, ready) and reuses its exception classes, so the gateway code does not change.
+Everything that touches the outside world is behind an INJECTED port:
+  * IdentityToolkit REST   - the password check (accounts:signInWithPassword), the only place a password is verified;
+  * Firebase Admin SDK     - get / create / update-password / revoke / verify-ID-token;
+  * IAM Credentials signBlob - Google signs the custom token; no private key exists anywhere in this process.
+Concrete ports are provided (httpx / firebase_admin / google-auth) but are built only by the production path; tests and the lab inject fakes.
+
+Security rules kept here: a custom token is minted only for a uid the caller passes in (the gateway passes the uid the identity service
+reported); the password is verified server-side on every login / reauth / change (a custom-token session is never treated as proof of the
+password); retries only for idempotent reads (password check, account lookup, ID-token check), never for create / update / revoke / sign;
+every failure becomes a fixed (stage, cause) code, library messages, URLs, keys and tokens are never copied anywhere; unknown or
+inconsistent configuration makes ready() False so every endpoint answers 503 "not_configured".
+"""
+import asyncio
+import base64
+import binascii
+import json
+import logging
+import os
+import re
+import time
+
+import httpx
+
+from app.core.config import settings
+from app.services import enc_auth_diag as diag
+from app.services import enc_auth_identity as base
+
+IDENTITY_TOOLKIT_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+SIGN_BLOB_URL = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:signBlob"
+CUSTOM_TOKEN_AUDIENCE = "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit"
+CUSTOM_TOKEN_LIFETIME_SECONDS = 3600
+MAX_RESPONSE_BYTES = 65536
+_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
+_UID_RE = re.compile(r"[\x21-\x7e]{1,128}")
+_SA_LOCAL_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+
+# httpx logs every request URL at INFO level, and the Identity Toolkit URL carries the Web API key: never let that reach a log.
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+class NotConfigured(base.NotLocal):
+    """The real-Firebase backend is selected but not (safely) configured. Subclass of NotLocal so the gateway's existing handling applies."""
+
+
+class PortError(Exception):
+    """A failure of a port. `kind` is semantic, `cause` one of the fixed codes in enc_auth_diag.CAUSES; nothing else is ever attached."""
+
+    def __init__(self, kind, cause="unexpected"):
+        super().__init__("%s/%s" % (kind, cause))
+        self.kind, self.cause = kind, cause
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Port interfaces
+# ---------------------------------------------------------------------------------------------------------------------------
+
+class IdentityToolkitPort:
+    async def sign_in(self, email, password):
+        """(uid, None) for correct credentials, (None, REST_ERROR_CODE) for a credential-level answer. Raises PortError otherwise."""
+        raise NotImplementedError
+
+
+class AdminPort:
+    async def get_user(self, uid):
+        """{"uid", "email", "disabled"} or None if the user does not exist."""
+        raise NotImplementedError
+
+    async def create_user(self, email, password):
+        """Creates a NEW user with email_verified=False and returns its uid. kind email_exists / invalid_argument are definitive."""
+        raise NotImplementedError
+
+    async def set_password(self, uid, password):
+        raise NotImplementedError
+
+    async def revoke(self, uid):
+        raise NotImplementedError
+
+    async def verify_token(self, token):
+        """The verified claims WITH revocation and disabled-user checks, or None when the token is invalid, expired, revoked or disabled."""
+        raise NotImplementedError
+
+
+class SignBlobPort:
+    async def sign_blob(self, data):
+        """RSA signature (bytes) of `data` by the signer service account, made by Google."""
+        raise NotImplementedError
+
+
+class AccessTokenProvider:
+    async def access_token(self):
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Concrete ports
+# ---------------------------------------------------------------------------------------------------------------------------
+
+def _default_client():
+    return httpx.AsyncClient(timeout=httpx.Timeout(8.0), trust_env=False, follow_redirects=False, verify=True)
+
+
+def _transport_cause(exc):
+    return base.transport_cause(exc)
+
+
+class _Answer:
+    """Status and (size-capped) body of one answer."""
+    __slots__ = ("status_code", "content")
+
+    def __init__(self, status_code, content):
+        self.status_code, self.content = status_code, content
+
+    def json(self):
+        return json.loads(self.content.decode("utf-8"))
+
+
+async def _post(client_factory, url, *, params=None, headers=None, body=None):
+    """One POST, streamed so the body can be cut off at MAX_RESPONSE_BYTES; httpx exceptions become a PortError with a fixed cause;
+    redirects are refused (and never followed)."""
+    try:
+        async with client_factory() as client:
+            async with client.stream("POST", url, params=params, headers=headers, json=body) as response:
+                if 300 <= response.status_code < 400:
+                    raise PortError("unavailable", "bad_response")
+                chunks, size = [], 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_RESPONSE_BYTES:
+                        raise PortError("unavailable", "bad_response")
+                    chunks.append(chunk)
+                return _Answer(response.status_code, b"".join(chunks))
+    except httpx.HTTPError as exc:
+        raise PortError("unavailable", _transport_cause(exc)) from None
+
+
+def _json_object(response):
+    try:
+        value = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+class HttpxIdentityToolkit(IdentityToolkitPort):
+    def __init__(self, api_key, client_factory=_default_client):
+        if not isinstance(api_key, str) or not _API_KEY_RE.fullmatch(api_key):
+            raise NotConfigured()
+        self._key, self._factory = api_key, client_factory
+
+    async def sign_in(self, email, password):
+        response = await _post(self._factory, IDENTITY_TOOLKIT_URL, params={"key": self._key},
+                               body={"email": email, "password": password, "returnSecureToken": True})
+        status = response.status_code
+        if status == 200:
+            document = _json_object(response)
+            uid = document.get("localId") if document else None
+            if isinstance(uid, str) and uid:
+                return uid, None
+            raise PortError("unavailable", "unexpected")
+        if status in (502, 503, 504):
+            raise PortError("unavailable", "http_%d" % status)
+        if status >= 500:
+            raise PortError("unavailable", "http_5xx")
+        if 400 <= status < 500:
+            return None, (base._error_code(response) or "UNKNOWN")
+        raise PortError("unavailable", "unexpected")
+
+
+_SIGN_STATUS = {"UNAUTHENTICATED": "unauthenticated", "PERMISSION_DENIED": "permission_denied", "RESOURCE_EXHAUSTED": "rate_limited",
+                "UNAVAILABLE": "http_503"}
+_SIGN_HTTP = {401: "unauthenticated", 403: "permission_denied", 429: "rate_limited"}
+
+
+class IamSignBlobPort(SignBlobPort):
+    def __init__(self, service_account, token_provider, client_factory=_default_client):
+        self._url = SIGN_BLOB_URL % validate_service_account(service_account)
+        self._tokens, self._factory = token_provider, client_factory
+
+    async def sign_blob(self, data):
+        try:
+            token = await self._tokens.access_token()
+        except PortError:
+            raise
+        except Exception:
+            raise PortError("unavailable", "unauthenticated") from None
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{20,2048}", token):
+            raise PortError("unavailable", "unauthenticated")
+        response = await _post(self._factory, self._url, headers={"Authorization": "Bearer " + token},
+                               body={"payload": base64.b64encode(data).decode("ascii")})
+        document = _json_object(response)
+        if response.status_code != 200:
+            raise PortError("unavailable", self._failure_cause(response.status_code, document))
+        blob = document.get("signedBlob") if document else None
+        if not isinstance(blob, str):
+            raise PortError("unavailable", "bad_response")
+        try:
+            signature = base64.b64decode(blob, validate=True)
+        except (binascii.Error, ValueError):
+            raise PortError("unavailable", "bad_response") from None
+        if not 128 <= len(signature) <= 1024:
+            raise PortError("unavailable", "bad_response")
+        return signature
+
+    @staticmethod
+    def _failure_cause(status, document):
+        error = document.get("error") if isinstance(document, dict) else None
+        if isinstance(error, dict):
+            for detail in error.get("details") or []:
+                if isinstance(detail, dict) and detail.get("reason") == "SERVICE_DISABLED":
+                    return "service_disabled"
+            named = _SIGN_STATUS.get(error.get("status"))
+            if named:
+                return named
+        return _SIGN_HTTP.get(status, "http_5xx" if status >= 500 else "unexpected")
+
+
+class GoogleAuthTokenProvider(AccessTokenProvider):
+    """Access token of the runtime service account through google-auth (the Cloud Run identity). Only built by the production path."""
+
+    def __init__(self, google_auth=None, request_factory=None):
+        self._auth, self._request_factory, self._credentials = google_auth, request_factory, None
+
+    async def access_token(self):
+        def fetch():
+            auth = self._auth
+            if auth is None:
+                import google.auth as auth
+            if self._request_factory is None:
+                from google.auth.transport.requests import Request
+                factory = Request
+            else:
+                factory = self._request_factory
+            if self._credentials is None:
+                self._credentials, _ = auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            if not getattr(self._credentials, "valid", False):
+                self._credentials.refresh(factory())
+            return self._credentials.token
+        try:
+            return await asyncio.to_thread(fetch)
+        except Exception:
+            raise PortError("unavailable", "unauthenticated") from None
+
+
+class FirebaseAdminPort(AdminPort):
+    """Thin wrapper over firebase_admin.auth. `auth_module` / `exceptions_module` / `app` are injectable; production builds them lazily."""
+
+    def __init__(self, project_id, timeout=8.0, auth_module=None, exceptions_module=None, app=None):
+        self._project, self._timeout = project_id, float(timeout)
+        self._auth, self._exc, self._app = auth_module, exceptions_module, app
+
+    def _modules(self):
+        if self._auth is None or self._exc is None:
+            import firebase_admin
+            from firebase_admin import auth, exceptions
+            self._auth, self._exc = auth, exceptions
+            if self._app is None:
+                try:
+                    self._app = firebase_admin.get_app("enc-gateway-firebase")
+                except ValueError:
+                    self._app = firebase_admin.initialize_app(options={"projectId": self._project, "httpTimeout": self._timeout},
+                                                              name="enc-gateway-firebase")
+        return self._auth, self._exc
+
+    def _translate(self, exc):
+        auth, errors = self._modules()
+        table = (
+            (getattr(auth, "UserNotFoundError", ()), "not_found", "sdk_error"),
+            (getattr(auth, "EmailAlreadyExistsError", ()), "email_exists", "sdk_error"),
+            (getattr(auth, "RevokedIdTokenError", ()), "revoked", "sdk_error"),
+            (getattr(auth, "ExpiredIdTokenError", ()), "expired", "sdk_error"),
+            (getattr(auth, "UserDisabledError", ()), "disabled", "sdk_error"),
+            (getattr(auth, "InvalidIdTokenError", ()), "invalid_token", "sdk_error"),
+            (getattr(errors, "InvalidArgumentError", ()), "invalid_argument", "sdk_error"),
+            (getattr(errors, "UnavailableError", ()), "unavailable", "sdk_unavailable"),
+            (getattr(errors, "DeadlineExceededError", ()), "unavailable", "sdk_timeout"),
+        )
+        for cls, kind, cause in table:
+            if cls and isinstance(exc, cls):
+                return PortError(kind, cause)
+        if isinstance(exc, ValueError):
+            return PortError("invalid_argument", "sdk_error")
+        return PortError("unavailable", "sdk_error")
+
+    async def _run(self, function, *args, **kwargs):
+        try:
+            return await asyncio.to_thread(function, *args, **kwargs)
+        except PortError:
+            raise
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    async def get_user(self, uid):
+        auth, _ = self._modules()
+        try:
+            user = await self._run(auth.get_user, uid, app=self._app)
+        except PortError as failure:
+            if failure.kind == "not_found":
+                return None
+            raise
+        return {"uid": user.uid, "email": user.email or "", "disabled": bool(user.disabled)}
+
+    async def create_user(self, email, password):
+        auth, _ = self._modules()
+        user = await self._run(auth.create_user, email=email, password=password, email_verified=False, app=self._app)
+        return user.uid
+
+    async def set_password(self, uid, password):
+        auth, _ = self._modules()
+        await self._run(auth.update_user, uid, password=password, app=self._app)
+
+    async def revoke(self, uid):
+        auth, _ = self._modules()
+        await self._run(auth.revoke_refresh_tokens, uid, app=self._app)
+
+    async def verify_token(self, token):
+        auth, _ = self._modules()
+        try:
+            return await self._run(auth.verify_id_token, token, app=self._app, check_revoked=True)
+        except PortError as failure:
+            if failure.kind in ("revoked", "expired", "invalid_token", "disabled"):
+                return None
+            raise
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Custom token (header.payload built here; the signature comes from IAM signBlob)
+# ---------------------------------------------------------------------------------------------------------------------------
+
+def validate_service_account(email):
+    project = settings.ENC_AUTH_FIREBASE_PROJECT_ID
+    suffix = "@%s.iam.gserviceaccount.com" % project
+    if not project or not isinstance(email, str) or not email.endswith(suffix) or not _SA_LOCAL_RE.fullmatch(email[:-len(suffix)]):
+        raise NotConfigured()
+    return email
+
+
+def _b64url(raw):
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def custom_token_signing_input(service_account, uid, now):
+    """The exact bytes IAM must sign: base64url(header).base64url(payload) for a Firebase custom token (RS256, one hour)."""
+    claims = {"iss": service_account, "sub": service_account, "aud": CUSTOM_TOKEN_AUDIENCE, "iat": now,
+              "exp": now + CUSTOM_TOKEN_LIFETIME_SECONDS, "uid": uid}
+    header = {"alg": "RS256", "typ": "JWT"}
+    return (_b64url(json.dumps(header, separators=(",", ":")).encode()) + "." + _b64url(json.dumps(claims, separators=(",", ":")).encode())).encode("ascii")
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The adapter
+# ---------------------------------------------------------------------------------------------------------------------------
+
+class FirebaseIdentity:
+    def __init__(self, rest, admin, signer, service_account, clock=time.time):
+        self._rest, self._admin, self._signer, self._account, self._clock = rest, admin, signer, service_account, clock
+
+    async def verify_password(self, email, password):
+        async def attempt():
+            try:
+                return await self._rest.sign_in(email, password)
+            except PortError as failure:
+                raise base.IdentityUnavailable("verify_password", failure.cause) from None
+        return await base._timed("verify_password", lambda: base._retry("verify_password", attempt))
+
+    async def get_account(self, uid):
+        async def attempt():
+            try:
+                user = await self._admin.get_user(uid)
+            except PortError as failure:
+                raise base.IdentityUnavailable("get_account", failure.cause) from None
+            return None if user is None else base.Account(user["uid"], user["email"], bool(user["disabled"]))
+        return await base._timed("get_account", lambda: base._retry("get_account", attempt))
+
+    async def create_user(self, email, password):
+        try:
+            uid = await base._timed("create_user", lambda: self._admin.create_user(email, password))
+        except PortError as failure:
+            if failure.kind == "email_exists":
+                raise base.EmailExists() from None
+            if failure.kind == "invalid_argument":
+                raise base.IdentityRejected() from None
+            raise base.IdentityUnavailable("create_user", failure.cause) from None
+        if not isinstance(uid, str) or not _UID_RE.fullmatch(uid):
+            raise base.IdentityUnavailable("create_user", "bad_response")
+        return uid
+
+    async def update_password(self, uid, new_password):
+        try:
+            await base._timed("update_password", lambda: self._admin.set_password(uid, new_password))
+        except PortError as failure:
+            if failure.kind == "invalid_argument":
+                raise base.IdentityRejected() from None          # definitive: nothing changed
+            raise base.IdentityUnavailable("update_password", failure.cause) from None
+
+    async def revoke_refresh_tokens(self, uid):
+        try:
+            await base._timed("revoke", lambda: self._admin.revoke(uid))
+        except PortError as failure:
+            raise base.IdentityUnavailable("revoke", failure.cause) from None
+
+    async def mint_custom_token(self, uid):
+        """Only for a uid the caller got from the identity service (the gateway guarantees it). Signed by Google; never retried."""
+        if not isinstance(uid, str) or not _UID_RE.fullmatch(uid):
+            raise base.IdentityUnavailable("mint", "unexpected")
+        data = custom_token_signing_input(self._account, uid, int(self._clock()))
+        try:
+            signature = await base._timed("mint", lambda: self._signer.sign_blob(data))
+        except PortError as failure:
+            raise base.IdentityUnavailable("mint", failure.cause) from None
+        if not isinstance(signature, bytes) or not 128 <= len(signature) <= 1024:
+            raise base.IdentityUnavailable("mint", "bad_response")
+        return data.decode("ascii") + "." + _b64url(signature)
+
+    async def verify_id_token(self, token):
+        async def attempt():
+            try:
+                return await self._admin.verify_token(token)
+            except PortError as failure:
+                raise base.IdentityUnavailable("verify_token", failure.cause) from None
+        return await base._timed("verify_token", lambda: base._retry("verify_token", attempt))
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Configuration, selection and the module-level operations the gateway calls
+# ---------------------------------------------------------------------------------------------------------------------------
+
+_instance = None
+
+
+def configure(identity):
+    """Test / lab hook: replaces the production wiring with an injected FirebaseIdentity (fake ports). Configuration checks still apply."""
+    global _instance
+    _instance = identity
+
+
+def config_problem():
+    """None when the real-Firebase backend is safely configured, else a fixed reason code. Never includes a value."""
+    project = settings.ENC_AUTH_FIREBASE_PROJECT_ID
+    if not project or project != settings.FIREBASE_PROJECT_ID:
+        return "project_mismatch"
+    if project.startswith("demo-"):
+        return "demo_project"
+    if (os.environ.get("FIREBASE_AUTH_EMULATOR_HOST") or "").strip():
+        return "emulator_host_set"                                # the Admin SDK would silently talk to an emulator
+    if settings.GOOGLE_APPLICATION_CREDENTIALS or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        return "key_file_configured"                              # keyless only: the runtime identity is used, never a key file
+    if not _API_KEY_RE.fullmatch(settings.ENC_AUTH_FIREBASE_WEB_API_KEY or ""):
+        return "api_key_missing"
+    try:
+        validate_service_account(settings.ENC_AUTH_SIGNER_SERVICE_ACCOUNT)
+    except NotConfigured:
+        return "signer_invalid"
+    return None
+
+
+def ready():
+    return config_problem() is None
+
+
+def not_ready_cause():
+    return "not_configured"
+
+
+def _identity():
+    global _instance
+    problem = config_problem()
+    if problem is not None:
+        diag.note("unavailable", "config", "not_configured")
+        raise NotConfigured()
+    if _instance is None:
+        _instance = FirebaseIdentity(
+            HttpxIdentityToolkit(settings.ENC_AUTH_FIREBASE_WEB_API_KEY),
+            FirebaseAdminPort(settings.ENC_AUTH_FIREBASE_PROJECT_ID, settings.ENC_AUTH_SDK_TIMEOUT_SECONDS),
+            IamSignBlobPort(settings.ENC_AUTH_SIGNER_SERVICE_ACCOUNT, GoogleAuthTokenProvider()),
+            settings.ENC_AUTH_SIGNER_SERVICE_ACCOUNT)
+    return _instance
+
+
+async def verify_password(email, password):
+    return await _identity().verify_password(email, password)
+
+
+async def get_account(uid):
+    return await _identity().get_account(uid)
+
+
+async def create_user(email, password):
+    return await _identity().create_user(email, password)
+
+
+async def update_password(uid, new_password):
+    await _identity().update_password(uid, new_password)
+
+
+async def revoke_refresh_tokens(uid):
+    await _identity().revoke_refresh_tokens(uid)
+
+
+async def mint_custom_token(uid):
+    return await _identity().mint_custom_token(uid)
+
+
+async def verify_id_token(token):
+    return await _identity().verify_id_token(token)
+
+
+_OPERATIONS = ("verify_password", "get_account", "create_user", "update_password", "revoke_refresh_tokens", "mint_custom_token", "verify_id_token")
+
+
+async def _closed(*args, **kwargs):
+    raise NotConfigured()
+
+
+def install(namespace, backend):
+    """Called once, at the bottom of enc_auth_identity.py, when ENC_AUTH_IDENTITY_BACKEND is not "emulator".
+    "firebase" -> the real operations; ANY other value -> operations that all fail closed (a typo never falls back to the emulator)."""
+    if backend == "firebase":
+        namespace.update({"ready": ready, "not_ready_cause": not_ready_cause, **{name: globals()[name] for name in _OPERATIONS}})
+    else:
+        namespace.update({"ready": lambda: False, "not_ready_cause": not_ready_cause, **{name: _closed for name in _OPERATIONS}})

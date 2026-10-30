@@ -17,3 +17,4 @@ openpyxl==3.1.2
 numpy==1.26.4
 pydantic-settings==2.0.3
 httpx==0.25.2
+cryptography==50.0.2

@@ -94,6 +94,38 @@ class Settings(BaseSettings):
     # rollout revision, then remove it together with the legacy code.
     EMAIL_VERIFY_LEGACY_COMPAT: bool = False
 
+    # Encrypted-credential gateway (G6a). DISABLED by default and LOCAL-TEST ONLY: the identity adapter refuses to run unless the
+    # environment is a verified Firebase Auth emulator (see app/services/enc_auth_identity.py).
+    ENC_AUTH_ENABLED: bool = False
+    ENC_AUTH_KEYS: str = ""                 # JSON {"<kid>": "<PEM private key>"} from a secret store; never committed or logged
+    ENC_AUTH_HASH_SECRET: str = ""          # keys the gateway limiter hashes; the gateway is unavailable without it
+    ENC_AUTH_NONCE_TTL_SECONDS: int = 120
+    ENC_AUTH_NONCE_MAX_OUTSTANDING: int = 20000
+    ENC_AUTH_REQUIRE_EMAIL_PROOF: bool = True   # signup needs the e-mail ownership proof, sent in the X-Email-Proof header
+    ENC_AUTH_ALLOWED_IDENTITY_HOSTS: str = "127.0.0.1,localhost"
+    ENC_AUTH_WINDOW_SECONDS: int = 600
+    ENC_AUTH_IP_LIMIT: int = 120            # gateway requests per IP per window
+    ENC_AUTH_SIGNUP_IP_LIMIT: int = 10      # signups per IP per window
+    # G6b: password-failure limiter (all counters over ENC_AUTH_WINDOW_SECONDS; see enc_auth_limits_eval.py)
+    ENC_AUTH_PAIR_FAIL_LIMIT: int = 5       # failed password checks per e-mail + IP pair
+    ENC_AUTH_IP_FAIL_LIMIT: int = 20        # failed password checks per IP (all e-mails)
+    ENC_AUTH_EMAIL_FAIL_LIMIT: int = 30     # failed password checks per e-mail (all IPs): higher, so one IP cannot lock a victim out
+    ENC_AUTH_GLOBAL_FAIL_LIMIT: int = 2000  # failed password checks overall; above it the per-IP limit drops to ENC_AUTH_ABUSE_IP_FAIL_LIMIT
+    ENC_AUTH_ABUSE_IP_FAIL_LIMIT: int = 2
+    # G6b: signup proof hardening (Option D). Gateway-side maximum age of the e-mail ownership proof; the global 30-minute expiry is unchanged.
+    ENC_AUTH_PROOF_MAX_AGE_SECONDS: int = 600
+    # G6b: reliability. Bounded retries (idempotent reads/verifications only), an overall request deadline and a database wait limit.
+    ENC_AUTH_RETRY_MAX: int = 2
+    ENC_AUTH_RETRY_BUDGET_MS: int = 1500
+    ENC_AUTH_REQUEST_DEADLINE_SECONDS: float = 20.0
+    ENC_AUTH_DB_ACQUIRE_TIMEOUT_SECONDS: float = 5.0
+    ENC_AUTH_SDK_TIMEOUT_SECONDS: float = 8.0       # http timeout of the gateway's own Admin SDK app
+    # G7: identity backend of the gateway. "emulator" (default, local tests only) | "firebase" (real Firebase, fail-closed) | anything else = all closed.
+    ENC_AUTH_IDENTITY_BACKEND: str = "emulator"
+    ENC_AUTH_FIREBASE_PROJECT_ID: str = ""         # must equal FIREBASE_PROJECT_ID
+    ENC_AUTH_FIREBASE_WEB_API_KEY: str = ""        # the project's Web API key (a client identifier, still kept in the secret store)
+    ENC_AUTH_SIGNER_SERVICE_ACCOUNT: str = ""      # <id>@<project>.iam.gserviceaccount.com; Google signs custom tokens for it through IAM signBlob
+
     @model_validator(mode="after")
     def derive_async_database_url(self) -> "Settings":
         if not self.ASYNC_DATABASE_URL:

@@ -9,6 +9,7 @@ import asyncpg
 from pydantic import BaseModel
 from app.core.config import settings
 from app.services.db_pool import get_pool
+from app.services.enc_auth_store import ensure_schema as ensure_enc_auth_schema
 
 
 class UserRecord(BaseModel):
@@ -289,6 +290,14 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_evp2_expires
             ON email_verification_proofs_v2 (expires_at)
         ''')
+
+        # Encrypted-credential gateway (nonces, its own limiter, proof claims): additive tables, created under the same bounded startup
+        # transaction. A problem here must not stop startup; the gateway then simply stays unavailable (fail closed).
+        try:
+            async with _startup_schema_txn(conn, "enc-auth gateway tables"):
+                await ensure_enc_auth_schema(conn)
+        except Exception as e:
+            print(f"[ENC-AUTH] schema unavailable: {type(e).__name__}", flush=True)
 
 
 async def get_security_state(uid: str) -> dict | None:
@@ -933,6 +942,23 @@ async def consume_email_verification_proof(uid: str, token_email: str, raw_proof
     except Exception as e:
         print(f"[DB] consume_email_verification_proof error: {type(e).__name__}", flush=True)
         return False
+
+
+async def email_verification_proof_is_live(conn, raw_proof, email, max_age_seconds: float) -> bool:
+    """NON-consuming check used by the encrypted-credential gateway at signup: the same proof table, hashes and email binding as
+    consume_email_verification_proof(), but nothing is changed (the proof stays single-use and is consumed by /auth/mark-verified).
+    True only if the proof exists, is unexpired, unconsumed, was issued for exactly this email and is at most max_age_seconds old.
+    `conn` is supplied by the caller so that its own bounded acquisition and timeouts apply."""
+    secret = settings.MFA_OTP_HASH_SECRET
+    email = norm_email(email)
+    if (not secret or "@" not in email or not isinstance(raw_proof, str) or not raw_proof.startswith(EMAIL_PROOF_V2_PREFIX)
+            or len(raw_proof) > _EMAIL_PROOF_V2_MAX_LEN):
+        return False
+    row = await conn.fetchrow(
+        "SELECT email_hash FROM email_verification_proofs_v2 WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() "
+        "AND created_at > NOW() - make_interval(secs => $2::double precision)",
+        _proof_v2_hash(secret, raw_proof), float(max_age_seconds))
+    return row is not None and hmac.compare_digest(row["email_hash"], _proof_v2_email_hash(secret, email))
 
 
 # F-06: mark_invite_code_used() was removed. It unconditionally deleted an

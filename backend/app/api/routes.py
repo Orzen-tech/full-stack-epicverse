@@ -43,6 +43,12 @@ from app.services.otp_rate_limiter import check_otp_send_allowed, check_rate_lim
 
 router = APIRouter()
 
+# Encrypted-credential gateway (disabled by default). Its routes live under the same /api/v1 prefix.
+from app.api import enc_gateway  # noqa: E402
+from app.services.enc_auth_identity import resolve_token_email  # noqa: E402
+from app.services import enc_auth_store as enc_store  # noqa: E402
+router.include_router(enc_gateway.router)
+
 INVITE_FAILED_VALIDATIONS_PER_IP = 20  # per 10-minute window; only FAILED validations count
 
 
@@ -83,7 +89,9 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(require_mfa_i
 
     # F-06: a newly created row takes its email from the verified token,
     # enforced inside the creation transaction.
-    token_email = (current_user.get("email") or "").strip() or None
+    # Unchanged while the gateway is disabled; when enabled the e-mail comes from the verified UID (claim cross-checked, or looked up
+    # through the Admin SDK when a custom-token session carries no e-mail claim).
+    token_email = await resolve_token_email(current_user)
     result = await sync_user_with_invite_check(user, verified_email=token_email)
     if result["status"] == "rejected":
         reason = result.get("reason")
@@ -353,14 +361,17 @@ async def mark_email_verified_route(
     temporary EMAIL_VERIFY_LEGACY_COMPAT rollout window for old app builds.
     """
     uid = current_user.get("uid")
-    email = norm_email(current_user.get("email"))
+    email = norm_email(await resolve_token_email(current_user))
     if not uid or not email:
         raise HTTPException(status_code=400, detail="No email on token")
     row = await get_user(uid)
     if row and row.get("email_verified"):
         return {"status": "ok"}
     if proof:
-        verified = await consume_email_verification_proof(uid, email, proof)
+        allowed = await enc_store.claim_allows(uid, proof)         # gateway only: refuses a proof first used by a different UID
+        if allowed is None:
+            raise HTTPException(status_code=503, detail="Email verification is temporarily unavailable.")
+        verified = await consume_email_verification_proof(uid, email, proof) if allowed else False
     elif settings.EMAIL_VERIFY_LEGACY_COMPAT:
         print("[EMAIL-VERIFY] legacy_compat path=mark_verified_no_proof", flush=True)
         verified = await mark_email_verified_with_proof(uid, email) == 1
@@ -382,7 +393,7 @@ async def email_verify_request(request: Request, current_user: dict = Depends(ge
     MFA session: an unverified account cannot have MFA enabled.
     """
     uid = current_user.get("uid")
-    token_email = norm_email(current_user.get("email"))
+    token_email = norm_email(await resolve_token_email(current_user))
     if not uid or "@" not in token_email:
         raise HTTPException(status_code=400, detail="No email on token")
     row = await get_user(uid)
@@ -426,7 +437,7 @@ async def email_verify_confirm(
     if not _mfa_otp_valid(otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
     uid = current_user.get("uid")
-    token_email = norm_email(current_user.get("email"))
+    token_email = norm_email(await resolve_token_email(current_user))
     if not uid or "@" not in token_email:
         raise HTTPException(status_code=400, detail="No email on token")
     try:
