@@ -1,0 +1,1123 @@
+--- /dev/null
++++ b/backend/app/api/enc_gateway.py
+@@ -0,0 +1,328 @@
++"""Encrypted-credential gateway (LOCAL TEST ONLY; disabled by default).
++
++POST /auth/enc/nonce            {"op": "login|signup|reauth|change_password"} -> {"nonce", "ttl", "server_time"}
++POST /auth/enc/login            body = the G1 envelope exactly                -> {"custom_token"}
++POST /auth/enc/signup           body = envelope  (+ header X-Email-Proof)     -> {"custom_token", "created", "recovered"?}
++POST /auth/enc/reauth           body = envelope  + Authorization: Bearer      -> {"custom_token"}
++POST /auth/enc/change_password  body = envelope  + Authorization: Bearer      -> {"custom_token"|null, "password_changed", ...}
++
++Rules: the e-mail and password exist in clear only inside this process, only while a request runs; nothing is logged except fixed
++outcome codes; every envelope problem answers the same 400 {"error": "AUTH_FAILED"}; credential problems use the Firebase-style
++codes the app already understands; a custom token is minted ONLY for a UID the identity service reported (never one the client
++sent); anything unconfigured, unreachable or non-local answers 503 {"error": "AUTH_UNAVAILABLE"}. There is no plaintext path.
++"""
++import hmac
++import json
++import time
++
++from fastapi import APIRouter, Request
++from fastapi.responses import JSONResponse
++
++from app.core.config import settings
++from app.core.log_privacy import safe_exc
++from app.services import email_verification as email_verify
++from app.services import enc_auth_envelope as env
++from app.services import enc_auth_identity as ident
++from app.services import enc_auth_store as store
++from app.services.enc_auth_policy import validate as policy_validate
++from app.services.otp_rate_limiter import client_ip
++
++router = APIRouter()
++
++GENERIC = {"error": "AUTH_FAILED"}
++UNAVAILABLE = {"error": "AUTH_UNAVAILABLE"}
++_PROOF_INVALID = {"error": "email-proof-invalid"}
++
++
++class _State:
++    def __init__(self, keyring, nonces):
++        self.keyring, self.nonces = keyring, nonces
++
++
++_state = None
++
++
++def _gateway_state():
++    """The keyring and nonce store, or None when the gateway is disabled or not safely configured (then every call answers 503)."""
++    global _state
++    if _state is not None:
++        return _state
++    if not settings.ENC_AUTH_ENABLED or not settings.ENC_AUTH_HASH_SECRET or not ident.ready():
++        return None
++    try:
++        keyring = env.load_keyring(settings.ENC_AUTH_KEYS)
++    except env.KeyConfigError:
++        return None
++    _state = _State(keyring, store.PgNonceStore(settings.ENC_AUTH_NONCE_TTL_SECONDS, settings.ENC_AUTH_NONCE_MAX_OUTSTANDING))
++    return _state
++
++
++def _reply(status, body, headers=None):
++    return JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **(headers or {})})
++
++
++def _log(op, outcome):
++    print(f"[ENC-AUTH] op={op} outcome={outcome}", flush=True)  # fixed codes only
++
++
++def _limited(retry):
++    return _reply(429, {"error": "too-many-requests"}, {"Retry-After": str(max(int(retry), 1))})
++
++
++async def _read_body(request):
++    """The request body, or None when it is larger than any valid envelope."""
++    chunks, size = [], 0
++    async for chunk in request.stream():
++        size += len(chunk)
++        if size > env.MAX_ENVELOPE_BYTES:
++            return None
++        chunks.append(chunk)
++    return b"".join(chunks)
++
++
++@router.post("/auth/enc/nonce")
++async def issue_nonce(request: Request):
++    state = _gateway_state()
++    if state is None:
++        return _reply(503, UNAVAILABLE)
++    try:
++        body = await _read_body(request)
++        op = json.loads(body.decode("utf-8")).get("op") if body else None
++        if op not in env.OPERATIONS:
++            return _reply(400, GENERIC)
++        allowed, retry = await store.hit("ip_req", client_ip(request), settings.ENC_AUTH_IP_LIMIT)
++        if not allowed:
++            return _limited(retry)
++        nonce = await state.nonces.issue(op)
++    except env.EnvelopeError:
++        return _reply(503, UNAVAILABLE)  # capacity
++    except (ValueError, AttributeError, UnicodeDecodeError):
++        return _reply(400, GENERIC)
++    except Exception as exc:  # database trouble: fail closed
++        print(f"[ENC-AUTH] nonce unavailable: {safe_exc(exc)}", flush=True)
++        return _reply(503, UNAVAILABLE)
++    return _reply(200, {"nonce": nonce, "ttl": state.nonces.ttl, "server_time": int(time.time())})
++
++
++async def _open(request, op, state):
++    """(credentials, None) or (None, response). Applies the per-IP limiter first and never reveals which envelope check failed."""
++    allowed, retry = await store.hit("ip_req", client_ip(request), settings.ENC_AUTH_IP_LIMIT)
++    if not allowed:
++        return None, _limited(retry)
++    raw = await _read_body(request)
++    if raw is None:
++        return None, _reply(400, GENERIC)
++    try:
++        return await env.open_credentials(raw, state.keyring, state.nonces, op), None
++    except env.EnvelopeError as exc:
++        _log(op, "envelope_" + ("unavailable" if exc.code == env.CAPACITY else "rejected"))
++        return None, (_reply(503, UNAVAILABLE) if exc.code == env.CAPACITY else _reply(400, GENERIC))
++
++
++async def _caller(request):
++    header = request.headers.get("authorization", "")
++    if not header.lower().startswith("bearer "):
++        return None
++    return await ident.verify_id_token(header.split(" ", 1)[1].strip())
++
++
++async def _check_password(email, password, ip):
++    """Server-side password verification behind the gateway's own failure limiter.
++    Returns ("ok", uid) | ("fail", rest_error_code) | ("limited", retry_after). Raises IdentityUnavailable."""
++    key = email.strip().lower()
++    blocked, retry = await store.peek("pw_fail_email", key, settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
++    if not blocked:
++        blocked, retry = await store.peek("pw_fail_ip", ip, settings.ENC_AUTH_IP_FAIL_LIMIT)
++    if blocked:
++        return "limited", retry
++    uid, code = await ident.verify_password(email.strip(), password)
++    if uid:
++        return "ok", uid
++    await store.hit("pw_fail_email", key, settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
++    await store.hit("pw_fail_ip", ip, settings.ENC_AUTH_IP_FAIL_LIMIT)
++    return "fail", code
++
++
++async def _verified_uid(email, password, ip):
++    """Maps _check_password to (uid, None) or (None, response). A disabled account is refused even with a correct password."""
++    verdict, value = await _check_password(email, password, ip)
++    if verdict == "limited":
++        return None, _limited(value)
++    if verdict == "fail":
++        return None, _reply(400, {"error": ident.map_rest_error(value)})
++    account = await ident.get_account(value)
++    if account is None or account.disabled:
++        return None, _reply(400, {"error": "user-disabled" if account else "invalid-credential"})
++    if account.email.strip().lower() != email.strip().lower():
++        return None, _reply(400, {"error": "invalid-credential"})
++    return value, None
++
++
++async def _proof_valid(email, proof):
++    """Non-consuming check of the single-use e-mail ownership proof (D1). The one-time consumption stays in /auth/mark-verified."""
++    if (not isinstance(proof, str) or not proof.startswith(email_verify.PROOF_PREFIX)
++            or len(proof) > email_verify.PROOF_MAX_LEN or not email_verify.secret_available()):
++        return False
++    pool = await store.get_pool()
++    async with pool.acquire() as conn:
++        row = await conn.fetchrow(
++            "SELECT email_hash FROM email_ownership_proofs WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()",
++            email_verify._proof_hash(proof))
++    if row is None:
++        return False
++    return hmac.compare_digest(row["email_hash"], email_verify._email_hash(email_verify.norm_email(email)))
++
++
++async def _mint(uid):
++    return {"custom_token": await ident.mint_custom_token(uid)}
++
++
++async def _dispatch(request, op):
++    state = _gateway_state()
++    if state is None:
++        return _reply(503, UNAVAILABLE)
++    ip = client_ip(request)
++    try:
++        caller = None
++        if op in ("reauth", "change_password"):
++            caller = await _caller(request)
++            if caller is None:
++                return _reply(401, GENERIC)
++        creds, early = await _open(request, op, state)
++        if early is not None:
++            return early
++        if op == "login":
++            return await _login(creds, ip)
++        if op == "signup":
++            return await _signup(request, creds, ip)
++        return await _reauth_or_change(op, creds, caller, ip)
++    except (ident.IdentityUnavailable, ident.NotLocal):
++        _log(op, "identity_unavailable")
++        return _reply(503, UNAVAILABLE)
++    except Exception as exc:  # database or unexpected trouble: fail closed, say nothing about the request
++        _log(op, "error_" + type(exc).__name__)
++        print(f"[ENC-AUTH] {op} failed: {safe_exc(exc)}", flush=True)
++        return _reply(503, UNAVAILABLE)
++
++
++async def _login(creds, ip):
++    uid, early = await _verified_uid(creds.email, creds.password, ip)
++    if early is not None:
++        _log("login", "refused")
++        return early
++    body = await _mint(uid)
++    _log("login", "ok")
++    return _reply(200, body)
++
++
++async def _signup(request, creds, ip):
++    email = creds.email.strip()
++    allowed, retry = await store.hit("signup_ip", ip, settings.ENC_AUTH_SIGNUP_IP_LIMIT)
++    if not allowed:
++        return _limited(retry)
++    if settings.ENC_AUTH_REQUIRE_EMAIL_PROOF and not await _proof_valid(email, request.headers.get("x-email-proof")):
++        _log("signup", "proof_invalid")
++        return _reply(403, _PROOF_INVALID)           # missing, malformed, unknown, expired, consumed or for another e-mail
++    if policy_validate(creds.password):
++        _log("signup", "weak_password")
++        return _reply(400, {"error": "weak-password"})
++    try:
++        uid = await ident.create_user(email, creds.password)   # a NEW account first: never a sign-in before it exists
++    except ident.IdentityRejected:
++        return _reply(400, {"error": "weak-password"})
++    except ident.EmailExists:
++        return await _recover(creds, ip)
++    body = await _mint(uid)
++    body["created"] = True
++    _log("signup", "created")
++    return _reply(200, body)
++
++
++async def _recover(creds, ip):
++    """The account already exists (an earlier signup that did not finish, or a lost response): prove ownership with the SAME
++    password. Every failure (wrong password, disabled, other provider, limiter) is the same 'email-already-in-use'."""
++    verdict, value = await _check_password(creds.email, creds.password, ip)
++    if verdict == "ok":
++        account = await ident.get_account(value)
++        if account is not None and not account.disabled and account.email.strip().lower() == creds.email.strip().lower():
++            body = await _mint(value)
++            body.update({"created": False, "recovered": True})
++            _log("signup", "recovered")
++            return _reply(200, body)
++    if verdict == "limited":
++        return _limited(value)
++    _log("signup", "duplicate_refused")
++    return _reply(400, {"error": "email-already-in-use"})
++
++
++async def _reauth_or_change(op, creds, caller, ip):
++    account = await ident.get_account(caller["uid"])
++    if account is None or account.disabled:
++        return _reply(401, GENERIC)
++    if account.email.strip().lower() != creds.email.strip().lower():
++        await store.hit("pw_fail_email", creds.email.strip().lower(), settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
++        _log(op, "email_mismatch")
++        return _reply(400, {"error": "invalid-credential"})
++    uid, early = await _verified_uid(creds.email, creds.password, ip)
++    if early is not None:
++        _log(op, "refused")
++        return early
++    if uid != caller["uid"]:                      # the password belongs to a different Firebase account
++        await store.hit("pw_fail_email", creds.email.strip().lower(), settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
++        _log(op, "uid_mismatch")
++        return _reply(400, {"error": "invalid-credential"})
++    if op == "reauth":
++        body = await _mint(uid)
++        _log(op, "ok")
++        return _reply(200, body)
++    return await _change_password(creds, uid)
++
++
++async def _change_password(creds, uid):
++    new = creds.new_password
++    if new == creds.password:
++        return _reply(400, {"error": "password-unchanged"})
++    if policy_validate(new):
++        return _reply(400, {"error": "weak-password"})
++    try:
++        await ident.update_password(uid, new)
++    except ident.IdentityRejected:
++        return _reply(400, {"error": "weak-password", "password_changed": False})
++    except ident.IdentityUnavailable:
++        # the update may or may not have been applied: never claim it was not
++        _log("change_password", "update_outcome_unknown")
++        return _reply(503, {**UNAVAILABLE, "password_changed": "unknown"})
++    sessions_revoked = True
++    try:
++        await ident.revoke_refresh_tokens(uid)
++    except ident.IdentityUnavailable:
++        sessions_revoked = False
++        _log("change_password", "revoke_failed")
++    try:
++        token = (await _mint(uid))["custom_token"]
++    except ident.IdentityUnavailable:
++        _log("change_password", "mint_failed_after_update")
++        return _reply(200, {"password_changed": True, "custom_token": None, "retry_signin": True,
++                            "sessions_revoked": sessions_revoked})
++    _log("change_password", "ok")
++    return _reply(200, {"password_changed": True, "custom_token": token, "sessions_revoked": sessions_revoked})
++
++
++@router.post("/auth/enc/login")
++async def enc_login(request: Request):
++    return await _dispatch(request, "login")
++
++
++@router.post("/auth/enc/signup")
++async def enc_signup(request: Request):
++    return await _dispatch(request, "signup")
++
++
++@router.post("/auth/enc/reauth")
++async def enc_reauth(request: Request):
++    return await _dispatch(request, "reauth")
++
++
++@router.post("/auth/enc/change_password")
++async def enc_change_password(request: Request):
++    return await _dispatch(request, "change_password")
+--- a/backend/app/api/routes.py
++++ b/backend/app/api/routes.py
+@@ -60,6 +60,11 @@
+ 
+ router = APIRouter()
+ 
++# Encrypted-credential gateway (disabled by default; local-test only). Its routes live under the same /api/v1 prefix.
++from app.api import enc_gateway  # noqa: E402
++from app.services.enc_auth_identity import resolve_token_email  # noqa: E402
++router.include_router(enc_gateway.router)
++
+ @router.get("/validate-invite/{code}")
+ async def validate_invite(code: str):
+     """Checks if an invite code exists in the database and has not been used."""
+@@ -87,7 +92,9 @@
+ 
+     # F-06: a newly created row takes its email from the verified token,
+     # enforced inside the creation transaction.
+-    token_email = (current_user.get("email") or "").strip() or None
++    # D6: unchanged while the gateway is disabled; when enabled the e-mail comes from the verified UID (claim cross-checked, or
++    # looked up through the Admin SDK when a custom-token session carries no e-mail claim).
++    token_email = await resolve_token_email(current_user)
+     result = await sync_user_with_invite_check(user, verified_email=token_email)
+     if result["status"] == "rejected":
+         reason = result.get("reason")
+@@ -303,7 +310,7 @@
+     request can name another account or another email. The proof is consumed atomically with the update.
+     Without a valid proof nothing is verified (403). An already-verified account answers 200 without any change."""
+     uid = current_user.get("uid")
+-    email = email_verify.norm_email(current_user.get("email"))
++    email = email_verify.norm_email(await resolve_token_email(current_user))
+     if not uid or not email:
+         raise HTTPException(status_code=400, detail="No email on token")
+     result = await email_verify.consume_proof(uid, email, proof)
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -101,6 +101,21 @@
+     # succeeded for this many seconds, e.g. because PostgreSQL is unreachable.
+     MFA_WS_FAILCLOSED_SECONDS: int = 90
+ 
++    # Encrypted-credential gateway (G6a). DISABLED by default and LOCAL-TEST ONLY: the identity adapter refuses to run unless the
++    # environment is a verified Firebase Auth emulator (see app/services/enc_auth_identity.py).
++    ENC_AUTH_ENABLED: bool = False
++    ENC_AUTH_KEYS: str = ""                 # JSON {"<kid>": "<PEM private key>"} from a secret store; never committed or logged
++    ENC_AUTH_HASH_SECRET: str = ""          # keys the gateway limiter hashes; the gateway is unavailable without it
++    ENC_AUTH_NONCE_TTL_SECONDS: int = 120
++    ENC_AUTH_NONCE_MAX_OUTSTANDING: int = 20000
++    ENC_AUTH_REQUIRE_EMAIL_PROOF: bool = True   # signup needs the e-mail ownership proof, sent in the X-Email-Proof header
++    ENC_AUTH_ALLOWED_IDENTITY_HOSTS: str = "127.0.0.1,localhost"
++    ENC_AUTH_WINDOW_SECONDS: int = 600
++    ENC_AUTH_IP_LIMIT: int = 120            # gateway requests per IP per window
++    ENC_AUTH_SIGNUP_IP_LIMIT: int = 10      # signups per IP per window
++    ENC_AUTH_EMAIL_FAIL_LIMIT: int = 5      # failed password checks per e-mail per window
++    ENC_AUTH_IP_FAIL_LIMIT: int = 20        # failed password checks per IP per window
++
+     @model_validator(mode="after")
+     def derive_async_database_url(self) -> "Settings":
+         if not self.ASYNC_DATABASE_URL:
+--- /dev/null
++++ b/backend/app/services/enc_auth_envelope.py
+@@ -0,0 +1,265 @@
++"""Encrypted credential envelope, SERVER side (protocol version 1, identical to scripts/enc_auth_poc/envelope.py).
++
++RSA-OAEP-SHA256 (MGF1-SHA256, label "epicverse-enc-auth-v1") wraps a fresh AES-256-GCM key; the key id, operation, server nonce
++and timestamp are authenticated data. This module has NO application imports (only `cryptography` and the standard library),
++never logs, and every error carries only a fixed code, never a value taken from the request.
++
++Order of checks in `open_credentials`: size, strict JSON, version, key id, field formats, operation, timestamp window, a READ-ONLY
++nonce check, then the RSA/AES work, then the ATOMIC nonce consume, then plaintext validation. A forged or tampered request
++therefore cannot burn someone else's nonce, and cheap checks run before the RSA operation.
++"""
++import asyncio
++import base64
++import json
++import re
++import struct
++from dataclasses import dataclass
++
++from cryptography.exceptions import InvalidTag
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import padding, rsa
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++VERSION = 1
++
++OPERATIONS = {
++    "login": ("email", "password"),
++    "signup": ("email", "password"),
++    "reauth": ("email", "password"),
++    "change_password": ("email", "password", "new_password"),  # `password` is the CURRENT password
++}
++
++MAX_ENVELOPE_BYTES = 8192
++MAX_PLAINTEXT_BYTES = 2048
++MAX_EMAIL_CHARS = 254
++MAX_PASSWORD_CHARS = 256
++MAX_TS_SKEW_SECONDS = 300
++RSA_MIN_BITS = 3072
++AES_KEY_BYTES = 32
++IV_BYTES = 12
++TAG_BYTES = 16
++
++_OAEP_LABEL = b"epicverse-enc-auth-v1"
++_AAD_MAGIC = b"EVENC"
++_KID_RE = re.compile(r"\A[A-Za-z0-9._-]{1,64}\Z")
++_NONCE_RE = re.compile(r"\A[A-Za-z0-9_-]{43}\Z")
++_B64U_RE = re.compile(r"\A[A-Za-z0-9_-]*\Z")
++_ENVELOPE_FIELDS = frozenset({"v", "kid", "op", "nonce", "ts", "ek", "iv", "ct"})
++
++MALFORMED = "MALFORMED"
++TOO_LARGE = "TOO_LARGE"
++UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
++UNKNOWN_KEY = "UNKNOWN_KEY"
++WRONG_OPERATION = "WRONG_OPERATION"
++EXPIRED = "EXPIRED"
++UNKNOWN_NONCE = "UNKNOWN_NONCE"
++REPLAY = "REPLAY"
++DECRYPT_FAILED = "DECRYPT_FAILED"
++CAPACITY = "CAPACITY"
++
++
++class EnvelopeError(Exception):
++    """Carries only a fixed error code."""
++
++    def __init__(self, code):
++        super().__init__(code)
++        self.code = code
++
++    def __str__(self):
++        return self.code
++
++
++class KeyConfigError(Exception):
++    """The configured private keys are missing or unusable. Never carries key material or file content."""
++
++
++def b64e(data):
++    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
++
++
++def _b64d(value, max_chars):
++    if type(value) is not str:
++        raise EnvelopeError(MALFORMED)
++    if len(value) > max_chars:
++        raise EnvelopeError(TOO_LARGE)
++    if not _B64U_RE.match(value) or len(value) % 4 == 1:
++        raise EnvelopeError(MALFORMED)
++    out = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
++    if b64e(out) != value:  # reject non-canonical encodings
++        raise EnvelopeError(MALFORMED)
++    return out
++
++
++def _oaep():
++    return padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=_OAEP_LABEL)
++
++
++def _aad(kid, operation, nonce, ts):
++    out = bytearray(_AAD_MAGIC)
++    out.append(VERSION)
++    for part in (kid, operation, nonce, str(ts)):
++        raw = part.encode("ascii")
++        out += struct.pack(">H", len(raw)) + raw
++    return bytes(out)
++
++
++def _check_text(value, max_chars):
++    if type(value) is not str or not value or len(value) > max_chars:
++        raise EnvelopeError(MALFORMED if type(value) is not str or not value else TOO_LARGE)
++    if any(ord(c) < 32 or ord(c) == 127 for c in value):
++        raise EnvelopeError(MALFORMED)
++
++
++def validate_fields(operation, fields):
++    if operation not in OPERATIONS or type(fields) is not dict or set(fields) != set(OPERATIONS[operation]):
++        raise EnvelopeError(MALFORMED)
++    for name, value in fields.items():
++        _check_text(value, MAX_EMAIL_CHARS if name == "email" else MAX_PASSWORD_CHARS)
++    if "@" not in fields["email"]:
++        raise EnvelopeError(MALFORMED)
++
++
++class KeyRing:
++    """Private keys by key id. Several ids can be loaded at once (rotation overlap); remove an id to retire it."""
++
++    def __init__(self):
++        self._keys = {}
++
++    def add(self, kid, private_key):
++        if not _KID_RE.match(kid) or not isinstance(private_key, rsa.RSAPrivateKey) or private_key.key_size < RSA_MIN_BITS:
++            raise KeyConfigError("invalid key or key id")
++        self._keys[kid] = private_key
++
++    def get(self, kid):
++        return self._keys.get(kid)
++
++    def kids(self):
++        return sorted(self._keys)
++
++    def __len__(self):
++        return len(self._keys)
++
++
++def load_keyring(text):
++    """Builds a KeyRing from JSON: {"<kid>": "<PEM private key>", ...}. Raises KeyConfigError without echoing any content."""
++    ring = KeyRing()
++    try:
++        data = json.loads(text) if text and text.strip() else {}
++        if type(data) is not dict or not data:
++            raise KeyConfigError("no keys configured")
++        for kid, pem in data.items():
++            if type(kid) is not str or type(pem) is not str:
++                raise KeyConfigError("invalid key entry")
++            ring.add(kid, serialization.load_pem_private_key(pem.encode("ascii"), password=None))
++    except KeyConfigError:
++        raise
++    except Exception:
++        raise KeyConfigError("keys could not be loaded") from None
++    return ring
++
++
++@dataclass(frozen=True)
++class Credentials:
++    operation: str
++    kid: str
++    fields: dict
++
++    @property
++    def email(self):
++        return self.fields["email"]
++
++    @property
++    def password(self):
++        return self.fields["password"]
++
++    @property
++    def new_password(self):
++        return self.fields.get("new_password")
++
++    def __repr__(self):
++        return "Credentials(operation=%s, kid=%s, <redacted>)" % (self.operation, self.kid)
++
++    __str__ = __repr__
++
++
++def _strict_json(data):
++    def pairs(items):
++        out = {}
++        for key, value in items:
++            if key in out:
++                raise ValueError("duplicate key")
++            out[key] = value
++        return out
++
++    def reject_constant(_name):
++        raise ValueError("non-finite number")
++
++    try:
++        return json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=reject_constant)
++    except (ValueError, RecursionError):  # includes UnicodeDecodeError and JSONDecodeError
++        raise EnvelopeError(MALFORMED) from None
++
++
++def _decrypt(private_key, ek, iv, ct, aad):
++    try:
++        key = private_key.decrypt(ek, _oaep())
++        if len(key) != AES_KEY_BYTES:
++            raise ValueError("bad key length")
++        return AESGCM(key).decrypt(iv, ct, aad)
++    except (ValueError, InvalidTag):
++        raise EnvelopeError(DECRYPT_FAILED) from None  # one code for every RSA or AES failure: no oracle
++
++
++async def open_credentials(raw, keyring, nonces, expected_operation, now=None):
++    """Returns Credentials or raises EnvelopeError. `nonces` offers: now() -> int, async inspect(nonce, op), async consume(nonce, op)."""
++    if isinstance(raw, str):
++        try:
++            raw = raw.encode("utf-8")
++        except UnicodeEncodeError:
++            raise EnvelopeError(MALFORMED) from None
++    if not isinstance(raw, (bytes, bytearray)):
++        raise EnvelopeError(MALFORMED)
++    if len(raw) > MAX_ENVELOPE_BYTES:
++        raise EnvelopeError(TOO_LARGE)
++
++    env = _strict_json(bytes(raw))
++    if type(env) is not dict or set(env) != _ENVELOPE_FIELDS:
++        raise EnvelopeError(MALFORMED)
++    version, kid, operation, nonce, ts = env["v"], env["kid"], env["op"], env["nonce"], env["ts"]
++    if type(version) is not int:
++        raise EnvelopeError(MALFORMED)
++    if version != VERSION:
++        raise EnvelopeError(UNSUPPORTED_VERSION)
++    if type(kid) is not str or not _KID_RE.match(kid) or type(nonce) is not str or not _NONCE_RE.match(nonce):
++        raise EnvelopeError(MALFORMED)
++    if type(operation) is not str or operation not in OPERATIONS or type(ts) is not int or not 0 <= ts < 2 ** 40:
++        raise EnvelopeError(MALFORMED)
++    iv = _b64d(env["iv"], 32)
++    ct = _b64d(env["ct"], 4 * (MAX_PLAINTEXT_BYTES + TAG_BYTES) // 3 + 8)
++    if len(iv) != IV_BYTES or not TAG_BYTES < len(ct) <= MAX_PLAINTEXT_BYTES + TAG_BYTES:
++        raise EnvelopeError(TOO_LARGE if len(ct) > MAX_PLAINTEXT_BYTES + TAG_BYTES else MALFORMED)
++
++    private_key = keyring.get(kid)
++    if private_key is None:
++        raise EnvelopeError(UNKNOWN_KEY)
++    ek = _b64d(env["ek"], 4 * (private_key.key_size // 8) // 3 + 8)
++    if len(ek) != private_key.key_size // 8:
++        raise EnvelopeError(MALFORMED)
++
++    if operation != expected_operation:
++        raise EnvelopeError(WRONG_OPERATION)
++    current = nonces.now() if now is None else int(now)
++    if abs(current - ts) > MAX_TS_SKEW_SECONDS:
++        raise EnvelopeError(EXPIRED)
++    await nonces.inspect(nonce, operation)  # unknown / expired / already used / issued for another operation
++
++    # the RSA operation is CPU work: keep it off the event loop
++    plaintext = await asyncio.to_thread(_decrypt, private_key, ek, iv, ct, _aad(kid, operation, nonce, ts))
++
++    await nonces.consume(nonce, operation)  # atomic: of several identical requests exactly one gets past this line
++
++    if len(plaintext) > MAX_PLAINTEXT_BYTES:
++        raise EnvelopeError(TOO_LARGE)
++    fields = _strict_json(plaintext)
++    validate_fields(operation, fields)
++    return Credentials(operation=operation, kid=kid, fields=fields)
+--- /dev/null
++++ b/backend/app/services/enc_auth_identity.py
+@@ -0,0 +1,207 @@
++"""Identity adapter of the encrypted-credential gateway, LOCAL TEST ONLY.
++
++It can talk to exactly one kind of identity service: the Firebase Auth EMULATOR (or a hermetic fake with the same wire format) on a
++host named in ENC_AUTH_ALLOWED_IDENTITY_HOSTS. There is intentionally NO production mode: real Firebase compatibility (G3) is
++unverified, so the adapter refuses to operate unless ALL of these hold, and the gateway then answers "unavailable":
++  * FIREBASE_AUTH_EMULATOR_HOST is set to host:port with an allowed host (no scheme),
++  * FIREBASE_PROJECT_ID starts with "demo-",
++  * no Google credential file is configured (GOOGLE_APPLICATION_CREDENTIALS).
++Plain http to the emulator only; proxy environment variables are ignored. Nothing here logs an e-mail, password, token or uid.
++"""
++import asyncio
++import os
++
++import httpx
++from fastapi import HTTPException
++from firebase_admin import auth, exceptions as fb_exceptions
++
++from app.core.config import settings
++
++_EMULATOR_API_KEY = "fake-api-key"  # ignored by the emulator; a real API key is deliberately not supported here
++
++
++class NotLocal(Exception):
++    """The environment is not a verified local test environment."""
++
++
++class IdentityUnavailable(Exception):
++    """The identity service could not be reached or failed; the outcome of a write may be unknown."""
++
++
++class IdentityRejected(Exception):
++    """The identity service definitively refused the request (nothing changed)."""
++
++
++class EmailExists(Exception):
++    pass
++
++
++def _allowed_hosts():
++    return {h.strip().lower() for h in (settings.ENC_AUTH_ALLOWED_IDENTITY_HOSTS or "").split(",") if h.strip()}
++
++
++def local_base_url():
++    """Returns the emulator's Identity Toolkit base URL or raises NotLocal."""
++    host = os.environ.get("FIREBASE_AUTH_EMULATOR_HOST", "").strip()
++    name, _, port = host.partition(":")
++    if not host or "/" in host or not name or not port.isdigit() or name.lower() not in _allowed_hosts():
++        raise NotLocal()
++    if not (os.environ.get("FIREBASE_PROJECT_ID", "") or "").startswith("demo-"):
++        raise NotLocal()
++    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or settings.GOOGLE_APPLICATION_CREDENTIALS:
++        raise NotLocal()
++    return f"http://{host}/identitytoolkit.googleapis.com/v1"
++
++
++def ready():
++    try:
++        local_base_url()
++        return True
++    except NotLocal:
++        return False
++
++
++def _error_code(response):
++    try:
++        message = (response.json().get("error") or {}).get("message", "")
++    except Exception:
++        return ""
++    return str(message).split(" ")[0].split(":")[0]
++
++
++async def verify_password(email, password):
++    """Server-side password check against the identity service. Returns (uid, None) or (None, REST error code).
++    The uid is whatever the identity service reports for those credentials; it is never taken from the client."""
++    base = local_base_url()
++    try:
++        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0), trust_env=False) as client:
++            response = await client.post(
++                base + "/accounts:signInWithPassword", params={"key": _EMULATOR_API_KEY},
++                json={"email": email, "password": password, "returnSecureToken": True})
++    except httpx.HTTPError:
++        raise IdentityUnavailable() from None
++    if response.status_code == 200:
++        uid = response.json().get("localId")
++        if isinstance(uid, str) and uid:
++            return uid, None
++        raise IdentityUnavailable()
++    if 400 <= response.status_code < 500:
++        return None, (_error_code(response) or "UNKNOWN")
++    raise IdentityUnavailable()
++
++
++REST_ERROR_MAP = {
++    "INVALID_PASSWORD": "invalid-credential",
++    "INVALID_LOGIN_CREDENTIALS": "invalid-credential",
++    "EMAIL_NOT_FOUND": "invalid-credential",           # same answer as a wrong password: no account enumeration
++    "USER_DISABLED": "user-disabled",
++    "TOO_MANY_ATTEMPTS_TRY_LATER": "too-many-requests",
++}
++
++
++def map_rest_error(code):
++    return REST_ERROR_MAP.get(code, "invalid-credential")
++
++
++# ---- Admin SDK wrappers (blocking SDK, run in a thread). Module-level functions so tests can wrap them. ----
++
++class Account:
++    __slots__ = ("uid", "email", "disabled")
++
++    def __init__(self, uid, email, disabled):
++        self.uid, self.email, self.disabled = uid, email, disabled
++
++
++async def get_account(uid):
++    """Returns an Account, or None if the user does not exist. Raises IdentityUnavailable on service trouble."""
++    local_base_url()
++    try:
++        user = await asyncio.to_thread(auth.get_user, uid)
++    except auth.UserNotFoundError:
++        return None
++    except (ValueError, fb_exceptions.FirebaseError):
++        raise IdentityUnavailable() from None
++    return Account(user.uid, user.email or "", bool(user.disabled))
++
++
++async def create_user(email, password):
++    """Creates a NEW user with email_verified=False and returns its uid (the one Firebase reports)."""
++    local_base_url()
++    try:
++        user = await asyncio.to_thread(auth.create_user, email=email, password=password, email_verified=False)
++    except auth.EmailAlreadyExistsError:
++        raise EmailExists() from None
++    except ValueError:
++        raise IdentityRejected() from None
++    except fb_exceptions.InvalidArgumentError:
++        raise IdentityRejected() from None
++    except fb_exceptions.FirebaseError:
++        raise IdentityUnavailable() from None
++    return user.uid
++
++
++async def update_password(uid, new_password):
++    local_base_url()
++    try:
++        await asyncio.to_thread(auth.update_user, uid, password=new_password)
++    except (ValueError, fb_exceptions.InvalidArgumentError):
++        raise IdentityRejected() from None        # definitive: nothing changed
++    except (fb_exceptions.FirebaseError, Exception):
++        raise IdentityUnavailable() from None     # the update may or may not have been applied
++
++
++async def revoke_refresh_tokens(uid):
++    local_base_url()
++    try:
++        await asyncio.to_thread(auth.revoke_refresh_tokens, uid)
++    except Exception:
++        raise IdentityUnavailable() from None
++
++
++async def mint_custom_token(uid):
++    """A custom token for exactly this uid. Callers must pass a uid reported by the identity service, never one from a client."""
++    local_base_url()
++    try:
++        token = await asyncio.to_thread(auth.create_custom_token, uid)
++    except Exception:
++        raise IdentityUnavailable() from None
++    return token.decode("ascii") if isinstance(token, bytes) else token
++
++
++async def verify_id_token(token):
++    """Verifies the caller's Firebase ID token INCLUDING revocation and disabled-user checks. Returns the claims or None."""
++    local_base_url()
++    try:
++        return await asyncio.to_thread(auth.verify_id_token, token, None, True)
++    except (ValueError, auth.InvalidIdTokenError, auth.ExpiredIdTokenError, auth.RevokedIdTokenError, auth.UserDisabledError):
++        return None
++    except Exception:
++        raise IdentityUnavailable() from None
++
++
++# ---- D6: where the backend needs "the verified e-mail of the token's account" ----
++
++async def resolve_token_email(current_user):
++    """The e-mail of the signed-in account, for /sync-user and /auth/mark-verified.
++
++    * Gateway disabled (the default): exactly the old behaviour, the token claim, so nothing changes in production.
++    * Gateway enabled: the UID comes ONLY from the already-verified token. The account is looked up through the Admin SDK and
++      must exist, be enabled and have an e-mail. If the token also carries an e-mail claim it must equal the account's; if the
++      claim is absent (a custom-token session may omit it) the account's e-mail is used. Nothing the client sends is trusted.
++    Returns the e-mail string (or None when the gateway is off and the claim is absent, as before). Raises HTTPException 403 for a
++    missing, disabled or inconsistent account and 503 when the identity service cannot be reached."""
++    claim = (current_user.get("email") or "").strip()
++    if not settings.ENC_AUTH_ENABLED:
++        return claim or None
++    uid = current_user.get("uid")
++    if not isinstance(uid, str) or not uid:
++        raise HTTPException(status_code=403, detail="Account email could not be verified")
++    try:
++        account = await get_account(uid)
++    except (IdentityUnavailable, NotLocal):
++        raise HTTPException(status_code=503, detail="Account email could not be verified right now") from None
++    if account is None or account.disabled or not account.email:
++        raise HTTPException(status_code=403, detail="Account email could not be verified")
++    if claim and claim.lower() != account.email.strip().lower():
++        raise HTTPException(status_code=403, detail="Account email could not be verified")
++    return claim or account.email.strip()
+--- /dev/null
++++ b/backend/app/services/enc_auth_policy.py
+@@ -0,0 +1,53 @@
++"""Server copy of the app's password policy: a faithful port of
++frontend/EpicVerseApp/lib/core/utils/password_validator.dart (PasswordValidator.validate), nothing added and nothing relaxed.
++
++Behaviour copied from the Dart source:
++  * empty                      -> "Password is required"
++  * length < 8                 -> counted in UTF-16 code units, like Dart's String.length (an emoji counts as 2)
++  * at least one A-Z, a-z, 0-9 -> ASCII classes only
++  * at least one special       -> one of  ! @ # $ % ^ & * ( ) _ + - = [ ] { } ; : ' " \\ | , . < > / ? ~ `
++  * not one of the common passwords after toLowerCase()
++Pure module: no application imports.
++"""
++import re
++
++MIN_LENGTH = 8
++
++_UPPERCASE = re.compile(r"[A-Z]")
++_LOWERCASE = re.compile(r"[a-z]")
++_NUMBER = re.compile(r"[0-9]")
++_SPECIAL = re.compile(r"[!@#$%^&*()_+\-=\[\]{};:'\"\\|,.<>/?~`]+")
++
++COMMON_PASSWORDS = (
++    "123456", "12345678", "123456789", "password", "12345", "1234567",
++    "qwerty", "1234567890", "iloveyou", "111111", "password123", "admin",
++    "welcome", "letmein",
++)
++
++
++def utf16_length(value):
++    """Dart's String.length: the number of UTF-16 code units."""
++    return len(value.encode("utf-16-le", "surrogatepass")) // 2
++
++
++def validate(value):
++    """Returns the error message of the first unmet rule, or None if the password satisfies the policy."""
++    if value is None or value == "":
++        return "Password is required"
++    if utf16_length(value) < MIN_LENGTH:
++        return "Password must be at least 8 characters"
++    if not _UPPERCASE.search(value):
++        return "Must contain at least one uppercase letter"
++    if not _LOWERCASE.search(value):
++        return "Must contain at least one lowercase letter"
++    if not _NUMBER.search(value):
++        return "Must contain at least one number"
++    if not _SPECIAL.search(value):
++        return "Must contain at least one special character"
++    if value.lower() in COMMON_PASSWORDS:
++        return "This password is too common and easily guessable"
++    return None
++
++
++def meets_policy(value):
++    return validate(value) is None
+--- /dev/null
++++ b/backend/app/services/enc_auth_store.py
+@@ -0,0 +1,173 @@
++"""Persistence for the encrypted-credential gateway: single-use server nonces and the gateway's own rate limiter.
++
++Two NEW tables with names that no other EpicVerse lineage uses (checked against the deployed lineage and the unreleased main):
++  * enc_auth_nonces  - only a SHA-256 of each nonce is stored. Consuming is ONE atomic UPDATE ... WHERE consumed_at IS NULL,
++                       so of several identical requests exactly one can succeed.
++  * enc_auth_limits  - fixed-window counters keyed by an HMAC of the scope and value (no e-mail address or IP is stored).
++Nothing here touches an existing table, and the existing OTP rate limiter is not used or modified. Nothing is ever logged with a
++nonce, e-mail, IP or credential.
++"""
++import hashlib
++import hmac
++import secrets
++import time
++
++from app.core.config import settings
++from app.services.db_pool import get_pool
++from app.services.enc_auth_envelope import (
++    CAPACITY, EXPIRED, OPERATIONS, REPLAY, UNKNOWN_NONCE, WRONG_OPERATION, EnvelopeError, b64e,
++)
++
++_EXPECTED_COLUMNS = {
++    "enc_auth_nonces": {"nonce_hash", "op", "issued_at", "expires_at", "consumed_at"},
++    "enc_auth_limits": {"scope", "key_hash", "window_start", "hits"},
++}
++
++
++class SchemaMismatch(Exception):
++    """A table with one of our names exists with a different shape (a name collision). The gateway then fails closed."""
++
++
++async def ensure_schema(conn):
++    """Additive only. Idempotent. Verifies the shape afterwards, because CREATE TABLE IF NOT EXISTS silently does nothing
++    when a table of that name already exists."""
++    await conn.execute('''
++        CREATE TABLE IF NOT EXISTS enc_auth_nonces (
++            nonce_hash TEXT PRIMARY KEY,
++            op TEXT NOT NULL,
++            issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++            expires_at TIMESTAMPTZ NOT NULL,
++            consumed_at TIMESTAMPTZ NULL
++        )
++    ''')
++    await conn.execute("CREATE INDEX IF NOT EXISTS idx_enc_nonce_expires ON enc_auth_nonces (expires_at)")
++    await conn.execute('''
++        CREATE TABLE IF NOT EXISTS enc_auth_limits (
++            scope TEXT NOT NULL,
++            key_hash TEXT NOT NULL,
++            window_start TIMESTAMPTZ NOT NULL,
++            hits INT NOT NULL DEFAULT 0,
++            PRIMARY KEY (scope, key_hash, window_start)
++        )
++    ''')
++    await conn.execute("CREATE INDEX IF NOT EXISTS idx_enc_limits_window ON enc_auth_limits (window_start)")
++    for table, expected in _EXPECTED_COLUMNS.items():
++        rows = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name = $1", table)
++        if {r["column_name"] for r in rows} != expected:
++            raise SchemaMismatch(table)
++
++
++def _nonce_hash(nonce):
++    return hashlib.sha256(nonce.encode("ascii")).hexdigest()
++
++
++class PgNonceStore:
++    """Server-issued, operation-bound, short-lived, single-use nonces."""
++
++    def __init__(self, ttl_seconds, max_outstanding):
++        self.ttl = int(ttl_seconds)
++        self.max_outstanding = int(max_outstanding)
++
++    def now(self):
++        return int(time.time())
++
++    async def issue(self, operation):
++        if operation not in OPERATIONS:
++            raise EnvelopeError(WRONG_OPERATION)
++        nonce = b64e(secrets.token_bytes(32))
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            outstanding = await conn.fetchval(
++                "SELECT count(*) FROM enc_auth_nonces WHERE consumed_at IS NULL AND expires_at > NOW()")
++            if outstanding >= self.max_outstanding:
++                raise EnvelopeError(CAPACITY)
++            await conn.execute(
++                "INSERT INTO enc_auth_nonces (nonce_hash, op, expires_at) VALUES ($1, $2, NOW() + make_interval(secs => $3))",
++                _nonce_hash(nonce), operation, float(self.ttl))
++            if secrets.randbelow(50) == 0:  # opportunistic purge of long-dead rows
++                await conn.execute("DELETE FROM enc_auth_nonces WHERE expires_at < NOW() - INTERVAL '1 hour'")
++        return nonce
++
++    @staticmethod
++    def _verdict(row, operation):
++        if row is None:
++            return UNKNOWN_NONCE
++        if row["op"] != operation:
++            return WRONG_OPERATION
++        if row["consumed_at"] is not None:
++            return REPLAY
++        if not row["live"]:
++            return EXPIRED
++        return None
++
++    async def inspect(self, nonce, operation):
++        """Read-only. Raises EnvelopeError unless the nonce is unknown-free, unused, unexpired and issued for this operation."""
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            row = await conn.fetchrow(
++                "SELECT op, consumed_at, expires_at > NOW() AS live FROM enc_auth_nonces WHERE nonce_hash = $1",
++                _nonce_hash(nonce))
++        verdict = self._verdict(row, operation)
++        if verdict:
++            raise EnvelopeError(verdict)
++
++    async def consume(self, nonce, operation):
++        """Atomic single use: exactly one caller can flip consumed_at; every other caller gets REPLAY (or EXPIRED/UNKNOWN)."""
++        pool = await get_pool()
++        async with pool.acquire() as conn:
++            won = await conn.fetchval(
++                "UPDATE enc_auth_nonces SET consumed_at = NOW() "
++                "WHERE nonce_hash = $1 AND op = $2 AND consumed_at IS NULL AND expires_at > NOW() RETURNING 1",
++                _nonce_hash(nonce), operation)
++            if won:
++                return
++            row = await conn.fetchrow(
++                "SELECT op, consumed_at, expires_at > NOW() AS live FROM enc_auth_nonces WHERE nonce_hash = $1",
++                _nonce_hash(nonce))
++        raise EnvelopeError(self._verdict(row, operation) or REPLAY)
++
++
++# ---------------------------------------------------------------------------------------------------------------------
++# Gateway rate limiter (fixed windows). Own table, own secret; the OTP limiter is neither used nor changed.
++# ---------------------------------------------------------------------------------------------------------------------
++
++def _key_hash(scope, value):
++    secret = settings.ENC_AUTH_HASH_SECRET.encode("utf-8")
++    return hmac.new(secret, f"{scope}:{value}".encode("utf-8"), hashlib.sha256).hexdigest()
++
++
++async def hit(scope, value, limit, window_seconds=None):
++    """Counts one event and returns (allowed, retry_after_seconds)."""
++    window = float(window_seconds or settings.ENC_AUTH_WINDOW_SECONDS)
++    pool = await get_pool()
++    async with pool.acquire() as conn:
++        row = await conn.fetchrow('''
++            INSERT INTO enc_auth_limits (scope, key_hash, window_start, hits)
++            VALUES ($1, $2, to_timestamp(floor(extract(epoch FROM NOW()) / $3::double precision) * $3::double precision), 1)
++            ON CONFLICT (scope, key_hash, window_start) DO UPDATE SET hits = enc_auth_limits.hits + 1
++            RETURNING hits, window_start
++        ''', scope, _key_hash(scope, value), window)
++        retry = await conn.fetchval(
++            "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM ($1::timestamptz + make_interval(secs => $2) - NOW()))))::int",
++            row["window_start"], window)
++        if secrets.randbelow(100) == 0:
++            await conn.execute("DELETE FROM enc_auth_limits WHERE window_start < NOW() - INTERVAL '1 hour'")
++    return row["hits"] <= limit, retry
++
++
++async def peek(scope, value, limit, window_seconds=None):
++    """Read-only: returns (blocked, retry_after_seconds) for a counter that is only incremented on failures."""
++    window = float(window_seconds or settings.ENC_AUTH_WINDOW_SECONDS)
++    pool = await get_pool()
++    async with pool.acquire() as conn:
++        row = await conn.fetchrow('''
++            SELECT hits, window_start FROM enc_auth_limits
++            WHERE scope = $1 AND key_hash = $2
++              AND window_start = to_timestamp(floor(extract(epoch FROM NOW()) / $3::double precision) * $3::double precision)
++        ''', scope, _key_hash(scope, value), window)
++        if row is None or row["hits"] < limit:
++            return False, 0
++        retry = await conn.fetchval(
++            "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM ($1::timestamptz + make_interval(secs => $2) - NOW()))))::int",
++            row["window_start"], window)
++    return True, retry
+--- a/backend/app/services/user_db.py
++++ b/backend/app/services/user_db.py
+@@ -1,6 +1,7 @@
+ from pydantic import BaseModel
+ from app.services.db_pool import get_pool
+ from app.services.email_verification import ensure_schema as ensure_email_verification_schema
++from app.services.enc_auth_store import ensure_schema as ensure_enc_auth_schema
+ from app.core.log_privacy import mask_id, safe_exc
+ 
+ 
+@@ -145,6 +146,13 @@
+ 
+         # Email-ownership verification (single-use signup proofs and signed-in verification codes): additive tables only.
+         await ensure_email_verification_schema(conn)
++
++        # Encrypted-credential gateway (nonces and its own limiter): additive tables. A problem here must not stop startup;
++        # the gateway then simply stays unavailable (fail closed).
++        try:
++            await ensure_enc_auth_schema(conn)
++        except Exception as e:
++            print(f"[ENC-AUTH] schema unavailable: {safe_exc(e)}", flush=True)
+ 
+ 
+ async def save_user(user: UserRecord):

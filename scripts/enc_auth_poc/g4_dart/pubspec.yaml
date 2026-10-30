@@ -1,0 +1,10 @@
+name: epicverse_enc_envelope
+description: "Offline proof of concept: Dart sealer for the EpicVerse G1 encrypted-credential envelope. Not part of the app."
+publish_to: none
+
+environment:
+  sdk: ^3.2.0
+
+# Only the locally cached pointycastle (RSA-OAEP, AES-GCM, SHA-256, ASN.1). No Flutter, no Firebase, no HTTP package.
+dependencies:
+  pointycastle: 4.0.0

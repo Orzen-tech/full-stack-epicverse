@@ -1,0 +1,12 @@
+# Isolated G6a test/build manifest. The production requirements file (backend/scripts/requirements.txt) is NOT modified.
+#
+# The gateway patch needs only packages the deployed lineage already pins (fastapi, httpx, asyncpg, firebase-admin, pydantic-settings)
+# plus `cryptography`, which the lineage gets today only indirectly (unpinned, through firebase-admin).
+#
+# Tested combinations (the envelope code uses RSA-OAEP-SHA256, MGF1-SHA256, AES-256-GCM: stable APIs across these versions):
+#   cryptography==50.0.2  in the backend test image epicverse-backend:tests-c185263 (Python 3.11.17): every G6a integration test
+#   cryptography==46.0.6  on the development host (Python 3.11.9): the G6a unit tests, G1, G2 and G4 suites
+#
+# BEFORE ANY DEPLOYMENT of this gateway (a later, separately approved phase) add the pin below to backend/scripts/requirements.txt
+# in that phase's change; it is deliberately not done here.
+cryptography==50.0.2

@@ -1,0 +1,1325 @@
+--- a/backend/app/api/enc_gateway.py
++++ b/backend/app/api/enc_gateway.py
+@@ -7,10 +7,17 @@
+ POST /auth/enc/change_password  body = envelope  + Authorization: Bearer      -> {"custom_token"|null, "password_changed", ...}
+ 
+ Rules: the e-mail and password exist in clear only inside this process, only while a request runs; nothing is logged except fixed
+-outcome codes; every envelope problem answers the same 400 {"error": "AUTH_FAILED"}; credential problems use the Firebase-style
+-codes the app already understands; a custom token is minted ONLY for a UID the identity service reported (never one the client
+-sent); anything unconfigured, unreachable or non-local answers 503 {"error": "AUTH_UNAVAILABLE"}. There is no plaintext path.
++codes and a random request id; every envelope problem answers the same 400 {"error": "AUTH_FAILED"}; credential problems use the
++Firebase-style codes the app already understands; a custom token is minted ONLY for a UID the identity service reported (never one the
++client sent); anything unconfigured, unreachable, slow or non-local answers 503 {"error": "AUTH_UNAVAILABLE"} (headers X-Enc-Request-Id
++and X-Enc-Cause carry a random id and a fixed cause category). A transport failure is NEVER reported as a credential error and never
++counts as a wrong password. There is no plaintext path.
++
++G6b hardening (Option D, no protocol change): the e-mail proof is accepted at the gateway only for ENC_AUTH_PROOF_MAX_AGE_SECONDS after
++it was issued, and the first VERIFIED Firebase UID that uses it at the gateway is recorded (HMAC key, never the raw proof); /auth/mark-verified
++then refuses a different UID. The record is written only after Firebase confirmed the account, so a failed creation claims nothing.
+ """
++import asyncio
+ import hmac
+ import json
+ import time
+@@ -19,11 +26,12 @@
+ from fastapi.responses import JSONResponse
+ 
+ from app.core.config import settings
+-from app.core.log_privacy import safe_exc
+ from app.services import email_verification as email_verify
++from app.services import enc_auth_diag as diag
+ from app.services import enc_auth_envelope as env
+ from app.services import enc_auth_identity as ident
+ from app.services import enc_auth_store as store
++from app.services.enc_auth_limits_eval import SCOPES  # noqa: F401  (documented policy scopes)
+ from app.services.enc_auth_policy import validate as policy_validate
+ from app.services.otp_rate_limiter import client_ip
+ 
+@@ -32,6 +40,7 @@
+ GENERIC = {"error": "AUTH_FAILED"}
+ UNAVAILABLE = {"error": "AUTH_UNAVAILABLE"}
+ _PROOF_INVALID = {"error": "email-proof-invalid"}
++_THROTTLE_RETRY_SECONDS = 60
+ 
+ 
+ class _State:
+@@ -42,27 +51,39 @@
+ _state = None
+ 
+ 
+-def _gateway_state():
+-    """The keyring and nonce store, or None when the gateway is disabled or not safely configured (then every call answers 503)."""
++def _gateway_status():
++    """(state, None) or (None, reason) where reason is a fixed cause code. Every call answers 503 when there is no state."""
+     global _state
+     if _state is not None:
+-        return _state
+-    if not settings.ENC_AUTH_ENABLED or not settings.ENC_AUTH_HASH_SECRET or not ident.ready():
+-        return None
++        return _state, None
++    if not settings.ENC_AUTH_ENABLED:
++        return None, "disabled"
++    if not settings.ENC_AUTH_HASH_SECRET:
++        return None, "no_hash_secret"
++    if not ident.ready():
++        return None, "not_local"
+     try:
+         keyring = env.load_keyring(settings.ENC_AUTH_KEYS)
+     except env.KeyConfigError:
+-        return None
++        return None, "bad_keys"
+     _state = _State(keyring, store.PgNonceStore(settings.ENC_AUTH_NONCE_TTL_SECONDS, settings.ENC_AUTH_NONCE_MAX_OUTSTANDING))
+-    return _state
++    return _state, None
++
++
++def _gateway_state():
++    return _gateway_status()[0]
+ 
+ 
+ def _reply(status, body, headers=None):
+-    return JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **(headers or {})})
+-
+-
+-def _log(op, outcome):
+-    print(f"[ENC-AUTH] op={op} outcome={outcome}", flush=True)  # fixed codes only
++    return JSONResponse(body, status_code=status,
++                        headers={"Cache-Control": "no-store", "X-Enc-Request-Id": diag.request_id(), **(headers or {})})
++
++
++def _unavailable(op, stage, cause, extra=None):
++    """The one safe 503: same body every time; the cause category is a fixed code, also recorded in counters and the log."""
++    diag.note("unavailable", stage, cause)
++    diag.log(op, "unavailable", stage, cause)
++    return _reply(503, {**UNAVAILABLE, **(extra or {})}, {"X-Enc-Cause": cause if cause in diag.CAUSES else "other"})
+ 
+ 
+ def _limited(retry):
+@@ -82,25 +103,31 @@
+ 
+ @router.post("/auth/enc/nonce")
+ async def issue_nonce(request: Request):
+-    state = _gateway_state()
++    diag.new_request_id()
++    state, reason = _gateway_status()
+     if state is None:
+-        return _reply(503, UNAVAILABLE)
+-    try:
+-        body = await _read_body(request)
+-        op = json.loads(body.decode("utf-8")).get("op") if body else None
+-        if op not in env.OPERATIONS:
+-            return _reply(400, GENERIC)
+-        allowed, retry = await store.hit("ip_req", client_ip(request), settings.ENC_AUTH_IP_LIMIT)
+-        if not allowed:
+-            return _limited(retry)
+-        nonce = await state.nonces.issue(op)
++        return _unavailable("nonce", "gateway", reason)
++    try:
++        async with asyncio.timeout(float(settings.ENC_AUTH_REQUEST_DEADLINE_SECONDS)):
++            body = await _read_body(request)
++            try:
++                op = json.loads(body.decode("utf-8")).get("op") if body else None
++            except (ValueError, AttributeError, UnicodeDecodeError):
++                return _reply(400, GENERIC)
++            if op not in env.OPERATIONS:
++                return _reply(400, GENERIC)
++            allowed, retry = await store.hit("ip_req", client_ip(request), settings.ENC_AUTH_IP_LIMIT)
++            if not allowed:
++                return _limited(retry)
++            nonce = await state.nonces.issue(op)
+     except env.EnvelopeError:
+-        return _reply(503, UNAVAILABLE)  # capacity
+-    except (ValueError, AttributeError, UnicodeDecodeError):
+-        return _reply(400, GENERIC)
+-    except Exception as exc:  # database trouble: fail closed
+-        print(f"[ENC-AUTH] nonce unavailable: {safe_exc(exc)}", flush=True)
+-        return _reply(503, UNAVAILABLE)
++        return _unavailable("nonce", "nonce", "capacity")
++    except store.StoreUnavailable as exc:
++        return _unavailable("nonce", "db", exc.cause)
++    except TimeoutError:
++        return _unavailable("nonce", "overall", "timeout")
++    except Exception:
++        return _unavailable("nonce", "request", "unexpected")
+     return _reply(200, {"nonce": nonce, "ttl": state.nonces.ttl, "server_time": int(time.time())})
+ 
+ 
+@@ -115,8 +142,11 @@
+     try:
+         return await env.open_credentials(raw, state.keyring, state.nonces, op), None
+     except env.EnvelopeError as exc:
+-        _log(op, "envelope_" + ("unavailable" if exc.code == env.CAPACITY else "rejected"))
+-        return None, (_reply(503, UNAVAILABLE) if exc.code == env.CAPACITY else _reply(400, GENERIC))
++        if exc.code == env.CAPACITY:
++            return None, _unavailable(op, "nonce", "capacity")
++        diag.note("outcome", "envelope", exc.code if exc.code in diag.CAUSES else "-")
++        diag.log(op, "refused", "envelope", exc.code)
++        return None, _reply(400, GENERIC)
+ 
+ 
+ async def _caller(request):
+@@ -127,20 +157,33 @@
+ 
+ 
+ async def _check_password(email, password, ip):
+-    """Server-side password verification behind the gateway's own failure limiter.
+-    Returns ("ok", uid) | ("fail", rest_error_code) | ("limited", retry_after). Raises IdentityUnavailable."""
+-    key = email.strip().lower()
+-    blocked, retry = await store.peek("pw_fail_email", key, settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
+-    if not blocked:
+-        blocked, retry = await store.peek("pw_fail_ip", ip, settings.ENC_AUTH_IP_FAIL_LIMIT)
+-    if blocked:
+-        return "limited", retry
+-    uid, code = await ident.verify_password(email.strip(), password)
+-    if uid:
+-        return "ok", uid
+-    await store.hit("pw_fail_email", key, settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
+-    await store.hit("pw_fail_ip", ip, settings.ENC_AUTH_IP_FAIL_LIMIT)
+-    return "fail", code
++    """Server-side password verification behind the gateway's failure limiter (policy: see enc_auth_limits_eval / README).
++
++    The attempt is counted BEFORE the check, in one transaction, and given back unless the identity service answered with a real
++    credential failure; so a correct login, a throttle answer, a transport failure, a 5xx or a deadline never count as wrong passwords.
++    Returns ("ok", uid) | ("fail", rest_error_code) | ("limited", retry_after). Raises IdentityUnavailable / StoreUnavailable."""
++    attempt = await store.reserve_password_attempt(email, ip)
++    if attempt.blocked:
++        diag.note("outcome", "limiter", "limited")
++        return "limited", attempt.retry_after
++    keep = False
++    try:
++        uid, code = await ident.verify_password(email.strip(), password)
++        if uid:
++            return "ok", uid
++        kind = ident.classify_rest_error(code)
++        if kind == "credential":
++            keep = True
++            return "fail", code
++        if kind == "throttled":
++            return "limited", _THROTTLE_RETRY_SECONDS
++        raise ident.IdentityUnavailable("verify_password", "http_4xx")     # permission/API-key/unknown: a service problem, not a wrong password
++    finally:
++        if not keep:
++            try:
++                await asyncio.shield(store.release_password_attempt(attempt))
++            except Exception:
++                diag.note("unavailable", "limiter", "db_unavailable")       # the count stays one too high: fail-safe direction
+ 
+ 
+ async def _verified_uid(email, password, ip):
+@@ -159,15 +202,16 @@
+ 
+ 
+ async def _proof_valid(email, proof):
+-    """Non-consuming check of the single-use e-mail ownership proof (D1). The one-time consumption stays in /auth/mark-verified."""
++    """Non-consuming check of the single-use e-mail ownership proof (D1) PLUS the gateway-side maximum age (G6b).
++    The global 30-minute expiry and the one-time consumption in /auth/mark-verified are unchanged."""
+     if (not isinstance(proof, str) or not proof.startswith(email_verify.PROOF_PREFIX)
+             or len(proof) > email_verify.PROOF_MAX_LEN or not email_verify.secret_available()):
+         return False
+-    pool = await store.get_pool()
+-    async with pool.acquire() as conn:
++    async with store.connection() as conn:
+         row = await conn.fetchrow(
+-            "SELECT email_hash FROM email_ownership_proofs WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()",
+-            email_verify._proof_hash(proof))
++            "SELECT email_hash FROM email_ownership_proofs WHERE proof_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() "
++            "AND created_at > NOW() - make_interval(secs => $2::double precision)",
++            email_verify._proof_hash(proof), float(settings.ENC_AUTH_PROOF_MAX_AGE_SECONDS))
+     if row is None:
+         return False
+     return hmac.compare_digest(row["email_hash"], email_verify._email_hash(email_verify.norm_email(email)))
+@@ -178,41 +222,60 @@
+ 
+ 
+ async def _dispatch(request, op):
+-    state = _gateway_state()
++    diag.new_request_id()
++    started = time.monotonic()
++    state, reason = _gateway_status()
+     if state is None:
+-        return _reply(503, UNAVAILABLE)
++        return _unavailable(op, "gateway", reason)
+     ip = client_ip(request)
+-    try:
+-        caller = None
+-        if op in ("reauth", "change_password"):
+-            caller = await _caller(request)
+-            if caller is None:
+-                return _reply(401, GENERIC)
+-        creds, early = await _open(request, op, state)
+-        if early is not None:
+-            return early
+-        if op == "login":
+-            return await _login(creds, ip)
+-        if op == "signup":
+-            return await _signup(request, creds, ip)
+-        return await _reauth_or_change(op, creds, caller, ip)
+-    except (ident.IdentityUnavailable, ident.NotLocal):
+-        _log(op, "identity_unavailable")
+-        return _reply(503, UNAVAILABLE)
+-    except Exception as exc:  # database or unexpected trouble: fail closed, say nothing about the request
+-        _log(op, "error_" + type(exc).__name__)
+-        print(f"[ENC-AUTH] {op} failed: {safe_exc(exc)}", flush=True)
+-        return _reply(503, UNAVAILABLE)
++    ctx = {"update_sent": False, "update_done": False, "revoked": None}
++    try:
++        async with asyncio.timeout(float(settings.ENC_AUTH_REQUEST_DEADLINE_SECONDS)):
++            caller = None
++            if op in ("reauth", "change_password"):
++                caller = await _caller(request)
++                if caller is None:
++                    return _reply(401, GENERIC)
++            creds, early = await _open(request, op, state)
++            if early is not None:
++                return early
++            if op == "login":
++                response = await _login(creds, ip)
++            elif op == "signup":
++                response = await _signup(request, creds, ip)
++            else:
++                response = await _reauth_or_change(op, creds, caller, ip, ctx)
++    except ident.IdentityUnavailable as exc:
++        extra = {"password_changed": "unknown"} if (exc.stage == "update_password") else None
++        return _unavailable(op, exc.stage, exc.cause, extra)
++    except store.StoreUnavailable as exc:
++        return _unavailable(op, "db", exc.cause)
++    except ident.NotLocal:
++        return _unavailable(op, "config", "not_local")
++    except TimeoutError:
++        return _timeout_reply(op, ctx)
++    except Exception:
++        return _unavailable(op, "request", "unexpected")
++    diag.log(op, "ok" if response.status_code < 400 else "refused", milliseconds=int((time.monotonic() - started) * 1000))
++    return response
++
++
++def _timeout_reply(op, ctx):
++    """The request ran out of time. Say only what is true: before the update was sent nothing changed; after it was sent the
++    outcome is unknown; after it succeeded the password IS changed (the client must sign in again)."""
++    if op == "change_password" and ctx["update_done"]:
++        diag.note("unavailable", "overall", "timeout")
++        diag.log(op, "unavailable", "overall", "timeout")
++        return _reply(200, {"password_changed": True, "custom_token": None, "retry_signin": True, "sessions_revoked": bool(ctx["revoked"])})
++    extra = {"password_changed": "unknown"} if (op == "change_password" and ctx["update_sent"]) else None
++    return _unavailable(op, "overall", "timeout", extra)
+ 
+ 
+ async def _login(creds, ip):
+     uid, early = await _verified_uid(creds.email, creds.password, ip)
+     if early is not None:
+-        _log("login", "refused")
+         return early
+-    body = await _mint(uid)
+-    _log("login", "ok")
+-    return _reply(200, body)
++    return _reply(200, await _mint(uid))
+ 
+ 
+ async def _signup(request, creds, ip):
+@@ -220,91 +283,91 @@
+     allowed, retry = await store.hit("signup_ip", ip, settings.ENC_AUTH_SIGNUP_IP_LIMIT)
+     if not allowed:
+         return _limited(retry)
+-    if settings.ENC_AUTH_REQUIRE_EMAIL_PROOF and not await _proof_valid(email, request.headers.get("x-email-proof")):
+-        _log("signup", "proof_invalid")
+-        return _reply(403, _PROOF_INVALID)           # missing, malformed, unknown, expired, consumed or for another e-mail
++    proof = None
++    if settings.ENC_AUTH_REQUIRE_EMAIL_PROOF:
++        proof = request.headers.get("x-email-proof")
++        if not await _proof_valid(email, proof):
++            diag.note("outcome", "proof", "-")
++            return _reply(403, _PROOF_INVALID)       # missing, malformed, unknown, too old, expired, consumed or for another e-mail
+     if policy_validate(creds.password):
+-        _log("signup", "weak_password")
+         return _reply(400, {"error": "weak-password"})
+     try:
+         uid = await ident.create_user(email, creds.password)   # a NEW account first: never a sign-in before it exists
+     except ident.IdentityRejected:
+         return _reply(400, {"error": "weak-password"})
+     except ident.EmailExists:
+-        return await _recover(creds, ip)
++        return await _recover(creds, ip, proof)
++    if proof is not None and not await store.bind_claim(proof, uid):
++        return _reply(403, _PROOF_INVALID)           # another UID already owns this proof: no token
+     body = await _mint(uid)
+     body["created"] = True
+-    _log("signup", "created")
+     return _reply(200, body)
+ 
+ 
+-async def _recover(creds, ip):
++async def _recover(creds, ip, proof):
+     """The account already exists (an earlier signup that did not finish, or a lost response): prove ownership with the SAME
+     password. Every failure (wrong password, disabled, other provider, limiter) is the same 'email-already-in-use'."""
+     verdict, value = await _check_password(creds.email, creds.password, ip)
+     if verdict == "ok":
+         account = await ident.get_account(value)
+         if account is not None and not account.disabled and account.email.strip().lower() == creds.email.strip().lower():
++            if proof is not None and not await store.bind_claim(proof, value):
++                return _reply(403, _PROOF_INVALID)
+             body = await _mint(value)
+             body.update({"created": False, "recovered": True})
+-            _log("signup", "recovered")
+             return _reply(200, body)
+     if verdict == "limited":
+         return _limited(value)
+-    _log("signup", "duplicate_refused")
+     return _reply(400, {"error": "email-already-in-use"})
+ 
+ 
+-async def _reauth_or_change(op, creds, caller, ip):
++async def _reauth_or_change(op, creds, caller, ip, ctx):
+     account = await ident.get_account(caller["uid"])
+     if account is None or account.disabled:
+         return _reply(401, GENERIC)
+     if account.email.strip().lower() != creds.email.strip().lower():
+-        await store.hit("pw_fail_email", creds.email.strip().lower(), settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
+-        _log(op, "email_mismatch")
++        await store.record_failure(creds.email, ip)
++        diag.note("outcome", "claim", "email_mismatch")
+         return _reply(400, {"error": "invalid-credential"})
+     uid, early = await _verified_uid(creds.email, creds.password, ip)
+     if early is not None:
+-        _log(op, "refused")
+         return early
+     if uid != caller["uid"]:                      # the password belongs to a different Firebase account
+-        await store.hit("pw_fail_email", creds.email.strip().lower(), settings.ENC_AUTH_EMAIL_FAIL_LIMIT)
+-        _log(op, "uid_mismatch")
++        await store.record_failure(creds.email, ip)
++        diag.note("outcome", "claim", "uid_mismatch")
+         return _reply(400, {"error": "invalid-credential"})
+     if op == "reauth":
+-        body = await _mint(uid)
+-        _log(op, "ok")
+-        return _reply(200, body)
+-    return await _change_password(creds, uid)
+-
+-
+-async def _change_password(creds, uid):
++        return _reply(200, await _mint(uid))
++    return await _change_password(creds, uid, ctx)
++
++
++async def _change_password(creds, uid, ctx):
+     new = creds.new_password
+     if new == creds.password:
+         return _reply(400, {"error": "password-unchanged"})
+     if policy_validate(new):
+         return _reply(400, {"error": "weak-password"})
++    ctx["update_sent"] = True
+     try:
+         await ident.update_password(uid, new)
+     except ident.IdentityRejected:
++        ctx["update_sent"] = False
+         return _reply(400, {"error": "weak-password", "password_changed": False})
+-    except ident.IdentityUnavailable:
+-        # the update may or may not have been applied: never claim it was not
+-        _log("change_password", "update_outcome_unknown")
+-        return _reply(503, {**UNAVAILABLE, "password_changed": "unknown"})
++    # IdentityUnavailable propagates: the update may or may not have been applied, so _dispatch answers password_changed "unknown"
++    ctx["update_done"] = True
+     sessions_revoked = True
+     try:
+         await ident.revoke_refresh_tokens(uid)
+     except ident.IdentityUnavailable:
+         sessions_revoked = False
+-        _log("change_password", "revoke_failed")
++        diag.note("unavailable", "revoke", "sdk_error")
++    ctx["revoked"] = sessions_revoked
+     try:
+         token = (await _mint(uid))["custom_token"]
+     except ident.IdentityUnavailable:
+-        _log("change_password", "mint_failed_after_update")
++        diag.note("unavailable", "mint", "sdk_error")
+         return _reply(200, {"password_changed": True, "custom_token": None, "retry_signin": True,
+                             "sessions_revoked": sessions_revoked})
+-    _log("change_password", "ok")
+     return _reply(200, {"password_changed": True, "custom_token": token, "sessions_revoked": sessions_revoked})
+ 
+ 
+--- a/backend/app/api/routes.py
++++ b/backend/app/api/routes.py
+@@ -63,6 +63,7 @@
+ # Encrypted-credential gateway (disabled by default; local-test only). Its routes live under the same /api/v1 prefix.
+ from app.api import enc_gateway  # noqa: E402
+ from app.services.enc_auth_identity import resolve_token_email  # noqa: E402
++from app.services import enc_auth_store as enc_store  # noqa: E402
+ router.include_router(enc_gateway.router)
+ 
+ @router.get("/validate-invite/{code}")
+@@ -313,6 +314,11 @@
+     email = email_verify.norm_email(await resolve_token_email(current_user))
+     if not uid or not email:
+         raise HTTPException(status_code=400, detail="No email on token")
++    allowed = await enc_store.claim_allows(uid, proof)    # gateway only: refuses a proof first used by a different UID
++    if allowed is None:
++        _raise_for_email_result(email_verify.RESULT_ERROR)
++    if allowed is False:
++        _raise_for_email_result(email_verify.RESULT_INVALID)
+     result = await email_verify.consume_proof(uid, email, proof)
+     if result != email_verify.RESULT_OK:
+         _raise_for_email_result(result)
+@@ -326,7 +332,7 @@
+     UID and email come only from the Firebase token. The code is sent to the email stored on this user's row, and only
+     if that equals the token's email, so a code can never be steered to a different address."""
+     uid = current_user.get("uid")
+-    token_email = email_verify.norm_email(current_user.get("email"))
++    token_email = email_verify.norm_email(await resolve_token_email(current_user))
+     if not uid or "@" not in token_email:
+         raise HTTPException(status_code=400, detail="No email on token")
+     row = await get_user(uid)
+@@ -369,7 +375,7 @@
+     if not _mfa_otp_valid(otp):
+         raise HTTPException(status_code=400, detail="Invalid or expired code")
+     uid = current_user.get("uid")
+-    token_email = email_verify.norm_email(current_user.get("email"))
++    token_email = email_verify.norm_email(await resolve_token_email(current_user))
+     if not uid or "@" not in token_email:
+         raise HTTPException(status_code=400, detail="No email on token")
+     result = await email_verify.confirm_challenge(uid, challenge_id, otp, token_email)
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -113,8 +113,20 @@
+     ENC_AUTH_WINDOW_SECONDS: int = 600
+     ENC_AUTH_IP_LIMIT: int = 120            # gateway requests per IP per window
+     ENC_AUTH_SIGNUP_IP_LIMIT: int = 10      # signups per IP per window
+-    ENC_AUTH_EMAIL_FAIL_LIMIT: int = 5      # failed password checks per e-mail per window
+-    ENC_AUTH_IP_FAIL_LIMIT: int = 20        # failed password checks per IP per window
++    # G6b: password-failure limiter (all counters over ENC_AUTH_WINDOW_SECONDS; see enc_auth_limits_eval.py)
++    ENC_AUTH_PAIR_FAIL_LIMIT: int = 5       # failed password checks per e-mail + IP pair
++    ENC_AUTH_IP_FAIL_LIMIT: int = 20        # failed password checks per IP (all e-mails)
++    ENC_AUTH_EMAIL_FAIL_LIMIT: int = 30     # failed password checks per e-mail (all IPs): higher, so one IP cannot lock a victim out
++    ENC_AUTH_GLOBAL_FAIL_LIMIT: int = 2000  # failed password checks overall; above it the per-IP limit drops to ENC_AUTH_ABUSE_IP_FAIL_LIMIT
++    ENC_AUTH_ABUSE_IP_FAIL_LIMIT: int = 2
++    # G6b: signup proof hardening (Option D). Gateway-side maximum age of the e-mail ownership proof; the global 30-minute expiry is unchanged.
++    ENC_AUTH_PROOF_MAX_AGE_SECONDS: int = 600
++    # G6b: reliability. Bounded retries (idempotent reads/verifications only), an overall request deadline and a database wait limit.
++    ENC_AUTH_RETRY_MAX: int = 2
++    ENC_AUTH_RETRY_BUDGET_MS: int = 1500
++    ENC_AUTH_REQUEST_DEADLINE_SECONDS: float = 20.0
++    ENC_AUTH_DB_ACQUIRE_TIMEOUT_SECONDS: float = 5.0
++    ENC_AUTH_SDK_TIMEOUT_SECONDS: float = 8.0       # http timeout of the gateway's own Admin SDK app
+ 
+     @model_validator(mode="after")
+     def derive_async_database_url(self) -> "Settings":
+--- /dev/null
++++ b/backend/app/services/enc_auth_diag.py
+@@ -0,0 +1,90 @@
++"""Safe diagnostics for the encrypted-credential gateway: a request correlation id, FIXED stage and cause codes, counters and timings.
++
++Nothing here can record a value taken from a request (no e-mail, password, proof, token, nonce, envelope content, key or uid): the only
++inputs are codes from the closed vocabularies below, anything else is replaced by "other". Pure module (standard library only).
++"""
++import contextvars
++import secrets
++from collections import Counter
++
++STAGES = frozenset({
++    "gateway", "config", "envelope", "limiter", "nonce", "proof", "claim", "verify_password", "get_account", "create_user",
++    "update_password", "revoke", "mint", "verify_token", "token_email", "overall", "db", "request",
++})
++CAUSES = frozenset({
++    # configuration
++    "disabled", "no_hash_secret", "not_local", "bad_keys",
++    # transport to the identity service
++    "connect", "refused", "reset", "dns", "connect_timeout", "read_timeout", "transport", "http_502", "http_503", "http_504", "http_5xx",
++    "http_4xx",
++    # identity SDK
++    "sdk_unavailable", "sdk_timeout", "sdk_error",
++    # database
++    "pool", "db_unavailable", "db_timeout",
++    # gateway
++    "timeout", "capacity", "unexpected", "uid_mismatch", "email_mismatch", "claim_conflict", "limited",
++    # envelope verdicts (server-side log only; the client always sees the same generic answer)
++    "malformed", "too_large", "unsupported_version", "unknown_key", "wrong_operation", "expired", "unknown_nonce", "replay",
++    "decrypt_failed",
++    "-",
++})
++KINDS = frozenset({"unavailable", "retry", "retry_success", "outcome"})
++
++_request_id = contextvars.ContextVar("enc_auth_request_id", default="-")
++STATS = Counter()
++TIMINGS = {}          # stage -> [count, total_ms, max_ms]
++
++
++def _stage(value):
++    return value if value in STAGES else "other"
++
++
++def _cause(value):
++    return value if value in CAUSES else "other"
++
++
++def new_request_id():
++    """A random 12-hex-digit id, unrelated to any user or request content. Returned in the X-Enc-Request-Id response header."""
++    rid = secrets.token_hex(6)
++    _request_id.set(rid)
++    return rid
++
++
++def request_id():
++    return _request_id.get()
++
++
++def note(kind, stage="-", cause="-"):
++    STATS[(kind if kind in KINDS else "other", _stage(stage) if stage != "-" else "-", _cause(cause))] += 1
++
++
++def observe(stage, milliseconds):
++    entry = TIMINGS.setdefault(_stage(stage), [0, 0.0, 0.0])
++    entry[0] += 1
++    entry[1] += milliseconds
++    entry[2] = max(entry[2], milliseconds)
++
++
++def snapshot():
++    return {
++        "counts": {"%s|%s|%s" % key: n for key, n in sorted(STATS.items())},
++        "timings": {stage: {"n": v[0], "avg_ms": round(v[1] / v[0], 1) if v[0] else 0.0, "max_ms": round(v[2], 1)}
++                    for stage, v in sorted(TIMINGS.items())},
++    }
++
++
++def reset():
++    STATS.clear()
++    TIMINGS.clear()
++
++
++def line(op, outcome, stage="-", cause="-", milliseconds=None):
++    text = "[ENC-AUTH] rid=%s op=%s outcome=%s stage=%s cause=%s" % (request_id(), op if op in {"login", "signup", "reauth", "change_password",
++                                                                                              "nonce", "token_email"} else "other",
++                                                                    outcome if outcome in {"ok", "refused", "unavailable", "error"} else "other",
++                                                                    _stage(stage) if stage != "-" else "-", _cause(cause))
++    return text + (" ms=%d" % milliseconds if milliseconds is not None else "")
++
++
++def log(op, outcome, stage="-", cause="-", milliseconds=None):
++    print(line(op, outcome, stage, cause, milliseconds), flush=True)
+--- a/backend/app/services/enc_auth_identity.py
++++ b/backend/app/services/enc_auth_identity.py
+@@ -7,15 +7,25 @@
+   * FIREBASE_PROJECT_ID starts with "demo-",
+   * no Google credential file is configured (GOOGLE_APPLICATION_CREDENTIALS).
+ Plain http to the emulator only; proxy environment variables are ignored. Nothing here logs an e-mail, password, token or uid.
++
++Failure handling (G6b): every trouble with the identity service is an IdentityUnavailable carrying a fixed STAGE and CAUSE code. A
++transport failure or an unexpected 4xx/5xx is NEVER reported as a wrong password. Only the idempotent verification/read operations
++(password check, account lookup, ID-token check) are retried, at most twice inside a ~1.5 s budget, and only for transient causes;
++account creation, password update, revocation and token minting are never retried automatically.
+ """
+ import asyncio
+ import os
+-
++import socket
++import time
++
++import firebase_admin
+ import httpx
+ from fastapi import HTTPException
+ from firebase_admin import auth, exceptions as fb_exceptions
+ 
+ from app.core.config import settings
++from app.services import enc_auth_diag as diag
++from app.services.enc_auth_retry import retrying
+ 
+ _EMULATOR_API_KEY = "fake-api-key"  # ignored by the emulator; a real API key is deliberately not supported here
+ 
+@@ -25,7 +35,11 @@
+ 
+ 
+ class IdentityUnavailable(Exception):
+-    """The identity service could not be reached or failed; the outcome of a write may be unknown."""
++    """The identity service could not be used. `stage` and `cause` are fixed codes (enc_auth_diag); the outcome of a write may be unknown."""
++
++    def __init__(self, stage="verify_password", cause="transport"):
++        super().__init__("%s/%s" % (stage, cause))
++        self.stage, self.cause = stage, cause
+ 
+ 
+ class IdentityRejected(Exception):
+@@ -34,6 +48,13 @@
+ 
+ class EmailExists(Exception):
+     pass
++
++
++TRANSIENT_CAUSES = frozenset({"connect", "refused", "reset", "dns", "connect_timeout", "http_502", "http_503", "http_504", "sdk_unavailable"})
++
++
++def is_transient(exc):
++    return isinstance(exc, IdentityUnavailable) and exc.cause in TRANSIENT_CAUSES
+ 
+ 
+ def _allowed_hosts():
+@@ -53,6 +74,20 @@
+     return f"http://{host}/identitytoolkit.googleapis.com/v1"
+ 
+ 
++_APP_NAME = "enc-gateway"
++
++
++def _admin_app():
++    """A private Admin SDK app for the gateway with a BOUNDED http timeout (the SDK default is 120 s, which would leave threads hanging
++    long after a request was abandoned). Only ever initialised after local_base_url() passed, i.e. for a verified emulator."""
++    try:
++        return firebase_admin.get_app(_APP_NAME)
++    except ValueError:
++        return firebase_admin.initialize_app(
++            options={"projectId": os.environ.get("FIREBASE_PROJECT_ID", ""), "httpTimeout": float(settings.ENC_AUTH_SDK_TIMEOUT_SECONDS)},
++            name=_APP_NAME)
++
++
+ def ready():
+     try:
+         local_base_url()
+@@ -61,6 +96,69 @@
+         return False
+ 
+ 
++# ---- classification ---------------------------------------------------------------------------------------------
++
++def transport_cause(exc):
++    """A fixed cause code for an httpx failure, derived from the exception TYPES only (never from message text)."""
++    chain = []
++    cur = exc
++    while cur is not None and len(chain) < 6:
++        chain.append(cur)
++        cur = cur.__cause__ or cur.__context__
++    if any(isinstance(c, socket.gaierror) for c in chain):
++        return "dns"
++    if any(isinstance(c, ConnectionRefusedError) for c in chain):
++        return "refused"
++    if any(isinstance(c, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)) for c in chain):
++        return "reset"
++    if isinstance(exc, httpx.ConnectTimeout):
++        return "connect_timeout"
++    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
++        return "read_timeout"
++    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError)):
++        return "reset"
++    if isinstance(exc, httpx.ConnectError):
++        return "connect"
++    return "transport"
++
++
++def sdk_cause(exc):
++    if isinstance(exc, fb_exceptions.UnavailableError):
++        return "sdk_unavailable"
++    if isinstance(exc, fb_exceptions.DeadlineExceededError):
++        return "sdk_timeout"
++    return "sdk_error"
++
++
++CREDENTIAL_CODES = frozenset({"INVALID_PASSWORD", "INVALID_LOGIN_CREDENTIALS", "EMAIL_NOT_FOUND", "USER_DISABLED", "MISSING_PASSWORD",
++                              "INVALID_EMAIL"})
++THROTTLE_CODES = frozenset({"TOO_MANY_ATTEMPTS_TRY_LATER"})
++
++
++def classify_rest_error(code):
++    """'credential' (a real wrong-credentials answer), 'throttled' (the identity service's own throttle) or 'service' (anything else:
++    permission, API key, configuration, unknown). Only 'credential' may ever be reported to the user as a credential error."""
++    if code in CREDENTIAL_CODES:
++        return "credential"
++    if code in THROTTLE_CODES:
++        return "throttled"
++    return "service"
++
++
++REST_ERROR_MAP = {
++    "INVALID_PASSWORD": "invalid-credential",
++    "INVALID_LOGIN_CREDENTIALS": "invalid-credential",
++    "EMAIL_NOT_FOUND": "invalid-credential",           # same answer as a wrong password: no account enumeration
++    "MISSING_PASSWORD": "invalid-credential",
++    "INVALID_EMAIL": "invalid-credential",
++    "USER_DISABLED": "user-disabled",
++}
++
++
++def map_rest_error(code):
++    return REST_ERROR_MAP.get(code, "invalid-credential")
++
++
+ def _error_code(response):
+     try:
+         message = (response.json().get("error") or {}).get("message", "")
+@@ -69,38 +167,50 @@
+     return str(message).split(" ")[0].split(":")[0]
+ 
+ 
++async def _timed(stage, call):
++    started = time.monotonic()
++    try:
++        return await call()
++    finally:
++        diag.observe(stage, (time.monotonic() - started) * 1000.0)
++
++
++def _retry(stage, call):
++    return retrying(call, stage=stage, is_transient=is_transient, max_retries=int(settings.ENC_AUTH_RETRY_MAX),
++                    budget_ms=float(settings.ENC_AUTH_RETRY_BUDGET_MS), note=diag.note)
++
++
++# ---- password verification (idempotent: retried on transient transport trouble only) --------------------------------
++
+ async def verify_password(email, password):
+-    """Server-side password check against the identity service. Returns (uid, None) or (None, REST error code).
++    """Server-side password check. Returns (uid, None) or (None, REST error code); the caller classifies the code with
++    classify_rest_error(). Transport trouble and 5xx raise IdentityUnavailable (never a credential result).
+     The uid is whatever the identity service reports for those credentials; it is never taken from the client."""
+     base = local_base_url()
+-    try:
+-        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0), trust_env=False) as client:
+-            response = await client.post(
+-                base + "/accounts:signInWithPassword", params={"key": _EMULATOR_API_KEY},
+-                json={"email": email, "password": password, "returnSecureToken": True})
+-    except httpx.HTTPError:
+-        raise IdentityUnavailable() from None
+-    if response.status_code == 200:
+-        uid = response.json().get("localId")
+-        if isinstance(uid, str) and uid:
+-            return uid, None
+-        raise IdentityUnavailable()
+-    if 400 <= response.status_code < 500:
+-        return None, (_error_code(response) or "UNKNOWN")
+-    raise IdentityUnavailable()
+-
+-
+-REST_ERROR_MAP = {
+-    "INVALID_PASSWORD": "invalid-credential",
+-    "INVALID_LOGIN_CREDENTIALS": "invalid-credential",
+-    "EMAIL_NOT_FOUND": "invalid-credential",           # same answer as a wrong password: no account enumeration
+-    "USER_DISABLED": "user-disabled",
+-    "TOO_MANY_ATTEMPTS_TRY_LATER": "too-many-requests",
+-}
+-
+-
+-def map_rest_error(code):
+-    return REST_ERROR_MAP.get(code, "invalid-credential")
++
++    async def attempt():
++        try:
++            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0), trust_env=False) as client:
++                response = await client.post(
++                    base + "/accounts:signInWithPassword", params={"key": _EMULATOR_API_KEY},
++                    json={"email": email, "password": password, "returnSecureToken": True})
++        except httpx.HTTPError as exc:
++            raise IdentityUnavailable("verify_password", transport_cause(exc)) from None
++        status = response.status_code
++        if status == 200:
++            uid = response.json().get("localId")
++            if isinstance(uid, str) and uid:
++                return uid, None
++            raise IdentityUnavailable("verify_password", "unexpected")
++        if status in (502, 503, 504):
++            raise IdentityUnavailable("verify_password", "http_%d" % status)
++        if status >= 500:
++            raise IdentityUnavailable("verify_password", "http_5xx")
++        if 400 <= status < 500:
++            return None, (_error_code(response) or "UNKNOWN")
++        raise IdentityUnavailable("verify_password", "unexpected")
++
++    return await _timed("verify_password", lambda: _retry("verify_password", attempt))
+ 
+ 
+ # ---- Admin SDK wrappers (blocking SDK, run in a thread). Module-level functions so tests can wrap them. ----
+@@ -113,76 +223,97 @@
+ 
+ 
+ async def get_account(uid):
+-    """Returns an Account, or None if the user does not exist. Raises IdentityUnavailable on service trouble."""
+-    local_base_url()
+-    try:
+-        user = await asyncio.to_thread(auth.get_user, uid)
+-    except auth.UserNotFoundError:
+-        return None
+-    except (ValueError, fb_exceptions.FirebaseError):
+-        raise IdentityUnavailable() from None
+-    return Account(user.uid, user.email or "", bool(user.disabled))
++    """Returns an Account, or None if the user does not exist. Idempotent read: retried on transient trouble."""
++    local_base_url()
++
++    async def attempt():
++        try:
++            user = await asyncio.to_thread(auth.get_user, uid, _admin_app())
++        except auth.UserNotFoundError:
++            return None
++        except fb_exceptions.FirebaseError as exc:
++            raise IdentityUnavailable("get_account", sdk_cause(exc)) from None
++        except ValueError:
++            raise IdentityUnavailable("get_account", "sdk_error") from None
++        return Account(user.uid, user.email or "", bool(user.disabled))
++
++    return await _timed("get_account", lambda: _retry("get_account", attempt))
+ 
+ 
+ async def create_user(email, password):
+-    """Creates a NEW user with email_verified=False and returns its uid (the one Firebase reports)."""
+-    local_base_url()
+-    try:
+-        user = await asyncio.to_thread(auth.create_user, email=email, password=password, email_verified=False)
++    """Creates a NEW user with email_verified=False and returns its uid (the one Firebase reports). NEVER retried automatically."""
++    local_base_url()
++    try:
++        user = await _timed("create_user", lambda: asyncio.to_thread(auth.create_user, email=email, password=password, email_verified=False, app=_admin_app()))
+     except auth.EmailAlreadyExistsError:
+         raise EmailExists() from None
+     except ValueError:
+         raise IdentityRejected() from None
+     except fb_exceptions.InvalidArgumentError:
+         raise IdentityRejected() from None
+-    except fb_exceptions.FirebaseError:
+-        raise IdentityUnavailable() from None
++    except fb_exceptions.FirebaseError as exc:
++        raise IdentityUnavailable("create_user", sdk_cause(exc)) from None
+     return user.uid
+ 
+ 
+ async def update_password(uid, new_password):
+-    local_base_url()
+-    try:
+-        await asyncio.to_thread(auth.update_user, uid, password=new_password)
++    """NEVER retried automatically: if it fails after being sent, the outcome is unknown."""
++    local_base_url()
++    try:
++        await _timed("update_password", lambda: asyncio.to_thread(auth.update_user, uid, password=new_password, app=_admin_app()))
+     except (ValueError, fb_exceptions.InvalidArgumentError):
+         raise IdentityRejected() from None        # definitive: nothing changed
+-    except (fb_exceptions.FirebaseError, Exception):
+-        raise IdentityUnavailable() from None     # the update may or may not have been applied
++    except fb_exceptions.FirebaseError as exc:
++        raise IdentityUnavailable("update_password", sdk_cause(exc)) from None
++    except Exception:
++        raise IdentityUnavailable("update_password", "sdk_error") from None
+ 
+ 
+ async def revoke_refresh_tokens(uid):
+-    local_base_url()
+-    try:
+-        await asyncio.to_thread(auth.revoke_refresh_tokens, uid)
++    """NEVER retried automatically."""
++    local_base_url()
++    try:
++        await _timed("revoke", lambda: asyncio.to_thread(auth.revoke_refresh_tokens, uid, _admin_app()))
++    except fb_exceptions.FirebaseError as exc:
++        raise IdentityUnavailable("revoke", sdk_cause(exc)) from None
+     except Exception:
+-        raise IdentityUnavailable() from None
++        raise IdentityUnavailable("revoke", "sdk_error") from None
+ 
+ 
+ async def mint_custom_token(uid):
+     """A custom token for exactly this uid. Callers must pass a uid reported by the identity service, never one from a client."""
+     local_base_url()
+     try:
+-        token = await asyncio.to_thread(auth.create_custom_token, uid)
++        token = await _timed("mint", lambda: asyncio.to_thread(auth.create_custom_token, uid, None, _admin_app()))
++    except fb_exceptions.FirebaseError as exc:
++        raise IdentityUnavailable("mint", sdk_cause(exc)) from None
+     except Exception:
+-        raise IdentityUnavailable() from None
++        raise IdentityUnavailable("mint", "sdk_error") from None
+     return token.decode("ascii") if isinstance(token, bytes) else token
+ 
+ 
+ async def verify_id_token(token):
+-    """Verifies the caller's Firebase ID token INCLUDING revocation and disabled-user checks. Returns the claims or None."""
+-    local_base_url()
+-    try:
+-        return await asyncio.to_thread(auth.verify_id_token, token, None, True)
+-    except (ValueError, auth.InvalidIdTokenError, auth.ExpiredIdTokenError, auth.RevokedIdTokenError, auth.UserDisabledError):
+-        return None
+-    except Exception:
+-        raise IdentityUnavailable() from None
++    """Verifies the caller's Firebase ID token INCLUDING revocation and disabled-user checks. Returns the claims or None.
++    Idempotent read: retried on transient infrastructure trouble."""
++    local_base_url()
++
++    async def attempt():
++        try:
++            return await asyncio.to_thread(auth.verify_id_token, token, _admin_app(), True)
++        except (ValueError, auth.InvalidIdTokenError, auth.ExpiredIdTokenError, auth.RevokedIdTokenError, auth.UserDisabledError):
++            return None
++        except fb_exceptions.FirebaseError as exc:
++            raise IdentityUnavailable("verify_token", sdk_cause(exc)) from None
++        except Exception:
++            raise IdentityUnavailable("verify_token", "sdk_error") from None
++
++    return await _timed("verify_token", lambda: _retry("verify_token", attempt))
+ 
+ 
+ # ---- D6: where the backend needs "the verified e-mail of the token's account" ----
+ 
+ async def resolve_token_email(current_user):
+-    """The e-mail of the signed-in account, for /sync-user and /auth/mark-verified.
++    """The e-mail of the signed-in account, for /sync-user, /auth/mark-verified, /auth/email/verify-request and /verify-confirm.
+ 
+     * Gateway disabled (the default): exactly the old behaviour, the token claim, so nothing changes in production.
+     * Gateway enabled: the UID comes ONLY from the already-verified token. The account is looked up through the Admin SDK and
+@@ -193,12 +324,17 @@
+     claim = (current_user.get("email") or "").strip()
+     if not settings.ENC_AUTH_ENABLED:
+         return claim or None
++    diag.new_request_id()                       # so a 503 here can be matched to its log line
+     uid = current_user.get("uid")
+     if not isinstance(uid, str) or not uid:
+         raise HTTPException(status_code=403, detail="Account email could not be verified")
+     try:
+         account = await get_account(uid)
+-    except (IdentityUnavailable, NotLocal):
++    except IdentityUnavailable as exc:
++        diag.log("token_email", "unavailable", "token_email", exc.cause)
++        raise HTTPException(status_code=503, detail="Account email could not be verified right now") from None
++    except NotLocal:
++        diag.log("token_email", "unavailable", "config", "not_local")
+         raise HTTPException(status_code=503, detail="Account email could not be verified right now") from None
+     if account is None or account.disabled or not account.email:
+         raise HTTPException(status_code=403, detail="Account email could not be verified")
+--- /dev/null
++++ b/backend/app/services/enc_auth_limits_eval.py
+@@ -0,0 +1,28 @@
++"""Decision logic of the password-failure limiter (pure, so it can be unit-tested without a database).
++
++Counters (fixed windows, all counted BEFORE a password is verified and given back when the check succeeds or cannot be completed):
++  pair   e-mail + IP      default limit  5   one address cannot guess against an account more than 5 times per window
++  ip     IP, all e-mails  default limit 20   one address cannot spray many accounts
++  email  e-mail, all IPs  default limit 30   brute force spread over many addresses is still capped (a lock-out then needs 30 failures
++                                              from at least 6 different addresses, instead of 5 from one)
++  global everything       default limit 2000 when exceeded the system is in ABUSE MODE: the per-IP limit drops to `abuse_ip_limit` (2),
++                                              so only addresses that already failed are restricted; clean addresses are unaffected
++An attempt is refused when, after counting it, the pair, ip (or abuse-mode ip) or email counter is above its limit.
++"""
++
++SCOPES = ("pair", "ip", "email", "global")
++
++
++def effective_ip_limit(hits, limits, abuse_ip_limit):
++    return abuse_ip_limit if hits["global"] > limits["global"] else limits["ip"]
++
++
++def blocked_scope(hits, limits, abuse_ip_limit):
++    """Name of the scope that refuses the attempt, or None. `hits` already includes the attempt being evaluated."""
++    if hits["pair"] > limits["pair"]:
++        return "pair"
++    if hits["ip"] > effective_ip_limit(hits, limits, abuse_ip_limit):
++        return "abuse_ip" if hits["global"] > limits["global"] and hits["ip"] <= limits["ip"] else "ip"
++    if hits["email"] > limits["email"]:
++        return "email"
++    return None
+--- /dev/null
++++ b/backend/app/services/enc_auth_retry.py
+@@ -0,0 +1,40 @@
++"""Bounded retry for IDEMPOTENT identity reads and verifications only.
++
++Rules (all enforced here, none left to the caller):
++  * at most `max_retries` retries (default policy: 2);
++  * the whole retry effort stays inside `budget_ms` counted from the start of the FIRST attempt: a retry is not started if its delay
++    would push the elapsed time past the budget (so a slow, hanging attempt is never retried);
++  * only failures the caller classifies as transient are retried; anything else (bad credentials, permission errors, other 4xx) is
++    raised at once;
++  * delays are short and jittered (100 ms, then 250 ms, each x0.8 to x1.2).
++It is never applied to account creation, password updates, revocation, proof consumption or token minting.
++Pure module (no application imports): the clock, the sleep and the random source are injectable for tests.
++"""
++import asyncio
++import random
++import time
++
++BACKOFF_SECONDS = (0.1, 0.25)
++
++
++async def retrying(call, *, stage, is_transient, max_retries, budget_ms, note=None, sleep=asyncio.sleep, clock=time.monotonic,
++                   rand=random.random):
++    started = clock()
++    attempt = 0
++    while True:
++        try:
++            result = await call()
++        except Exception as exc:
++            if attempt >= max_retries or not is_transient(exc):
++                raise
++            delay = BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)] * (0.8 + 0.4 * rand())
++            if (clock() - started + delay) * 1000.0 > budget_ms:
++                raise
++            if note:
++                note("retry", stage, getattr(exc, "cause", "-"))
++            attempt += 1
++            await sleep(delay)
++            continue
++        if attempt and note:
++            note("retry_success", stage, "-")
++        return result
+--- a/backend/app/services/enc_auth_store.py
++++ b/backend/app/services/enc_auth_store.py
+@@ -1,31 +1,69 @@
+-"""Persistence for the encrypted-credential gateway: single-use server nonces and the gateway's own rate limiter.
+-
+-Two NEW tables with names that no other EpicVerse lineage uses (checked against the deployed lineage and the unreleased main):
+-  * enc_auth_nonces  - only a SHA-256 of each nonce is stored. Consuming is ONE atomic UPDATE ... WHERE consumed_at IS NULL,
+-                       so of several identical requests exactly one can succeed.
+-  * enc_auth_limits  - fixed-window counters keyed by an HMAC of the scope and value (no e-mail address or IP is stored).
+-Nothing here touches an existing table, and the existing OTP rate limiter is not used or modified. Nothing is ever logged with a
+-nonce, e-mail, IP or credential.
++"""Persistence for the encrypted-credential gateway: single-use server nonces, the gateway's own rate limiter, and proof claims.
++
++Three NEW tables with names that no other EpicVerse lineage uses (checked against the deployed lineage and the unreleased main):
++  * enc_auth_nonces       - only a SHA-256 of each nonce is stored. Consuming is ONE atomic UPDATE ... WHERE consumed_at IS NULL.
++  * enc_auth_limits       - fixed-window counters keyed by an HMAC of scope and value (no e-mail address or IP is stored).
++  * enc_auth_proof_claims - which verified Firebase UID first used an e-mail ownership proof at the gateway (key = an HMAC of the raw
++                            proof; the raw proof is never stored). Written only AFTER Firebase confirmed the account.
++Nothing here touches an existing table, and the existing OTP rate limiter is not used or modified. Nothing is ever logged with a nonce,
++e-mail, IP, proof or credential.
+ """
++import asyncio
++import contextlib
+ import hashlib
+ import hmac
+ import secrets
+ import time
++
++import asyncpg
+ 
+ from app.core.config import settings
+ from app.services.db_pool import get_pool
+ from app.services.enc_auth_envelope import (
+     CAPACITY, EXPIRED, OPERATIONS, REPLAY, UNKNOWN_NONCE, WRONG_OPERATION, EnvelopeError, b64e,
+ )
++from app.services.enc_auth_limits_eval import SCOPES, blocked_scope
+ 
+ _EXPECTED_COLUMNS = {
+     "enc_auth_nonces": {"nonce_hash", "op", "issued_at", "expires_at", "consumed_at"},
+     "enc_auth_limits": {"scope", "key_hash", "window_start", "hits"},
++    "enc_auth_proof_claims": {"proof_hash", "uid", "created_at"},
+ }
+ 
+ 
+ class SchemaMismatch(Exception):
+     """A table with one of our names exists with a different shape (a name collision). The gateway then fails closed."""
++
++
++class StoreUnavailable(Exception):
++    """The database could not be used. `cause` is one of the fixed codes in enc_auth_diag.CAUSES; no value is ever attached."""
++
++    def __init__(self, cause="db_unavailable"):
++        super().__init__(cause)
++        self.cause = cause
++
++
++@contextlib.asynccontextmanager
++async def connection():
++    """A pooled connection with a bounded wait, translating database trouble into StoreUnavailable(cause)."""
++    cm = None
++    try:
++        pool = await get_pool()
++        cm = pool.acquire(timeout=float(settings.ENC_AUTH_DB_ACQUIRE_TIMEOUT_SECONDS))
++        conn = await cm.__aenter__()
++    except asyncio.TimeoutError:
++        raise StoreUnavailable("pool") from None
++    except Exception:
++        raise StoreUnavailable("db_unavailable") from None
++    try:
++        yield conn
++    except asyncio.TimeoutError:
++        raise StoreUnavailable("db_timeout") from None
++    except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError, OSError):
++        raise StoreUnavailable("db_unavailable") from None
++    finally:
++        with contextlib.suppress(Exception):
++            await cm.__aexit__(None, None, None)
+ 
+ 
+ async def ensure_schema(conn):
+@@ -51,6 +89,14 @@
+         )
+     ''')
+     await conn.execute("CREATE INDEX IF NOT EXISTS idx_enc_limits_window ON enc_auth_limits (window_start)")
++    await conn.execute('''
++        CREATE TABLE IF NOT EXISTS enc_auth_proof_claims (
++            proof_hash TEXT PRIMARY KEY,
++            uid TEXT NOT NULL,
++            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++        )
++    ''')
++    await conn.execute("CREATE INDEX IF NOT EXISTS idx_enc_claims_created ON enc_auth_proof_claims (created_at)")
+     for table, expected in _EXPECTED_COLUMNS.items():
+         rows = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name = $1", table)
+         if {r["column_name"] for r in rows} != expected:
+@@ -75,8 +121,7 @@
+         if operation not in OPERATIONS:
+             raise EnvelopeError(WRONG_OPERATION)
+         nonce = b64e(secrets.token_bytes(32))
+-        pool = await get_pool()
+-        async with pool.acquire() as conn:
++        async with connection() as conn:
+             outstanding = await conn.fetchval(
+                 "SELECT count(*) FROM enc_auth_nonces WHERE consumed_at IS NULL AND expires_at > NOW()")
+             if outstanding >= self.max_outstanding:
+@@ -101,9 +146,8 @@
+         return None
+ 
+     async def inspect(self, nonce, operation):
+-        """Read-only. Raises EnvelopeError unless the nonce is unknown-free, unused, unexpired and issued for this operation."""
+-        pool = await get_pool()
+-        async with pool.acquire() as conn:
++        """Read-only. Raises EnvelopeError unless the nonce is unused, unexpired and issued for this operation."""
++        async with connection() as conn:
+             row = await conn.fetchrow(
+                 "SELECT op, consumed_at, expires_at > NOW() AS live FROM enc_auth_nonces WHERE nonce_hash = $1",
+                 _nonce_hash(nonce))
+@@ -113,8 +157,7 @@
+ 
+     async def consume(self, nonce, operation):
+         """Atomic single use: exactly one caller can flip consumed_at; every other caller gets REPLAY (or EXPIRED/UNKNOWN)."""
+-        pool = await get_pool()
+-        async with pool.acquire() as conn:
++        async with connection() as conn:
+             won = await conn.fetchval(
+                 "UPDATE enc_auth_nonces SET consumed_at = NOW() "
+                 "WHERE nonce_hash = $1 AND op = $2 AND consumed_at IS NULL AND expires_at > NOW() RETURNING 1",
+@@ -136,38 +179,119 @@
+     return hmac.new(secret, f"{scope}:{value}".encode("utf-8"), hashlib.sha256).hexdigest()
+ 
+ 
++_BUMP = '''
++    INSERT INTO enc_auth_limits (scope, key_hash, window_start, hits)
++    VALUES ($1, $2, to_timestamp(floor(extract(epoch FROM NOW()) / $3::double precision) * $3::double precision), 1)
++    ON CONFLICT (scope, key_hash, window_start) DO UPDATE SET hits = enc_auth_limits.hits + 1
++    RETURNING hits, window_start
++'''
++_RETRY_AFTER = "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM ($1::timestamptz + make_interval(secs => $2) - NOW()))))::int"
++_RELEASE = "UPDATE enc_auth_limits SET hits = GREATEST(hits - 1, 0) WHERE scope = $1 AND key_hash = $2 AND window_start = $3"
++
++
+ async def hit(scope, value, limit, window_seconds=None):
+-    """Counts one event and returns (allowed, retry_after_seconds)."""
++    """Counts one event and returns (allowed, retry_after_seconds). Used for plain request limits (requests and signups per IP)."""
+     window = float(window_seconds or settings.ENC_AUTH_WINDOW_SECONDS)
+-    pool = await get_pool()
+-    async with pool.acquire() as conn:
+-        row = await conn.fetchrow('''
+-            INSERT INTO enc_auth_limits (scope, key_hash, window_start, hits)
+-            VALUES ($1, $2, to_timestamp(floor(extract(epoch FROM NOW()) / $3::double precision) * $3::double precision), 1)
+-            ON CONFLICT (scope, key_hash, window_start) DO UPDATE SET hits = enc_auth_limits.hits + 1
+-            RETURNING hits, window_start
+-        ''', scope, _key_hash(scope, value), window)
+-        retry = await conn.fetchval(
+-            "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM ($1::timestamptz + make_interval(secs => $2) - NOW()))))::int",
+-            row["window_start"], window)
++    async with connection() as conn:
++        row = await conn.fetchrow(_BUMP, scope, _key_hash(scope, value), window)
++        retry = await conn.fetchval(_RETRY_AFTER, row["window_start"], window)
+         if secrets.randbelow(100) == 0:
+             await conn.execute("DELETE FROM enc_auth_limits WHERE window_start < NOW() - INTERVAL '1 hour'")
+     return row["hits"] <= limit, retry
+ 
+ 
+-async def peek(scope, value, limit, window_seconds=None):
+-    """Read-only: returns (blocked, retry_after_seconds) for a counter that is only incremented on failures."""
+-    window = float(window_seconds or settings.ENC_AUTH_WINDOW_SECONDS)
+-    pool = await get_pool()
+-    async with pool.acquire() as conn:
+-        row = await conn.fetchrow('''
+-            SELECT hits, window_start FROM enc_auth_limits
+-            WHERE scope = $1 AND key_hash = $2
+-              AND window_start = to_timestamp(floor(extract(epoch FROM NOW()) / $3::double precision) * $3::double precision)
+-        ''', scope, _key_hash(scope, value), window)
+-        if row is None or row["hits"] < limit:
+-            return False, 0
+-        retry = await conn.fetchval(
+-            "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM ($1::timestamptz + make_interval(secs => $2) - NOW()))))::int",
+-            row["window_start"], window)
+-    return True, retry
++class Attempt:
++    """A counted password-verification attempt. Give it back with release_password_attempt() unless it was a real wrong password."""
++    __slots__ = ("rows", "blocked", "retry_after")
++
++    def __init__(self, rows, blocked=None, retry_after=0):
++        self.rows, self.blocked, self.retry_after = rows, blocked, retry_after
++
++
++def _limits():
++    return {"pair": settings.ENC_AUTH_PAIR_FAIL_LIMIT, "ip": settings.ENC_AUTH_IP_FAIL_LIMIT,
++            "email": settings.ENC_AUTH_EMAIL_FAIL_LIMIT, "global": settings.ENC_AUTH_GLOBAL_FAIL_LIMIT}
++
++
++async def reserve_password_attempt(email, ip):
++    """Counts the attempt BEFORE the password is checked, in all four scopes, in one transaction (so concurrent guesses cannot
++    overshoot a limit). A refused attempt is given back at once, so counters reflect real verifications only.
++    The e-mail is normalised here; neither it nor the IP is stored, only HMACs."""
++    email_key = (email or "").strip().lower()
++    names = {"pair": "pwf_pair", "ip": "pwf_ip", "email": "pwf_email", "global": "pwf_global"}
++    values = {"pair": f"{email_key}|{ip}", "ip": ip, "email": email_key, "global": "*"}
++    window = float(settings.ENC_AUTH_WINDOW_SECONDS)
++    async with connection() as conn:
++        async with conn.transaction():
++            hits, rows = {}, []
++            for scope in SCOPES:
++                key = _key_hash(names[scope], values[scope])
++                row = await conn.fetchrow(_BUMP, names[scope], key, window)
++                hits[scope] = row["hits"]
++                rows.append((scope, names[scope], key, row["window_start"]))
++            blocked = blocked_scope(hits, _limits(), settings.ENC_AUTH_ABUSE_IP_FAIL_LIMIT)
++            if blocked is None:
++                return Attempt([(n, k, w) for _s, n, k, w in rows])
++            for _s, name, key, start in rows:                      # refused: give every increment back
++                await conn.execute(_RELEASE, name, key, start)
++            scope = {"abuse_ip": "ip"}.get(blocked, blocked)
++            start = next(w for s, _n, _k, w in rows if s == scope)
++            retry = await conn.fetchval(_RETRY_AFTER, start, window)
++            return Attempt([], blocked=blocked, retry_after=retry)
++
++
++async def release_password_attempt(attempt):
++    """Gives a counted attempt back (the password was right, or the check could not be completed: that is not a failure)."""
++    if not attempt.rows:
++        return
++    async with connection() as conn:
++        async with conn.transaction():
++            for name, key, start in attempt.rows:
++                await conn.execute(_RELEASE, name, key, start)
++
++
++async def record_failure(email, ip):
++    """Counts a failure that never reached a password check (for example an e-mail or UID mismatch on re-authentication)."""
++    attempt = await reserve_password_attempt(email, ip)
++    return attempt.blocked is None
++
++
++# ---------------------------------------------------------------------------------------------------------------------
++# Proof claims (Option D): the first VERIFIED Firebase UID that used a proof at the gateway.
++# ---------------------------------------------------------------------------------------------------------------------
++
++def claim_key(raw_proof):
++    return _key_hash("proof_claim", raw_proof)
++
++
++async def bind_claim(raw_proof, uid):
++    """Atomically records `uid` as the owner of the proof unless another UID already is. True if `uid` is (now) the owner.
++    Call it only AFTER the identity service confirmed the account (created it, or verified the password of the existing one)."""
++    key = claim_key(raw_proof)
++    async with connection() as conn:
++        await conn.execute("INSERT INTO enc_auth_proof_claims (proof_hash, uid) VALUES ($1, $2) ON CONFLICT (proof_hash) DO NOTHING", key, uid)
++        owner = await conn.fetchval("SELECT uid FROM enc_auth_proof_claims WHERE proof_hash = $1", key)
++        if secrets.randbelow(100) == 0:
++            await conn.execute("DELETE FROM enc_auth_proof_claims WHERE created_at < NOW() - INTERVAL '2 days'")
++    return owner == uid
++
++
++async def claim_owner(raw_proof):
++    async with connection() as conn:
++        return await conn.fetchval("SELECT uid FROM enc_auth_proof_claims WHERE proof_hash = $1", claim_key(raw_proof))
++
++
++async def claim_allows(uid, raw_proof):
++    """For /auth/mark-verified. True: go on to the unchanged consume step. False: the proof was claimed by a different UID.
++    None: the claim could not be checked (answer 'unavailable'). With the gateway disabled this is always True and touches nothing."""
++    if not settings.ENC_AUTH_ENABLED:
++        return True
++    if not isinstance(raw_proof, str) or not raw_proof or len(raw_proof) > 128:
++        return True                                  # not a usable proof: the unchanged consume step rejects it
++    if not settings.ENC_AUTH_HASH_SECRET:
++        return None
++    try:
++        owner = await claim_owner(raw_proof)
++    except StoreUnavailable:
++        return None
++    return owner is None or owner == uid
