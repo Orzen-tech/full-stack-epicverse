@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
+import '../dev/local_lab.dart';
 import '../errors/app_exception.dart';
 import '../errors/error_handler.dart';
 import '../errors/error_mapper.dart';
@@ -34,15 +35,18 @@ class ApiClient {
           // use / near expiry, not on every request. A short timeout and
           // broad catch ensure a slow or failed fetch never blocks or
           // fails the actual API call — the header is simply omitted.
-          try {
-            final token = await FirebaseAppCheck.instance
-                .getToken()
-                .timeout(const Duration(seconds: 3));
-            if (token != null) {
-              options.headers['X-Firebase-AppCheck'] = token;
+          // Skipped in the debug-only local-lab mode, where App Check is never activated.
+          if (!LocalLab.active) {
+            try {
+              final token = await FirebaseAppCheck.instance
+                  .getToken()
+                  .timeout(const Duration(seconds: 3));
+              if (token != null) {
+                options.headers['X-Firebase-AppCheck'] = token;
+              }
+            } catch (e) {
+              debugPrint('[ApiClient] App Check token unavailable (non-blocking): $e');
             }
-          } catch (e) {
-            debugPrint('[ApiClient] App Check token unavailable (non-blocking): $e');
           }
 
           return handler.next(options);

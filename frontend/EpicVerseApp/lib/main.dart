@@ -6,6 +6,7 @@ import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'core/dev/local_lab.dart';
 import 'core/theme/app_theme.dart';
 import 'core/network/websocket_service.dart';
 import 'core/network/ssl_pinning_service.dart';
@@ -22,7 +23,8 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 Future<void> main() async {
   await SentryFlutter.init(
     (options) {
-      options.dsn = 'https://afe194a04c6b9f969e6a9f39a9b99299@o4511507517341696.ingest.us.sentry.io/4511822514421760';
+      // An empty DSN disables Sentry; only the debug-only local-lab mode ever sets it.
+      options.dsn = LocalLab.active ? '' : 'https://afe194a04c6b9f969e6a9f39a9b99299@o4511507517341696.ingest.us.sentry.io/4511822514421760';
       options.sendDefaultPii = false;
       options.tracesSampleRate = 1.0;
     },
@@ -54,25 +56,34 @@ Future<void> main() async {
         LoggerService.logError(e, stackTrace: st, customReason: 'Firebase initialization failed');
       }
 
+      // Local-lab mode (debug builds only): point Firebase Auth at the local emulator before anything else uses Auth. LocalLab.active is a
+      // compile-time constant and `&&` short-circuits, so outside a debug build with the define the bootstrap call and its await are never
+      // executed (the AOT compiler can also drop them; that is confirmed by a build, not assumed).
+      // If the redirect fails or times out the process is stopped and nothing below runs (no Auth call, no socket, no screen).
+      if (LocalLab.active && !await LocalLab.bootstrap()) return;
+
       // Restore the MFA session proof from secure storage (it is validated by the server, never trusted locally).
       // Never throws; on first launch after an install it wipes any stale Keychain entry instead.
       await MfaSessionManager.restore();
 
-      try {
-        // Debug builds use the debug provider (a token registered in
-        // Firebase Console for testing); release builds use real device
-        // attestation. App Check starts in Monitor mode in Firebase Console
-        // — it logs requests but does not block anything yet.
-        // ignore: deprecated_member_use
-        await FirebaseAppCheck.instance.activate(
+      // Local-lab mode has no App Check (the lab backend only logs it); every other build activates it as before.
+      if (!LocalLab.active) {
+        try {
+          // Debug builds use the debug provider (a token registered in
+          // Firebase Console for testing); release builds use real device
+          // attestation. App Check starts in Monitor mode in Firebase Console
+          // — it logs requests but does not block anything yet.
           // ignore: deprecated_member_use
-          androidProvider: kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
-          // ignore: deprecated_member_use
-          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
-        );
-        LoggerService.logInfo('App Check activated');
-      } catch (e, st) {
-        LoggerService.logError(e, stackTrace: st, customReason: 'App Check activation failed');
+          await FirebaseAppCheck.instance.activate(
+            // ignore: deprecated_member_use
+            androidProvider: kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+            // ignore: deprecated_member_use
+            appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
+          );
+          LoggerService.logInfo('App Check activated');
+        } catch (e, st) {
+          LoggerService.logError(e, stackTrace: st, customReason: 'App Check activation failed');
+        }
       }
 
       try {
