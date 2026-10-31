@@ -63,6 +63,9 @@ PODS:
     - IOSSecuritySuite
   - flutter_pcm_sound (0.0.1):
     - Flutter
+  - flutter_secure_storage_darwin (10.0.0):
+    - Flutter
+    - FlutterMacOS
   - GoogleUtilities/AppDelegateSwizzler (8.1.3):
     - GoogleUtilities/Environment
     - GoogleUtilities/Logger
@@ -124,6 +127,7 @@ DEPENDENCIES:
   - Flutter (from `Flutter`)
   - flutter_jailbreak_detection (from `.symlinks/plugins/flutter_jailbreak_detection/ios`)
   - flutter_pcm_sound (from `.symlinks/plugins/flutter_pcm_sound/ios`)
+  - flutter_secure_storage_darwin (from `.symlinks/plugins/flutter_secure_storage_darwin/darwin`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - permission_handler_apple (from `.symlinks/plugins/permission_handler_apple/ios`)
@@ -172,6 +176,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/flutter_jailbreak_detection/ios"
   flutter_pcm_sound:
     :path: ".symlinks/plugins/flutter_pcm_sound/ios"
+  flutter_secure_storage_darwin:
+    :path: ".symlinks/plugins/flutter_secure_storage_darwin/darwin"
   image_picker_ios:
     :path: ".symlinks/plugins/image_picker_ios/ios"
   package_info_plus:
@@ -208,6 +214,7 @@ SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_jailbreak_detection: a74360daaf5cbc80639959463b4b1395873c90b5
   flutter_pcm_sound: e9c2f6ce580eefcab2af46763f0354484d5c4ac8
+  flutter_secure_storage_darwin: 46e401699982ee74142909676535e0f6a7321e58
   GoogleUtilities: 4e0c2ad9fa0d0d18b5c4df8bf57b461cba35b0bb
   GTMSessionFetcher: a6d2b2aa203485893d4511ff64642dc811f7c09f
   image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
