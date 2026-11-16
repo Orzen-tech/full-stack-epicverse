@@ -1,67 +1,7 @@
-import asyncio
-import asyncpg
-import pandas as pd
-import random
-import string
-import os
+"""DISABLED (security fix, 2026-11).
 
-# --- DATABASE CONFIG ---
-# DATABASE_URL must be provided via the environment (e.g. .env locally, or
-# Secret Manager in Cloud Run). This script no longer carries a hardcoded
-# production credential.
-_raw_url = os.getenv("DATABASE_URL")
-if not _raw_url:
-    raise SystemExit(
-        "DATABASE_URL environment variable is not set. "
-        "Refusing to run without an explicit database connection string."
-    )
-DATABASE_URL = _raw_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-def generate_random_code(length=6):
-    chars = string.ascii_uppercase + string.digits
-    return "EPIC-" + "".join(random.choice(chars) for _ in range(length))
-
-async def main():
-    print("[INVITE-SYNC] Starting Invite Code Refresh (6-Char Format)...")
-    
-    # 1. Generate 500 codes (6 characters)
-    new_codes = [generate_random_code(6) for _ in range(500)]
-    
-    # 2. Define Developer Master Code
-    master_code = "EPIC-DEV-MASTER"
-    all_codes = new_codes + [master_code]
-    
-    # 3. Save to Excel
-    df = pd.DataFrame({
-        "Invite Code": all_codes, 
-        "Type": ["Standard"]*500 + ["Master Developer"],
-        "Max Uses": [1]*500 + [9999999]
-    })
-    export_path = "e:/kriyora/EpicVerse/EpicVerse_Invite_Keys_Final.xlsx"
-    df.to_excel(export_path, index=False)
-    print(f"Excel Sheet Created: {export_path}")
-    
-    # 4. Update Database
-    try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        
-        # Clear existing
-        await conn.execute("DELETE FROM invite_codes")
-        print("Old Invite Codes Purged.")
-        
-        # Insert Standard Codes (1 use each)
-        standard_values = [(code, 1, 0) for code in new_codes]
-        await conn.executemany("INSERT INTO invite_codes (code, max_uses, current_uses) VALUES ($1, $2, $3)", standard_values)
-        
-        # Insert Master Code (Unlimited use)
-        await conn.execute("INSERT INTO invite_codes (code, max_uses, current_uses) VALUES ($1, $2, $3)", master_code, 9999999, 0)
-        
-        await conn.close()
-        print(f"501 New Invite Codes (6-Char) Imported to Production Database.")
-        print(f"MASTER CODE IS: {master_code}")
-        
-    except Exception as e:
-        print(f"Database Error: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+This script deleted EVERY invite code before inserting new ones, used the non-cryptographic
+`random` module and created weak codes plus an unlimited-use master code. Use scripts/generate_invites.py instead: it is
+additive (never deletes), uses `secrets`, and defaults to a dry run.
+"""
+raise SystemExit("Disabled: use scripts/generate_invites.py (additive, secure, dry-run by default).")
