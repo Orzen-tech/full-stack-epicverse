@@ -8,6 +8,8 @@ import '../../core/network/mfa_session_manager.dart';
 import '../widgets/network_background.dart';
 import 'welcome_screen.dart';
 import '../../core/errors/error_handler.dart';
+import '../../core/errors/error_mapper.dart';
+import '../../core/errors/app_exception.dart';
 
 class OtpVerificationScreen extends StatefulWidget {
   final String? email;
@@ -191,8 +193,16 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
             showSnackBar: false,
           );
         }
+        // Only a rejected code is "invalid or expired". A network, timeout or server failure
+        // says what actually happened, so people don't retype a code that was fine.
+        final mapped = ErrorMapper.fromException(e);
+        final connectionProblem = mapped.type == AppExceptionType.network ||
+            mapped.type == AppExceptionType.timeout ||
+            mapped.type == AppExceptionType.server;
         setState(() {
-          _errorMessage = "Invalid or expired verification code. Please try again.";
+          _errorMessage = (!isExpectedInvalidOtp && connectionProblem)
+              ? mapped.userMessage
+              : "Invalid or expired verification code. Please try again.";
         });
         // Only a confirmed rejection clears the boxes; other failures keep the typed code, and editing it does not
         // auto-submit because it was already complete.

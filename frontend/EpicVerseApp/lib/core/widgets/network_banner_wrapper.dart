@@ -136,6 +136,7 @@ class _NetworkBannerWrapperState extends State<NetworkBannerWrapper> {
       case NetworkStatus.noInternet:
         return const Color(0xFFD32F2F); // Red
       case NetworkStatus.poorNetwork:
+      case NetworkStatus.serverUnreachable:
         return const Color(0xFFED6C02); // Orange / Amber
       case NetworkStatus.connected:
         return const Color(0xFF2E7D32);
@@ -149,6 +150,8 @@ class _NetworkBannerWrapperState extends State<NetworkBannerWrapper> {
         return Icons.wifi_off_rounded;
       case NetworkStatus.poorNetwork:
         return Icons.network_check_rounded;
+      case NetworkStatus.serverUnreachable:
+        return Icons.cloud_off_rounded;
       case NetworkStatus.connected:
         return Icons.wifi_rounded;
     }
@@ -158,9 +161,11 @@ class _NetworkBannerWrapperState extends State<NetworkBannerWrapper> {
     if (_showRestoredBanner) return 'Connection Restored';
     switch (_status) {
       case NetworkStatus.noInternet:
-        return '⚠ No Internet Connection';
+        return "You're offline";
       case NetworkStatus.poorNetwork:
-        return '⚠ Poor Network';
+        return 'Slow connection';
+      case NetworkStatus.serverUnreachable:
+        return "Can't reach EpicVerse";
       case NetworkStatus.connected:
         return 'Connection Restored';
     }
@@ -170,9 +175,11 @@ class _NetworkBannerWrapperState extends State<NetworkBannerWrapper> {
     if (_showRestoredBanner) return 'Internet connection restored.';
     switch (_status) {
       case NetworkStatus.noInternet:
-        return 'Please check your internet connection.';
+        return 'Check your internet connection.';
       case NetworkStatus.poorNetwork:
-        return 'Your connection is slow. Some requests may take longer.';
+        return 'Things may take longer than usual.';
+      case NetworkStatus.serverUnreachable:
+        return "We're having trouble connecting. Please try again shortly.";
       case NetworkStatus.connected:
         return 'Internet connection restored.';
     }

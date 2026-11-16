@@ -153,4 +153,26 @@ class ApiClient {
           ));
 }
 
+/// Minimal reachability probe for the network banner: GET / on the SAME pinned client stack as
+/// every other request, with no sign-in headers. It deliberately uses the static root route, NOT
+/// /health: /health runs a database query and a cache ping on every call, and this probe fires
+/// from every open phone. Returns the HTTP status, or null when the backend could not be reached.
+Future<int?> probeBackendHealth() async {
+  final dio = SslPinningService.createPinnedDio(
+    baseUrl: ApiConfig.baseUrl,
+    // Generous on purpose: a backend waking from idle can take 15 s+ to answer its first request.
+    connectTimeout: const Duration(seconds: 10),
+    receiveTimeout: const Duration(seconds: 25),
+    sendTimeout: const Duration(seconds: 10),
+  );
+  try {
+    final r = await dio.get<dynamic>('/', options: Options(validateStatus: (_) => true));
+    return r.statusCode;
+  } on DioException {
+    return null;
+  } finally {
+    dio.close(force: true);
+  }
+}
+
 final apiClient = ApiClient();

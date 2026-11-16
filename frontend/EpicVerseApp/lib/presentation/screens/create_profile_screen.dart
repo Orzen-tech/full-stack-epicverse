@@ -18,6 +18,7 @@ import 'dashboard_screen.dart';
 import 'legal_content_screen.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_handler.dart';
+import '../../core/errors/error_mapper.dart';
 import '../../core/security/email_verification_flow.dart';
 import '../widgets/security_alert_dialog.dart';
 import '../../core/utils/password_validator.dart';
@@ -330,10 +331,10 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       }
     } on FirebaseAuthException catch (e) {
       debugPrint('[EpicVerse][REG] FirebaseAuthException code=${e.code}');
-      _showError(e.message ?? 'Registration failed.');
+      _showError(ErrorMapper.fromException(e).userMessage);
     } catch (e) {
       debugPrint('[EpicVerse][REG] Registration error: ${e.runtimeType}');
-      _showError(e.toString());
+      _showError(ErrorMapper.fromException(e).userMessage);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -436,6 +437,7 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
           stackTrace: st,
           context: context,
           screenName: 'CreateProfileScreen',
+          onRetry: () => _completeRegistration(cred, inviteCode),
         );
       }
     }

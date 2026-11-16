@@ -2,11 +2,15 @@ import 'dart:async';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding, AppLifecycleState;
+import '../network/api_client.dart' show probeBackendHealth;
 
 enum NetworkStatus {
   connected,
   noInternet,
   poorNetwork,
+  // The phone has internet, but EpicVerse itself can't be reached (outage, or a Wi-Fi sign-in page in the way).
+  serverUnreachable,
 }
 
 class NetworkService {
@@ -40,8 +44,11 @@ class NetworkService {
     // Initial check
     _checkInitialConnectivity();
 
-    // Periodic ping to check latency / poor network
-    _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    // Periodic check of latency / reachability. Only while the app is on screen: it costs
+    // battery and a tiny backend request, and nothing is shown to a user who isn't looking.
+    _latencyTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
       if (_currentStatus != NetworkStatus.noInternet) {
         _checkNetworkQuality();
       }
@@ -63,38 +70,42 @@ class NetworkService {
     await _checkNetworkQuality();
   }
 
+  int _backendMisses = 0;
+
+  /// Asks the backend whether it answers (a reply of any kind below 500 means yes), then checks
+  /// the internet itself. A backend that is waking from idle can take 15 s+, so one missed probe
+  /// is never reported as an outage: it takes two in a row.
   Future<void> _checkNetworkQuality() async {
+    final status = await probeBackendHealth();
+    final backendReachable = status != null && status < 500;
+    _backendMisses = backendReachable ? 0 : _backendMisses + 1;
+
+    final internet = await _checkInternet();
+    final result = assessNetwork(
+      backendReachable: backendReachable,
+      backendMisses: _backendMisses,
+      internetUp: internet.up,
+      internetLatencyMs: internet.latencyMs,
+    );
+    if (result != null) _updateStatus(result);
+  }
+
+  /// Is the internet itself usable, and how quick is a plain connection? Null latency means the
+  /// quick socket check was blocked but a DNS lookup still worked.
+  Future<({bool up, int? latencyMs})> _checkInternet() async {
     try {
       final stopwatch = Stopwatch()..start();
-
-      // Ping a reliable DNS server socket to measure latency
-      final socket = await Socket.connect(
-        '8.8.8.8',
-        53,
-        timeout: const Duration(seconds: 4),
-      );
+      final socket = await Socket.connect('8.8.8.8', 53, timeout: const Duration(seconds: 4));
       stopwatch.stop();
       socket.destroy();
-
-      final latencyMs = stopwatch.elapsedMilliseconds;
-
-      if (latencyMs > 2500) {
-        _updateStatus(NetworkStatus.poorNetwork);
-      } else {
-        _updateStatus(NetworkStatus.connected);
-      }
+      return (up: true, latencyMs: stopwatch.elapsedMilliseconds);
     } catch (_) {
-      // If socket ping fails, attempt HTTP backup check
       try {
-        final result = await InternetAddress.lookup('google.com')
-            .timeout(const Duration(seconds: 3));
-        if (result.isNotEmpty && result[0].rawAddress.isNotEmpty) {
-          _updateStatus(NetworkStatus.connected);
-        } else {
-          _updateStatus(NetworkStatus.noInternet);
-        }
+        final result = await InternetAddress.lookup('google.com').timeout(const Duration(seconds: 3));
+        final ok = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+        return (up: ok, latencyMs: null);
       } catch (_) {
-        _updateStatus(NetworkStatus.noInternet);
+        return (up: false, latencyMs: null);
       }
     }
   }
@@ -116,3 +127,25 @@ class NetworkService {
 }
 
 final networkService = NetworkService();
+
+/// Decides what the network banner should say. Returns null for "keep the current status for now".
+///
+///  * no internet                                   -> [NetworkStatus.noInternet]
+///  * internet fine, backend missed fewer than 2    -> null (a single miss is usually the backend
+///    probes in a row                                  waking from idle, not an outage)
+///  * internet fine, backend missed 2+ in a row     -> [NetworkStatus.serverUnreachable]
+///  * everything answers, but the connection is slow-> [NetworkStatus.poorNetwork]
+///  * everything answers                            -> [NetworkStatus.connected]
+@visibleForTesting
+NetworkStatus? assessNetwork({
+  required bool backendReachable,
+  required int backendMisses,
+  required bool internetUp,
+  required int? internetLatencyMs,
+}) {
+  if (!internetUp) return NetworkStatus.noInternet;
+  if (!backendReachable) {
+    return backendMisses >= 2 ? NetworkStatus.serverUnreachable : null;
+  }
+  return (internetLatencyMs ?? 0) > 2500 ? NetworkStatus.poorNetwork : NetworkStatus.connected;
+}

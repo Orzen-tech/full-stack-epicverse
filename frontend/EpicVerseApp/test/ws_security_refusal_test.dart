@@ -42,7 +42,9 @@ void main() {
 
     test('plain 403 is unchanged', () {
       final e = ErrorMapper.fromException(_http(403, {'detail': 'Forbidden'}));
-      expect(e.userMessage, "You don't have permission to perform this action.");
+      expect(e.userMessage, "You don't have permission to do that.");
+      expect(e.type, AppExceptionType.authorization);
+      expect(e.statusCode, 403);
     });
   });
 }

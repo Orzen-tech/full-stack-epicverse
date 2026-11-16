@@ -303,11 +303,13 @@ class WebSocketService {
     if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
     if (!immediate && _reconnectAttempts >= _maxReconnectAttempts) {
       debugPrint('[EpicVerse][WS] auto-reconnect gave up after $_reconnectAttempts attempts');
+      _statusController.add('Reconnect failed');
       return;
     }
     final delayMs = reconnectDelayMs(_reconnectAttempts,
         immediate: immediate, jitter01: math.Random().nextDouble());
     if (!immediate) _reconnectAttempts++;
+    _statusController.add('Reconnecting...');
     debugPrint('[EpicVerse][WS] reconnecting in ${delayMs}ms (attempt $_reconnectAttempts, renew=$immediate)');
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () async {
       if (!autoReconnect || _manualClose || _isConnected || _isConnecting) return;
@@ -322,7 +324,11 @@ class WebSocketService {
 
   void _handleDisconnect({bool reconnect = true}) {
     if (!(_connectionCompleter?.isCompleted ?? true)) {
-       _connectionCompleter?.completeError('Handshake failed or was interrupted');
+       _connectionCompleter?.completeError(const AppException(
+        userMessage: ErrorMessages.voiceStartFailed,
+        type: AppExceptionType.network,
+        retryable: true,
+      ));
     }
 
     if (_isConnected) {

@@ -1,3 +1,4 @@
+import '../../core/errors/error_mapper.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/constants/app_colors.dart';
@@ -74,7 +75,7 @@ class _VerificationPendingScreenState extends State<VerificationPendingScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${e.toString()}')),
+          SnackBar(content: Text(ErrorMapper.fromException(e).userMessage)),
         );
       }
     } finally {

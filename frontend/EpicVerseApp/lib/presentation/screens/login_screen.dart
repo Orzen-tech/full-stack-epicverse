@@ -344,6 +344,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           stackTrace: st,
           context: context,
           screenName: 'LoginScreen',
+          onRetry: _handleLogin,
         );
       }
     } finally {

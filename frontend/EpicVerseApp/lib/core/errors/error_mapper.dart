@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'app_exception.dart';
 import '../network/mfa_session_manager.dart';
+import '../services/network_service.dart';
 
 class ErrorMapper {
   /// The backend's structured error code (`{"detail": {"code": ...}}`), if any.
@@ -12,6 +13,30 @@ class ErrorMapper {
     final data = error.response?.data;
     final detail = data is Map ? data['detail'] : null;
     return detail is Map && detail['code'] is String ? detail['code'] as String : null;
+  }
+
+  /// True when the failure means the phone itself has no usable internet (as opposed to
+  /// "internet works but EpicVerse can't be reached").
+  static bool _looksOffline(Object? cause) {
+    if (networkService.currentStatus == NetworkStatus.noInternet) return true;
+    if (cause is SocketException) {
+      final text = '${cause.message} ${cause.osError?.message ?? ''}'.toLowerCase();
+      return text.contains('failed host lookup') ||
+          text.contains('network is unreachable') ||
+          text.contains('no address associated');
+    }
+    return false;
+  }
+
+  static AppException _offlineOrUnreachable(Object? cause, {String? originalError, DioException? original}) {
+    final offline = _looksOffline(cause);
+    return AppException(
+      userMessage: offline ? ErrorMessages.offline : ErrorMessages.unreachable,
+      type: AppExceptionType.network,
+      originalError: originalError,
+      originalException: original ?? cause,
+      retryable: true,
+    );
   }
 
   /// Converts any raw technical exception into a clean, user-friendly [AppException].
@@ -37,35 +62,46 @@ class ErrorMapper {
 
     // 4. Handle Network & Socket Exceptions
     if (exception is SocketException) {
-      return const AppException(
-        userMessage: 'No internet connection.',
+      return _offlineOrUnreachable(exception, originalError: exception.message);
+    }
+
+    // TLS failures (e.g. a sign-in Wi-Fi page or proxy in the way)
+    if (exception is HandshakeException || exception is TlsException) {
+      return AppException(
+        userMessage: ErrorMessages.secureConnection,
         type: AppExceptionType.network,
+        originalError: exception.toString(),
+        originalException: exception,
+        retryable: true,
       );
     }
 
     // 5. Handle Async Timeout Exceptions
     if (exception is TimeoutException) {
       return const AppException(
-        userMessage: 'Request timed out. Please try again.',
+        userMessage: ErrorMessages.timeout,
         type: AppExceptionType.timeout,
+        retryable: true,
       );
     }
 
-    // 5. Handle Parsing & Type Exceptions
+    // 6. Handle Parsing & Type Exceptions
     if (exception is FormatException || exception is TypeError) {
       return AppException(
-        userMessage: 'Something went wrong. Please try again.',
+        userMessage: ErrorMessages.generic,
         originalError: exception.toString(),
         type: AppExceptionType.unknown,
+        retryable: true,
       );
     }
 
-    // 6. Generic Fallback for Unknown Exceptions
+    // 7. Generic Fallback for Unknown Exceptions
     return AppException(
-      userMessage: 'An unexpected error occurred.',
+      userMessage: ErrorMessages.generic,
       originalError: exception?.toString(),
       type: AppExceptionType.unknown,
       originalException: exception,
+      retryable: true,
     );
   }
 
@@ -79,11 +115,13 @@ class ErrorMapper {
           originalException: exception,
         );
       default:
+        // Never show a platform plugin's raw message to the user.
         return AppException(
-          userMessage: exception.message ?? 'Something went wrong. Please try again.',
+          userMessage: ErrorMessages.generic,
           originalError: exception.message,
           type: AppExceptionType.unknown,
           originalException: exception,
+          retryable: true,
         );
     }
   }
@@ -96,60 +134,81 @@ class ErrorMapper {
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
         return AppException(
-          userMessage: 'Request timed out. Please try again.',
+          userMessage: ErrorMessages.timeout,
           statusCode: statusCode,
           type: AppExceptionType.timeout,
           originalError: error.message,
           originalException: error,
+          retryable: true,
         );
 
       case DioExceptionType.connectionError:
-        return AppException(
-          userMessage: 'No internet connection.',
-          statusCode: statusCode,
-          type: AppExceptionType.network,
-          originalError: error.message,
-          originalException: error,
-        );
+        if (error.error is HandshakeException || error.error is TlsException) {
+          return AppException(
+            userMessage: ErrorMessages.secureConnection,
+            type: AppExceptionType.network,
+            originalError: error.message,
+            originalException: error,
+            retryable: true,
+          );
+        }
+        return _offlineOrUnreachable(error.error, originalError: error.message, original: error);
 
       case DioExceptionType.badResponse:
         return _mapHttpStatusCode(statusCode, error);
 
       case DioExceptionType.cancel:
         return const AppException(
-          userMessage: 'Request was cancelled.',
+          userMessage: ErrorMessages.cancelled,
           type: AppExceptionType.unknown,
         );
 
       case DioExceptionType.badCertificate:
-        return const AppException(
-          userMessage: 'Secure connection failed.',
+        return AppException(
+          userMessage: ErrorMessages.secureConnection,
           type: AppExceptionType.network,
+          originalError: error.message,
+          originalException: error,
+          retryable: true,
         );
 
       case DioExceptionType.unknown:
       default:
         if (error.error is SocketException) {
-          return const AppException(
-            userMessage: 'No internet connection.',
+          return _offlineOrUnreachable(error.error, originalError: error.message, original: error);
+        }
+        if (error.error is HandshakeException || error.error is TlsException) {
+          return AppException(
+            userMessage: ErrorMessages.secureConnection,
             type: AppExceptionType.network,
+            originalError: error.message,
+            originalException: error,
+            retryable: true,
           );
         }
         return AppException(
-          userMessage: 'An unexpected error occurred.',
+          userMessage: ErrorMessages.generic,
           statusCode: statusCode,
           type: AppExceptionType.unknown,
           originalError: error.message,
           originalException: error,
+          retryable: true,
         );
     }
+  }
+
+  /// Seconds from the HTTP Retry-After header, when it is a plain number.
+  static int? _retryAfterSeconds(DioException error) {
+    final raw = error.response?.headers.value('retry-after');
+    final n = raw == null ? null : int.tryParse(raw.trim());
+    return (n != null && n > 0 && n <= 86400) ? n : null;
   }
 
   static AppException _mapHttpStatusCode(int? statusCode, DioException error) {
     switch (statusCode) {
       case 400:
         return AppException(
-          userMessage: 'Please check your request and try again.',
+          userMessage: ErrorMessages.checkInput,
           statusCode: 400,
           type: AppExceptionType.validation,
           originalError: error.message,
@@ -179,7 +238,7 @@ class ErrorMapper {
           );
         }
         return AppException(
-          userMessage: 'Your session has expired. Please sign in again.',
+          userMessage: ErrorMessages.sessionEnded,
           statusCode: 401,
           type: AppExceptionType.authentication,
           originalError: error.message,
@@ -197,7 +256,7 @@ class ErrorMapper {
           );
         }
         return AppException(
-          userMessage: "You don't have permission to perform this action.",
+          userMessage: ErrorMessages.noPermission,
           statusCode: 403,
           type: AppExceptionType.authorization,
           originalError: error.message,
@@ -206,7 +265,7 @@ class ErrorMapper {
 
       case 404:
         return AppException(
-          userMessage: 'Requested data was not found.',
+          userMessage: ErrorMessages.notFound,
           statusCode: 404,
           type: AppExceptionType.notFound,
           originalError: error.message,
@@ -215,7 +274,7 @@ class ErrorMapper {
 
       case 409:
         return AppException(
-          userMessage: 'This item already exists.',
+          userMessage: ErrorMessages.alreadyExists,
           statusCode: 409,
           type: AppExceptionType.conflict,
           originalError: error.message,
@@ -224,7 +283,7 @@ class ErrorMapper {
 
       case 422:
         return AppException(
-          userMessage: 'Please check your input.',
+          userMessage: ErrorMessages.checkInput,
           statusCode: 422,
           type: AppExceptionType.validation,
           originalError: error.message,
@@ -232,12 +291,14 @@ class ErrorMapper {
         );
 
       case 429:
+        final wait = _retryAfterSeconds(error);
         return AppException(
-          userMessage: 'Too many requests. Please try again later.',
+          userMessage: wait == null ? ErrorMessages.rateLimited : ErrorMessages.rateLimitedFor(wait),
           statusCode: 429,
           type: AppExceptionType.rateLimit,
           originalError: error.message,
           originalException: error,
+          retryAfterSeconds: wait,
         );
 
       case 500:
@@ -245,26 +306,29 @@ class ErrorMapper {
       case 503:
       case 504:
         return AppException(
-          userMessage: 'Something went wrong. Please try again.',
+          userMessage: ErrorMessages.serverError,
           statusCode: statusCode,
           type: AppExceptionType.server,
           originalError: error.message,
           originalException: error,
+          retryable: true,
         );
 
       default:
         return AppException(
-          userMessage: 'Something went wrong. Please try again.',
+          userMessage: ErrorMessages.generic,
           statusCode: statusCode,
           type: AppExceptionType.unknown,
           originalError: error.message,
           originalException: error,
+          retryable: true,
         );
     }
   }
 
   static AppException _mapFirebaseAuthException(FirebaseAuthException error) {
     String message;
+    var retryable = false;
     switch (error.code) {
       case 'user-not-found':
       case 'wrong-password':
@@ -284,10 +348,11 @@ class ErrorMapper {
         message = 'Please sign in again to complete this operation.';
         break;
       case 'too-many-requests':
-        message = 'Too many attempts. Please try again later.';
+        message = ErrorMessages.rateLimited;
         break;
       case 'network-request-failed':
-        message = 'No internet connection.';
+        message = _looksOffline(null) ? ErrorMessages.offline : ErrorMessages.unreachable;
+        retryable = true;
         break;
       default:
         message = 'Authentication failed. Please try again.';
@@ -299,6 +364,7 @@ class ErrorMapper {
       originalError: '[${error.code}] ${error.message}',
       type: AppExceptionType.authentication,
       originalException: error,
+      retryable: retryable,
     );
   }
 }
