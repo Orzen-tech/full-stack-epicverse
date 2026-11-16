@@ -12,6 +12,9 @@ import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_assets.dart';
 import '../widgets/network_background.dart';
 import '../../core/network/websocket_service.dart';
+import '../../core/network/voice_status_labels.dart';
+import '../../core/audio/mic_level_tracker.dart';
+import '../../core/audio/voice_turn_state.dart';
 import '../../services/wake_word_service.dart';
 import '../../core/network/api_config.dart';
 import 'login_screen.dart';
@@ -69,6 +72,68 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   // safety net: if we don't hear back within a few seconds, reset on our own.
   Timer? _thinkingFailsafe;
 
+  // Status texts for the voice turn. Kept as constants so the places that compare
+  // against them can never drift from what is shown.
+  static const String _kListening = "Listening... say your card pair";
+  static const String _kWorking = "Got it, working on it...";
+  static const String _kStillWorking = "Still working...";
+  static const String _kTakingLong = "Taking longer than usual. Tap the mic to try again";
+  static const String _kReadyNext = "Ready. Say the next pair";
+  static const String _kConnectionFailed = "Connection failed. Tap the mic to try again";
+
+  // --- No-speech handling -------------------------------------------------------------
+  // The mic level only chooses which MESSAGE to show; audio always still goes to the backend.
+  static const String _kStillListening = "Still listening... speak when you're ready";
+  static const String _kNoSpeech = "I didn't hear anything. Tap the mic and say your card pair.";
+  static const String _kMicSilent =
+      "I can't hear your microphone. Check it isn't muted or in use by another app.";
+  static const String _kMicPermission = "Microphone access is off. Turn it on in Settings.";
+  static const int _noSpeechHintSeconds = 5;
+  static const int _noSpeechStopSeconds = 8;
+
+  final MicLevelTracker _micLevel = MicLevelTracker();
+  // What the BACKEND has said this turn (it detects end-of-speech itself and answers while the mic is open).
+  final VoiceTurnState _turn = VoiceTurnState();
+  Timer? _noSpeechHintTimer;
+  Timer? _noSpeechStopTimer;
+
+  /// "Got it, working on it..." now, escalating to "Still working..." (4 s) and the retry hint (12 s).
+  void _startThinkingSequence() {
+    if (mounted) setState(() => _statusText = _kWorking);
+    _cancelThinkingTimers();
+    _thinkingFailsafe = Timer(const Duration(seconds: 4), () {
+      if (mounted && _statusText == _kWorking) {
+        setState(() => _statusText = _kStillWorking);
+      }
+    });
+    _thinkingStuckTimer = Timer(const Duration(seconds: 12), () {
+      if (mounted && _isThinkingStatus) {
+        debugPrint('[EpicVerse][MIC] no backend response after 12 s — showing retry hint');
+        setState(() => _statusText = _kTakingLong);
+      }
+    });
+  }
+
+  // Only the backend's voice detection decides whether the user spoke (see VoiceTurnState).
+  bool get _heardSpeechThisTurn => _turn.serverHeardSpeech;
+
+  void _cancelNoSpeechTimers() {
+    _noSpeechHintTimer?.cancel();
+    _noSpeechStopTimer?.cancel();
+  }
+
+  // After the user stops speaking we show escalating messages instead of one static
+  // "Thinking...": a gentle "still working" at 4 s, then a clear retry hint at 12 s.
+  Timer? _thinkingStuckTimer;
+
+  bool get _isThinkingStatus =>
+      _statusText == _kWorking || _statusText == _kStillWorking || _statusText == _kTakingLong;
+
+  void _cancelThinkingTimers() {
+    _thinkingFailsafe?.cancel();
+    _thinkingStuckTimer?.cancel();
+  }
+
   StreamSubscription<AudioInterruptionEvent>? _audioInterruptionSub;
 
   @override
@@ -124,7 +189,13 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     });
 
     _statusSub = webSocketService.statusTextStream.listen((status) {
-      if (mounted) setState(() => _statusText = status);
+      // Show a readable sentence, never the connection layer's raw status word.
+      final label = voiceStatusLabel(status);
+      if (label == null) {
+        debugPrint('[EpicVerse][WS] status "$status" not shown to the user');
+      } else if (mounted) {
+        setState(() => _statusText = label);
+      }
     });
 
     _messageSub = webSocketService.messages.listen((message) {
@@ -139,7 +210,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           final data = message is String ? jsonDecode(message) : message;
 
           if (data['type'] == 'response.done') {
-            _thinkingFailsafe?.cancel();
+            _cancelThinkingTimers();
+            _turn.onResponseHandled();
             debugPrint('[EpicVerse][AI] response.done → LLM finished sending audio');
             // The server sends audio faster than it plays, so response.done arrives while
             // speech is still playing. Only stop now if nothing is left to play; otherwise
@@ -150,8 +222,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
             // Fallback: a turn that stayed silent (e.g. "next") never starts talking, so
             // _stopTalking() above is a no-op and the status text would otherwise be stuck
             // on "Thinking.../Checking rules..." forever. Reset it once the turn is over.
-            if (!_isTalking && mounted && _statusText != "Ready" && _statusText != "Listening...") {
-              setState(() => _statusText = "Ready");
+            if (!_isTalking && mounted && _statusText != "Ready" && _statusText != _kReadyNext && _statusText != _kListening) {
+              setState(() => _statusText = _kReadyNext);
             }
           } else if (data['type'] == 'response.output_item.added') {
             // The backend already forwards this raw OpenAI event; use it to show what
@@ -159,7 +231,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
             // everything, including turns where nothing is being checked at all.
             final item = data['item'];
             if (item is Map && item['type'] == 'function_call' && mounted) {
-              _thinkingFailsafe?.cancel();
+              _cancelThinkingTimers();
               switch (item['name']) {
                 case 'query_database_for_combo':
                   setState(() => _statusText = "Checking rules...");
@@ -168,7 +240,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                   setState(() => _statusText = "Finding the reason...");
                   break;
                 case 'stay_silent':
-                  setState(() => _statusText = "Ready");
+                  _turn.onResponseHandled();
+                  setState(() => _statusText = _kReadyNext);
                   break;
               }
             }
@@ -195,8 +268,15 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           } else if (data['type'] == 'response.audio_transcript.delta' || data['type'] == 'transcript') {
             debugPrint('[EpicVerse][AI] transcript delta: ${data['delta'] ?? data['text']}');
           } else if (data['type'] == 'input_audio_buffer.speech_started') {
+            // The backend hears the user: back to "Listening", drop any stale waiting message.
+            _turn.onSpeechStarted();
+            _cancelThinkingTimers();
+            if (mounted && _isRecording && !_isTalking) setState(() => _statusText = _kListening);
             debugPrint('[EpicVerse][STT] speech started detected by backend');
           } else if (data['type'] == 'input_audio_buffer.speech_stopped') {
+            // The backend says the user finished talking: show it right now (the mic may stay open).
+            _turn.onSpeechStopped();
+            if (mounted && !_isTalking) _startThinkingSequence();
             debugPrint('[EpicVerse][STT] speech stopped detected by backend');
           } else if (data['type'] == 'conversation.item.input_audio_transcription.completed') {
             debugPrint('[EpicVerse][STT] heard: ${data['transcript']}');
@@ -266,12 +346,14 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   void _startTalking() {
     if (!mounted || _isTalking) return;
     debugPrint('[EpicVerse][AI] AI started talking');
-    _thinkingFailsafe?.cancel();
+    _cancelThinkingTimers();
+    _turn.onResponseHandled();
 
     // Immediately kill the mic when AI starts speaking — no "end" message sent
     // so the backend doesn't commit a buffer full of echo audio.
     if (_isRecording) {
       _recordingTimer?.cancel();
+      _cancelNoSpeechTimers();
       _micSubscription?.cancel();
       _micSubscription = null;
       _audioRecorder.stop();
@@ -403,8 +485,9 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
         }
         
         if (data['status'] != null) {
-           if (_isRecording) _stopRecording(); 
-           setState(() => _statusText = "${data['status']}: ${data['message'] ?? ""}");
+           // Server-side status text is not written for players; log it, don't show it.
+           debugPrint('[EpicVerse][WS] server status "${data['status']}" (not shown)');
+           if (_isRecording) _stopRecording();
         }
       }
     } catch (e) {
@@ -670,12 +753,14 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       } catch (e, st) {
         debugPrint("CompanionReady: Handshake FAILED: $e");
         if (mounted) {
-          setState(() => _statusText = "Connection Failed");
+          setState(() => _statusText = _kConnectionFailed);
           ErrorHandler.handleError(
             e,
             stackTrace: st,
             context: context,
             screenName: 'CompanionReadyScreen',
+            // The voice screen shows its own message and "Try again" chip, not a popup.
+            showSnackBar: false,
           );
         }
         return;
@@ -687,13 +772,17 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     
     final hasPerm = await _audioRecorder.hasPermission();
     debugPrint('[EpicVerse][MIC] hasPermission=$hasPerm');
+    if (!hasPerm && mounted) {
+      setState(() => _statusText = _kMicPermission);
+      return;
+    }
     if (hasPerm && mounted) {
       setState(() {
         _isRecording = true;
         _isListeningWakeWord = false;
         // If not explicitly "Listening for follow-up...", keep it general
         if (_statusText != "Listening for follow-up...") {
-            _statusText = "Listening...";
+            _statusText = _kListening;
         }
       });
       
@@ -710,9 +799,12 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
       debugPrint('[EpicVerse][MIC] Recorder started 24kHz PCM16 mono');
       // Never leave a previous mic subscription running behind the new one.
       await _micSubscription?.cancel();
+      _micLevel.reset();
+      _turn.reset();
       _micSubscription = stream.listen((data) {
         // [AUDIT] Binary relay certified
         webSocketService.sendMessage(data);
+        _micLevel.addPcm16(data); // only used to spot a dead (muted / taken) microphone
       });
       
       // Auto-stop recording after N seconds to get the response
@@ -723,6 +815,25 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
           _stopRecording();
         }
       });
+
+      // Nobody speaking: nudge at 5 s, stop at 8 s instead of waiting the full 10. Only for a
+      // normal tap; a long-press (60 s) means the user is deliberately holding the mic open.
+      _cancelNoSpeechTimers();
+      if (timeoutSeconds <= 10) {
+        _noSpeechHintTimer = Timer(const Duration(seconds: _noSpeechHintSeconds), () {
+          if (mounted && _isRecording && !_heardSpeechThisTurn && _statusText == _kListening) {
+            setState(() => _statusText = _kStillListening);
+          }
+        });
+        if (timeoutSeconds > _noSpeechStopSeconds) {
+          _noSpeechStopTimer = Timer(const Duration(seconds: _noSpeechStopSeconds), () {
+            if (mounted && _isRecording && !_heardSpeechThisTurn) {
+              debugPrint('[EpicVerse][MIC] no speech for ${_noSpeechStopSeconds}s — stopping early');
+              _stopRecording();
+            }
+          });
+        }
+      }
     }
   }
 
@@ -766,6 +877,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     
     // Stop recording first to flush the stream
     _recordingTimer?.cancel();
+    _cancelNoSpeechTimers();
     await _audioRecorder.stop();
     // Small delay to ensure last chunks are processed
     await Future.delayed(const Duration(milliseconds: 200));
@@ -779,17 +891,37 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
     
     debugPrint('[EpicVerse][MIC] Sent {"type":"end"} → awaiting LLM');
     webSocketService.sendMessage('{"type": "end"}');
-    // Neutral until we know what the AI is actually doing — the
-    // response.output_item.added handler switches this to "Checking rules...",
-    // "Finding the reason...", or straight back to "Ready" once it's known.
-    if (mounted) setState(() => _statusText = "Thinking...");
-    _thinkingFailsafe?.cancel();
-    _thinkingFailsafe = Timer(const Duration(seconds: 6), () {
-      if (mounted && _statusText == "Thinking...") {
-        debugPrint('[EpicVerse][MIC] no backend response at all — resetting status');
-        setState(() => _statusText = "Ready");
-      }
-    });
+    // Decide what to show from what the mic AND the backend have told us this turn.
+    final outcome = _turn.onMicStopped(micLooksDead: _micLevel.micLooksDead);
+    debugPrint('[EpicVerse][MIC] stop outcome: $outcome');
+    switch (outcome) {
+      case MicStopOutcome.noSpeech:
+      case MicStopOutcome.micSilent:
+        // Nothing speech-like: say so instead of pretending the AI is working. The "end" above is
+        // still sent (the backend discards a silent buffer); if it does answer (a quiet speaker
+        // the level check missed) its events replace this message.
+        _cancelThinkingTimers();
+        if (mounted) {
+          setState(() => _statusText =
+              outcome == MicStopOutcome.micSilent ? _kMicSilent : _kNoSpeech);
+        }
+        return;
+      case MicStopOutcome.readyNext:
+        // The backend already answered (or chose silence) and nothing new was said: nothing to wait for.
+        _cancelThinkingTimers();
+        if (mounted && !_isTalking) setState(() => _statusText = _kReadyNext);
+        return;
+      case MicStopOutcome.keepThinking:
+        // speech_stopped already started the waiting sequence; make sure it is running.
+        if (!(_thinkingStuckTimer?.isActive ?? false)) _startThinkingSequence();
+        break;
+      case MicStopOutcome.startThinking:
+        // Neutral until the backend shows what it is doing — output_item.added switches this to
+        // "Checking rules..." / "Finding the reason...", or "Ready. Say the next pair".
+        // (The mic is not locked in this state, so tapping it starts a fresh turn.)
+        _startThinkingSequence();
+        break;
+    }
 
     // Optional: Keep connection alive until AI finishes speaking for smoother UX
     // We will call disconnect() in onPlayerComplete if we want a full lazy cycle.
@@ -803,7 +935,8 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _audioInterruptionSub?.cancel();
-    _thinkingFailsafe?.cancel();
+    _cancelThinkingTimers();
+    _cancelNoSpeechTimers();
     _speech.cancel();
     _micSubscription?.cancel();
     _audioRecorder.dispose();
@@ -979,7 +1112,7 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
 
                     // Connection Indicator Row (near mic button)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 8.0),
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
                       child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           mainAxisSize: MainAxisSize.min,
@@ -1000,11 +1133,35 @@ class _CompanionReadyScreenState extends State<CompanionReadyScreen> with Ticker
                               ),
                             ),
                             const SizedBox(width: 8),
-                            Text(
-                              _statusText,
-                              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+                            // Flexible + centred + 2 lines: the longer messages ("Taking longer than usual.
+                            // Tap the mic to try again") must wrap on a narrow phone, not overflow.
+                            Flexible(
+                              child: Text(
+                                _statusText,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: AppColors.textSecondary, fontSize: 15),
+                              ),
                             ),
                           ],
+                        ),
+                      ),
+
+                    // "Try again" chip for states where the user needs to start over.
+                    if (!_isRecording &&
+                        (_statusText == _kConnectionFailed ||
+                            _statusText == _kTakingLong ||
+                            _statusText == _kNoSpeech ||
+                            _statusText == _kMicSilent))
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: ActionChip(
+                          avatar: const Icon(Icons.refresh_rounded, size: 18, color: AppColors.primaryGold),
+                          label: const Text('Try again', style: TextStyle(color: AppColors.textPrimary)),
+                          backgroundColor: AppColors.surface,
+                          side: BorderSide(color: AppColors.primaryGold.withValues(alpha: 0.6)),
+                          onPressed: () => _startVoiceTurn(10),
                         ),
                       ),
 
