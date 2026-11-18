@@ -129,8 +129,10 @@ async def _authorize_otp_request(invite_code: str | None, authorization: str | N
         token = authorization.split(" ", 1)[1].strip()
         if token:
             try:
+                import asyncio
                 from firebase_admin import auth as fb_auth
-                return fb_auth.verify_id_token(token)
+                # check_revoked makes the SDK do a blocking user lookup: keep it off the event loop.
+                return await asyncio.to_thread(fb_auth.verify_id_token, token, check_revoked=True)
             except Exception as e:
                 # Type only: the library's message for a malformed token includes the token text.
                 print(f"[OTP] Bearer token rejected: {type(e).__name__}", flush=True)
@@ -627,10 +629,21 @@ async def mfa_login_verify(
 
 @router.post("/auth/mfa/logout")
 async def mfa_logout(
+    revoke_tokens: bool = False,
     current_user: dict = Depends(get_current_user),
     x_mfa_session: str | None = Header(default=None, alias="X-MFA-Session"),
 ):
-    await revoke_mfa_session(x_mfa_session, current_user.get("uid"))
+    uid = current_user.get("uid")
+    await revoke_mfa_session(x_mfa_session, uid)
+    # EV-11: an explicit logout also revokes the account's Firebase refresh tokens, so ID tokens issued before now are rejected
+    # (check_revoked). Opt-in: older apps and cleanup / kicked-session sign-outs never send it, so they never revoke account-wide.
+    if revoke_tokens and uid:
+        import asyncio
+        from firebase_admin import auth as fb_auth
+        try:
+            await asyncio.to_thread(fb_auth.revoke_refresh_tokens, uid)
+        except Exception as e:
+            print(f"[LOGOUT] Firebase token revocation failed: {type(e).__name__}", flush=True)
     return {"status": "ok"}
 
 
@@ -718,8 +731,10 @@ async def websocket_realtime(
         return
 
     try:
+        import asyncio
         from firebase_admin import auth as fb_auth
-        decoded = fb_auth.verify_id_token(resolved_token)
+        # check_revoked makes the SDK do a blocking user lookup: keep it off the event loop.
+        decoded = await asyncio.to_thread(fb_auth.verify_id_token, resolved_token, check_revoked=True)
         if decoded.get("uid") != uid:
             print(f"[WS] Auth rejected — uid mismatch (claim={_ws_safe(decoded.get('uid'))}, query={_ws_safe(uid)})", flush=True)
             await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))

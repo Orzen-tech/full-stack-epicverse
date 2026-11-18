@@ -233,15 +233,26 @@ class MfaFlow {
 
   /// Best-effort server revocation, then local clear and Firebase sign-out.
   /// Signing out always succeeds locally even if the backend is unreachable.
-  static Future<void> signOut() async {
-    if (MfaSessionManager.currentSession() != null) {
+  ///
+  /// [revokeServer] true (a real logout): the server also revokes the account's Firebase refresh tokens, for MFA and non-MFA users.
+  /// Use false for cleanup and forced sign-outs (failed login, session kicked by another device): revocation is account-wide and would
+  /// sign out the other device; only the MFA session, if any, is revoked, as before.
+  static Future<void> signOut({bool revokeServer = true}) async {
+    final request = logoutRequestFor(revokeServer: revokeServer, hasMfaSession: MfaSessionManager.currentSession() != null);
+    if (request.call) {
       try {
-        await apiClient.post('/auth/mfa/logout').timeout(const Duration(seconds: 5));
+        await apiClient.post('/auth/mfa/logout', queryParameters: request.query).timeout(const Duration(seconds: 5));
       } catch (_) {}
     }
     await MfaSessionManager.clearAll();
     await FirebaseAuth.instance.signOut();
   }
+
+  /// Whether [signOut] calls the server and with which query: a real logout always asks for Firebase token revocation; otherwise
+  /// only an existing MFA session is revoked (as before), never the account's tokens.
+  @visibleForTesting
+  static ({bool call, Map<String, dynamic>? query}) logoutRequestFor({required bool revokeServer, required bool hasMfaSession}) =>
+      (call: revokeServer || hasMfaSession, query: revokeServer ? {'revoke_tokens': 'true'} : null);
 
   static Future<({String? error, MfaChallengeOutcome? failure, int? retryAfter})> _startChallenge(
       String path, void Function(String) onId) async {

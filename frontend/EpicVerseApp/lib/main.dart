@@ -146,7 +146,7 @@ class _EpicVerseAppState extends State<EpicVerseApp> {
           ),
         );
       }
-      await MfaFlow.signOut();
+      await MfaFlow.signOut(revokeServer: false); // the newer device's session must stay valid
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
       navigatorKey.currentState?.pushAndRemoveUntil(

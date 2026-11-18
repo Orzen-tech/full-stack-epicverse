@@ -11,7 +11,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     """Extracts firebase ID token from Authorization header, validates it, and returns user dict."""
     token = credentials.credentials
     try:
-        decoded_token = auth.verify_id_token(token)
+        decoded_token = auth.verify_id_token(token, check_revoked=True)
         return decoded_token
     except Exception as e:
         # Type only: the library's message for a malformed token includes the token text.

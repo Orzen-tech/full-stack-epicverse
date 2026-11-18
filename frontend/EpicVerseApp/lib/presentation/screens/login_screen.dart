@@ -137,7 +137,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             if (!mounted) return;
             final verified = await EmailVerificationFlow.run(Navigator.of(context));
             if (!verified) {
-              await MfaFlow.signOut();
+              await MfaFlow.signOut(revokeServer: false);
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
@@ -167,7 +167,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               return;
             }
             if (!result.verified) {
-              await MfaFlow.signOut();
+              await MfaFlow.signOut(revokeServer: false);
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(

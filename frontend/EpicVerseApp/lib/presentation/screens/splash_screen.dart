@@ -163,7 +163,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
               if (!mounted) return;
               final verified = await EmailVerificationFlow.run(Navigator.of(context));
               if (!verified) {
-                await MfaFlow.signOut();
+                await MfaFlow.signOut(revokeServer: false);
                 await prefs.setBool('isLoggedIn', false);
                 if (!mounted) return;
                 Navigator.of(context).pushReplacement(
@@ -192,7 +192,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with TickerProvider
                 return;
               }
               if (!result.verified) {
-                await MfaFlow.signOut();
+                await MfaFlow.signOut(revokeServer: false);
                 await prefs.setBool('isLoggedIn', false);
                 if (!mounted) return;
                 Navigator.of(context).pushReplacement(

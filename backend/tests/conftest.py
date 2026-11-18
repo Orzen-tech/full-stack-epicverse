@@ -12,6 +12,7 @@ import pathlib
 import re
 import shutil
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -89,6 +90,11 @@ class FakeFirebase:
         self.tokens: dict[str, dict] = {}
         self.accounts_by_email: dict[str, SimpleNamespace] = {}
         self.lookup_calls = 0
+        self.revoked_uids: set[str] = set()      # refresh tokens revoked: earlier ID tokens fail when check_revoked=True
+        self.revoke_calls: list[str] = []
+        self.expired_tokens: set[str] = set()
+        self.verify_check_revoked: list[bool] = []  # the check_revoked value of every verify_id_token call
+        self.verify_threads: list[int] = []         # the thread each verify_id_token call ran on
 
     def add(self, uid: str, email: str, auth_age_seconds: int = 60) -> str:
         token = f"tok:{uid}"
@@ -96,12 +102,24 @@ class FakeFirebase:
             "uid": uid, "user_id": uid, "sub": uid, "email": email,
             "auth_time": int(time.time()) - auth_age_seconds,
         }
+        self.revoked_uids.discard(uid)  # a new sign-in after a revocation yields a valid token
         return token
 
     def verify_id_token(self, token, *args, **kwargs):
+        check_revoked = bool(kwargs.get("check_revoked", args[1] if len(args) > 1 else False))
+        self.verify_check_revoked.append(check_revoked)
+        self.verify_threads.append(threading.get_ident())
         if token in self.tokens:
+            if token in self.expired_tokens:
+                raise fb_auth.ExpiredIdTokenError("expired test token", None)
+            if check_revoked and self.tokens[token]["uid"] in self.revoked_uids:
+                raise fb_auth.RevokedIdTokenError("revoked test token")
             return dict(self.tokens[token])
         raise ValueError("invalid test token")
+
+    def revoke_refresh_tokens(self, uid, *args, **kwargs):
+        self.revoke_calls.append(uid)
+        self.revoked_uids.add(uid)
 
     def get_user_by_email(self, email, *args, **kwargs):
         self.lookup_calls += 1
@@ -135,6 +153,7 @@ def fb(monkeypatch):
     fake = FakeFirebase()
     monkeypatch.setattr(fb_auth, "verify_id_token", fake.verify_id_token)
     monkeypatch.setattr(fb_auth, "get_user_by_email", fake.get_user_by_email)
+    monkeypatch.setattr(fb_auth, "revoke_refresh_tokens", fake.revoke_refresh_tokens)
     return fake
 
 
