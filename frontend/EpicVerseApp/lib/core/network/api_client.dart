@@ -1,18 +1,25 @@
 import 'package:dio/dio.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import '../dev/local_lab.dart';
 import '../errors/app_exception.dart';
 import '../errors/error_handler.dart';
 import '../errors/error_mapper.dart';
+import '../services/network_service.dart' show networkService;
 import 'api_config.dart';
 import 'mfa_reprompt.dart';
 import 'ssl_pinning_service.dart';
 
 class ApiClient {
   late final Dio _dio;
+  final void Function(int? statusCode) _healthReporter;
 
-  ApiClient({String? baseUrl}) {
+  ApiClient({
+    String? baseUrl,
+    // Test seams only: a fake transport and a fake health sink. Production passes neither.
+    @visibleForTesting HttpClientAdapter? httpClientAdapter,
+    @visibleForTesting void Function(int? statusCode)? healthReporter,
+  }) : _healthReporter = healthReporter ?? networkService.reportBackendResponse {
     // Use pinned Dio — enforces SSL certificate validation at the Dart level,
     // independent of network_security_config.xml (which only covers OS layer).
     _dio = SslPinningService.createPinnedDio(
@@ -21,6 +28,7 @@ class ApiClient {
       receiveTimeout: const Duration(seconds: 15),
       sendTimeout: const Duration(seconds: 15),
     );
+    if (httpClientAdapter != null) _dio.httpClientAdapter = httpClientAdapter;
 
     _dio.interceptors.add(
       InterceptorsWrapper(
@@ -51,7 +59,22 @@ class ApiClient {
 
           return handler.next(options);
         },
+        onResponse: (response, handler) {
+          // A real answer proves the backend is reachable (network banner health signal).
+          final code = response.statusCode;
+          if (code != null) _reportHealth(code);
+          return handler.next(response);
+        },
         onError: (DioException e, handler) {
+          // Health signal: an HTTP answer (any status) or a connection-level failure. Only the
+          // status code is passed on; a cancelled request says nothing about the network.
+          if (e.response != null) {
+            final code = e.response!.statusCode;
+            if (code != null) _reportHealth(code);
+          } else if (e.type != DioExceptionType.cancel) {
+            _reportHealth(null);
+          }
+
           // Map and log technical error globally
           final mappedError = ErrorMapper.fromException(e);
 
@@ -70,6 +93,14 @@ class ApiClient {
         },
       ),
     );
+  }
+
+  /// Network-banner health signal. Must never affect the request it observes: any error from the
+  /// reporter is swallowed here, and the original response or exception continues unchanged.
+  void _reportHealth(int? statusCode) {
+    try {
+      _healthReporter(statusCode);
+    } catch (_) {}
   }
 
   /// Sends the request; if the backend answers MFA_SESSION_REQUIRED, asks the

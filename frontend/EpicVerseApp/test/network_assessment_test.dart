@@ -38,6 +38,16 @@ void main() {
 
   test('no internet is reported at once, even on the first miss', () {
     expect(_a(reachable: false, misses: 1, internet: false), NetworkStatus.noInternet);
-    expect(_a(internet: false), NetworkStatus.noInternet);
+    expect(_a(reachable: false, misses: 2, internet: false), NetworkStatus.noInternet);
+  });
+
+  test('backend answered: never "offline", even when the external internet/DNS check failed', () {
+    expect(_a(internet: false, latency: null), NetworkStatus.connected);
+    expect(_a(internet: false, latency: 3200), NetworkStatus.poorNetwork);
+  });
+
+  test('a backend 5xx counts like no answer (caller passes reachable: false)', () {
+    expect(_a(reachable: false, misses: 1), isNull);
+    expect(_a(reachable: false, misses: 2), NetworkStatus.serverUnreachable);
   });
 }
