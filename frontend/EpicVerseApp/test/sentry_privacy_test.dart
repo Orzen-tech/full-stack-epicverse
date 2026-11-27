@@ -18,6 +18,12 @@ void main() {
     expect(src, contains('tracesSampleRate = 1.0'));
   });
 
+  test('every event carries an environment: production only for release builds unless overridden', () {
+    final src = File('lib/main.dart').readAsLinesSync().where((l) => !l.trim().startsWith('//')).join('\n');
+    expect(src, contains("options.environment = const String.fromEnvironment('SENTRY_ENVIRONMENT',"));
+    expect(src, contains("defaultValue: kReleaseMode ? 'production' : (kProfileMode ? 'profile' : 'debug'));"));
+  });
+
   group('normalizeEndpoint', () {
     String n(String s) => LoggerService.normalizeEndpoint(s);
 

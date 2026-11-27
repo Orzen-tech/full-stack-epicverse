@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, kProfileMode, kReleaseMode;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'core/dev/local_lab.dart';
@@ -27,6 +27,10 @@ Future<void> main() async {
       options.dsn = LocalLab.active ? '' : 'https://afe194a04c6b9f969e6a9f39a9b99299@o4511507517341696.ingest.us.sentry.io/4511822514421760';
       options.sendDefaultPii = false;
       options.tracesSampleRate = 1.0;
+      // Keeps debug, profile and QA events apart from production ones. A QA build passes
+      // --dart-define=SENTRY_ENVIRONMENT=qa; without it the build mode decides.
+      options.environment = const String.fromEnvironment('SENTRY_ENVIRONMENT',
+          defaultValue: kReleaseMode ? 'production' : (kProfileMode ? 'profile' : 'debug'));
     },
     appRunner: () async {
       WidgetsFlutterBinding.ensureInitialized();

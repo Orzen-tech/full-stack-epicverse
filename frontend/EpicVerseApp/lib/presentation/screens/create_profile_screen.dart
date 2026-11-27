@@ -55,7 +55,6 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _isInviteValid = false;
-  String? _inviteFeedback;
   bool _isLoading = false;
   bool _acceptedPrivacy = false;
   bool _acceptedTerms = false;
@@ -93,49 +92,11 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
       _emailProof = widget.emailVerificationProof;
       _emailVerified = _emailController.text.isNotEmpty;
     }
-    _inviteController.addListener(_onInviteChanged);
     _emailController.addListener(_onEmailChanged);
   }
 
-  void _onInviteChanged() {
-    final text = _inviteController.text.trim();
-    if (text.length >= 6) {
-      _validateInviteCode(text);
-    } else {
-      if (mounted) {
-        setState(() {
-          _isInviteValid = false;
-          _inviteFeedback = null;
-        });
-      }
-    }
-  }
-
-  Future<void> _validateInviteCode(String code) async {
-    String rawCode = code.replaceAll(' ', '');
-    if (rawCode.startsWith('EPIC-')) rawCode = rawCode.substring(5);
-    final inviteCode = "EPIC-$rawCode";
-    try {
-      debugPrint('[EpicVerse][REG] GET /validate-invite/$inviteCode');
-      final response = await apiClient.get('/validate-invite/$inviteCode');
-      final isValid = response.statusCode == 200 && response.data['valid'] == true;
-      debugPrint('[EpicVerse][REG] Invite check status=${response.statusCode} valid=$isValid');
-      if (mounted) {
-        setState(() {
-          _isInviteValid = isValid;
-          _inviteFeedback = isValid ? "Valid code" : "Invalid invite code";
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isInviteValid = false;
-          _inviteFeedback = null;
-        });
-      }
-    }
-  }
-
+  // The invite code is checked once, on submission (below). It is deliberately not checked while it is typed: every
+  // partial code would be a failed check against the server's per-IP budget of failed invite checks.
   Future<bool> _checkInviteCodeValid(String inviteCode) async {
     try {
       final response = await apiClient.get('/validate-invite/$inviteCode');
@@ -149,7 +110,6 @@ class _CreateProfileScreenState extends ConsumerState<CreateProfileScreen> {
   void dispose() {
     _emailProof = null;
     _cooldownTimer?.cancel();
-    _inviteController.removeListener(_onInviteChanged);
     _emailController.removeListener(_onEmailChanged);
     _nameController.dispose();
     _emailController.dispose();
