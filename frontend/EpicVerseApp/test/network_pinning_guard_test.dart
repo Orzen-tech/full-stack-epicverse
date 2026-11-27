@@ -15,6 +15,8 @@ const _migratedScreens = [
   'lib/presentation/screens/settings_screen.dart',
   'lib/presentation/screens/splash_screen.dart',
 ];
+const _splash = 'lib/presentation/screens/splash_screen.dart';
+const _splashAuth = 'lib/core/security/splash_auth.dart';
 
 /// Path with Windows separators normalised to '/' so suffix checks behave
 /// identically on Windows and Unix.
@@ -50,8 +52,19 @@ void main() {
           isFalse,
           reason: 'builds backend URLs by hand',
         );
-        expect(src.contains('network/api_client.dart'), isTrue);
-        expect(src.contains('apiClient.'), isTrue);
+        if (path == _splash) {
+          // The splash reaches the backend only through SplashAuthDeps.client, whose production wiring is the
+          // pinned apiClient (splash_auth.dart, which must not build a client or a URL of its own either).
+          expect(src.contains('deps.client()'), isTrue);
+          final deps = _code(File(_splashAuth));
+          expect(deps.contains('network/api_client.dart'), isTrue);
+          expect(deps, contains('client: () => apiClient,'));
+          expect(RegExp(r'\bDio\(').hasMatch(deps), isFalse, reason: 'raw Dio() constructed');
+          expect(deps.contains('ApiConfig.'), isFalse, reason: 'builds backend URLs by hand');
+        } else {
+          expect(src.contains('network/api_client.dart'), isTrue);
+          expect(src.contains('apiClient.'), isTrue);
+        }
       });
     }
 
@@ -70,13 +83,8 @@ void main() {
       expect('/sync-user'.allMatches(settings).length, 2);
       expect(settings, contains("apiClient.delete('/user/\${user.id}')"));
       final splash = src(_migratedScreens[4]);
-      expect(splash, contains("apiClient.get('/user/\${firebaseUser.uid}')"));
-      expect(
-        splash,
-        contains(
-          "apiClient.post('/user/\${firebaseUser.uid}/cancel-deletion')",
-        ),
-      );
+      expect(splash, contains("deps.client().get('/user/\$uid')"));
+      expect(splash, contains("deps.client().post('/user/\$uid/cancel-deletion')"));
     });
   });
 
@@ -156,9 +164,11 @@ void main() {
     );
     expect(mapped.statusCode, 404);
     expect(mapped.type, AppExceptionType.notFound);
-    final splash = _code(File('lib/presentation/screens/splash_screen.dart'));
-    expect(splash, contains('on AppException catch (e)'));
-    expect(splash, contains('e.statusCode == 404'));
+    // The splash classifies failures in splash_auth.dart: only an AppException with status 404 means
+    // "incomplete signup"; anything that is not an AppException is a retry, never a missing profile.
+    final splashAuth = _code(File(_splashAuth));
+    expect(splashAuth, contains('if (error is! AppException) return SplashFailure.retry;'));
+    expect(splashAuth, contains('if (error.statusCode == 404) return SplashFailure.incompleteSignup;'));
     // a transient server error is NOT mistaken for a missing profile
     final server = ErrorMapper.fromException(
       DioException(

@@ -16,10 +16,16 @@ class MfaRequiredGate extends StatefulWidget {
     required this.rateLimited,
     required this.retryBuilder,
     this.retryAfterSeconds,
+    this.title,
+    this.message,
   });
 
   final bool rateLimited;
   final int? retryAfterSeconds;
+
+  /// Optional wording for start-up problems that are not about verification (null = the MFA wording).
+  final String? title;
+  final String? message;
 
   /// Builds the screen that re-runs the startup checks (the splash screen).
   final Widget Function() retryBuilder;
@@ -78,7 +84,7 @@ class _MfaRequiredGateState extends State<MfaRequiredGate> {
 
   @override
   Widget build(BuildContext context) {
-    final message = MfaRequiredGate.messageFor(widget.rateLimited, _cooldown > 0 ? _cooldown : 60);
+    final message = widget.message ?? MfaRequiredGate.messageFor(widget.rateLimited, _cooldown > 0 ? _cooldown : 60);
     return Scaffold(
       body: NetworkBackground(
         child: SafeArea(
@@ -90,9 +96,9 @@ class _MfaRequiredGateState extends State<MfaRequiredGate> {
                 children: [
                   Icon(Icons.verified_user_outlined, color: AppColors.primaryGold, size: 56),
                   const SizedBox(height: 16),
-                  const Text(
-                    'Verification needed',
-                    style: TextStyle(color: AppColors.textPrimary, fontSize: 22, fontWeight: FontWeight.bold),
+                  Text(
+                    widget.title ?? 'Verification needed',
+                    style: const TextStyle(color: AppColors.textPrimary, fontSize: 22, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 12),
                   Text(

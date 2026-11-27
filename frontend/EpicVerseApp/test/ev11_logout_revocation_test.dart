@@ -32,11 +32,20 @@ void main() {
     });
 
     test('failed-login cleanup in login and splash does not revoke server-side', () {
-      for (final f in ['lib/presentation/screens/login_screen.dart', 'lib/presentation/screens/splash_screen.dart']) {
-        final src = _code(f);
-        expect('MfaFlow.signOut(revokeServer: false)'.allMatches(src).length, 2, reason: f);
-        expect(src, isNot(contains('MfaFlow.signOut()')), reason: f);
-      }
+      // The login screen calls the local-only sign-out directly, twice.
+      final login = _code('lib/presentation/screens/login_screen.dart');
+      expect('MfaFlow.signOut(revokeServer: false)'.allMatches(login).length, 2);
+      expect(login, isNot(contains('MfaFlow.signOut()')));
+
+      // The splash never calls MfaFlow itself: every sign-out goes through SplashAuthDeps.signOut ...
+      final splash = _code('lib/presentation/screens/splash_screen.dart');
+      expect(splash, isNot(contains('MfaFlow.signOut(')));
+      expect(splash, contains('deps.signOut()'));
+
+      // ... and the production wiring of that dependency is the local-only form, and the only sign-out there.
+      final deps = _code('lib/core/security/splash_auth.dart');
+      expect('MfaFlow.signOut('.allMatches(deps).length, 1);
+      expect(deps, contains('signOut: () => MfaFlow.signOut(revokeServer: false)'));
     });
 
     test('deliberate sign-outs keep the default (revoking) behaviour', () {
