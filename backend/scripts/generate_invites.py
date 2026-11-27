@@ -1,6 +1,8 @@
 """Generate EpicVerse invite codes safely.
 
-Format: EPIC-XXXXXX (the app shows the "EPIC-" prefix, so users type only the 6 characters).
+Format: EPIC- plus 6 characters by default (the app shows the "EPIC-" prefix, so users type only the characters after
+it). --length (6-16) allows longer codes; do not hand out codes longer than 6 until every app build in use checks the
+code only on submission (older builds check on every keystroke, spending the per-IP budget of failed invite checks).
 Codes come from the `secrets` module (cryptographically secure), use an alphabet without the
 look-alike characters 0/O/1/I, and are one-use by default.
 
@@ -36,15 +38,16 @@ import tempfile
 
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # letters + numbers, no 0/O/1/I
 PREFIX = "EPIC-"
-SUFFIX_LEN = 6
+SUFFIX_LEN = 6  # ~30 bits with the 32-character alphabet; guessing is limited server-side (failed-check budget)
+MIN_LEN, MAX_LEN = 6, 16
 DRY_RUN_LABEL = "DRY RUN — NOT ACTIVE"
 PENDING_SUFFIX = ".pending.xlsx"
 FAILED_SUFFIX = ".COMMIT-FAILED-VERIFY-BEFORE-USE.xlsx"
 INSERT_SQL = "INSERT INTO invite_codes (code, current_uses, max_uses) VALUES ($1, 0, $2) ON CONFLICT (code) DO NOTHING"
 
 
-def generate_code(rng=secrets) -> str:
-    return PREFIX + "".join(rng.choice(ALPHABET) for _ in range(SUFFIX_LEN))
+def generate_code(rng=secrets, length: int = SUFFIX_LEN) -> str:
+    return PREFIX + "".join(rng.choice(ALPHABET) for _ in range(length))
 
 
 def normalise_code(value) -> str | None:
@@ -57,13 +60,13 @@ def normalise_code(value) -> str | None:
     return code if code.startswith(PREFIX) else PREFIX + code
 
 
-def generate_unique_codes(count: int, taken=frozenset()) -> list[str]:
+def generate_unique_codes(count: int, taken=frozenset(), length: int = SUFFIX_LEN) -> list[str]:
     """`count` distinct codes, none of them equal (after normalisation) to anything in `taken`."""
     taken_norm = {n for n in (normalise_code(c) for c in taken) if n}
     out: list[str] = []
     seen: set[str] = set()
     while len(out) < count:
-        c = generate_code()
+        c = generate_code(length=length)
         if c in seen or c in taken_norm:
             continue
         seen.add(c)
@@ -170,7 +173,8 @@ def _mark_commit_failed(paths: dict) -> None:
           "INACTIVE codes: verify them against the database before handing any out.", file=sys.stderr)
 
 
-async def insert_codes_and_write(codes: list[str], max_uses: int, extra_taken: set[str], paths: dict):
+async def insert_codes_and_write(codes: list[str], max_uses: int, extra_taken: set[str], paths: dict,
+                                 length: int = SUFFIX_LEN):
     """Additive insert in ONE transaction; the spreadsheet is written inside it (as the pending file), so a write
     failure rolls the insert back. Returns (codes, spreadsheet path)."""
     url = os.getenv("DATABASE_URL")
@@ -183,7 +187,7 @@ async def insert_codes_and_write(codes: list[str], max_uses: int, extra_taken: s
             async with conn.transaction():
                 existing = {n for n in (normalise_code(r["code"]) for r in await conn.fetch("SELECT code FROM invite_codes")) if n}
                 if existing & set(codes):  # astronomically unlikely, but never overwrite
-                    codes = generate_unique_codes(len(codes), existing | extra_taken)
+                    codes = generate_unique_codes(len(codes), existing | extra_taken, length)
                 inserted = 0
                 for c in codes:
                     res = await conn.execute(INSERT_SQL, c, max_uses)
@@ -211,6 +215,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--count", type=int, default=50, help="how many codes (default 50)")
     ap.add_argument("--max-uses", type=int, default=1, help="uses per code (default 1)")
+    ap.add_argument("--length", type=int, default=SUFFIX_LEN,
+                    help=f"characters after EPIC- (default {SUFFIX_LEN}, allowed {MIN_LEN}-{MAX_LEN})")
     ap.add_argument("--out", required=True, help="Excel file to write (keep it outside the repo)")
     ap.add_argument("--exclude", help="file of codes never to re-issue (.txt one per line, or .xlsx)")
     ap.add_argument("--apply", action="store_true", help="also INSERT the codes into the database (additive only)")
@@ -219,12 +225,14 @@ def main(argv=None) -> int:
         raise SystemExit("--count must be between 1 and 5000")
     if a.max_uses < 1:
         raise SystemExit("--max-uses must be at least 1")
+    if not MIN_LEN <= a.length <= MAX_LEN:
+        raise SystemExit(f"--length must be between {MIN_LEN} and {MAX_LEN}")
     paths = preflight(a.out, a.apply)
 
     excluded = load_exclusions(a.exclude)
-    codes = generate_unique_codes(a.count, excluded)
+    codes = generate_unique_codes(a.count, excluded, a.length)
     if a.apply:
-        codes, where = asyncio.run(insert_codes_and_write(codes, a.max_uses, excluded, paths))
+        codes, where = asyncio.run(insert_codes_and_write(codes, a.max_uses, excluded, paths, a.length))
         print(f"Inserted {len(codes)} codes into the database and wrote them to {where}")
     else:
         write_excel(codes, a.out, a.max_uses, dry_run=True)

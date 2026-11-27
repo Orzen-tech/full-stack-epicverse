@@ -27,7 +27,7 @@ def gi():
 
 def scripted(mod, monkeypatch, values):
     it = iter(values)
-    monkeypatch.setattr(mod, "generate_code", lambda rng=None: next(it))
+    monkeypatch.setattr(mod, "generate_code", lambda rng=None, length=None: next(it))
 
 
 def no_connect(mod, monkeypatch):
@@ -102,7 +102,8 @@ def test_default_rng_is_secrets_and_format_uses_the_reduced_alphabet(gi):
             self.i += 1
             return seq[self.i % len(seq)]
     code = gi.generate_code(rng=SeqRng())
-    assert code.startswith("EPIC-") and len(code) == 11 and set(code[5:]) <= set(gi.ALPHABET)
+    assert code.startswith("EPIC-") and len(code) == 5 + 6 and set(code[5:]) <= set(gi.ALPHABET)
+    assert gi.SUFFIX_LEN == 6 and len(gi.generate_code(rng=SeqRng(), length=10)) == 5 + 10
     assert not set("0O1I") & set(gi.ALPHABET)
 
 
@@ -132,6 +133,29 @@ def test_excluded_and_duplicate_values_are_never_issued(gi, monkeypatch):
     assert out == ["EPIC-FAKE01", "EPIC-FAKE02", "EPIC-FAKE03"]
 
 
+@pytest.mark.parametrize("bad", ["5", "17", "0"])
+def test_length_outside_6_to_16_is_refused_before_generation(gi, monkeypatch, tmp_path, bad):
+    no_connect(gi, monkeypatch)
+    monkeypatch.setattr(gi, "generate_code", lambda rng=None, length=None: pytest.fail("codes generated"))
+    with pytest.raises(SystemExit, match="--length must be between 6 and 16"):
+        gi.main(["--count", "2", "--length", bad, "--out", str(tmp_path / "o.xlsx")])
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("args, expected", [([], 6), (["--length", "12"], 12)])
+def test_the_requested_length_reaches_code_generation(gi, monkeypatch, tmp_path, args, expected):
+    no_connect(gi, monkeypatch)
+    seen = []
+    it = iter(FAKE)
+
+    def fake(rng=None, length=None):
+        seen.append(length)
+        return next(it)
+    monkeypatch.setattr(gi, "generate_code", fake)
+    assert gi.main(["--count", "2", "--out", str(tmp_path / "o.xlsx")] + args) == 0
+    assert seen == [expected, expected]
+
+
 # ---------------------------------------------------------------- dry run and local safety
 def test_dry_run_never_connects_and_labels_the_sheet_not_active(gi, monkeypatch, tmp_path, capsys):
     no_connect(gi, monkeypatch)
@@ -159,7 +183,7 @@ def test_refuses_to_overwrite_any_output_name(gi, monkeypatch, tmp_path, existin
 
 def test_missing_output_folder_or_database_url_stops_before_generation(gi, monkeypatch, tmp_path):
     no_connect(gi, monkeypatch)
-    monkeypatch.setattr(gi, "generate_code", lambda rng=None: pytest.fail("codes generated before the checks"))
+    monkeypatch.setattr(gi, "generate_code", lambda rng=None, length=None: pytest.fail("codes generated before the checks"))
     with pytest.raises(SystemExit, match="output folder does not exist"):
         gi.main(["--out", str(tmp_path / "nope" / "o.xlsx")])
     monkeypatch.delenv("DATABASE_URL", raising=False)

@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # it is. Supplied via Secret Manager -> Cloud Run secret-backed env var.
     OTP_RATE_LIMIT_HASH_SECRET: str = ""
 
+    # Firebase App Check on /auth/send-otp and /auth/verify-otp (Finding #4).
+    # "monitor" (default): verify and log only, never reject. "enforce": reject a
+    # missing or invalid token with 403; a verification infrastructure error is
+    # logged and allowed. Any other value behaves as "monitor".
+    APP_CHECK_MODE: str = "monitor"
+
     # MFA login challenge OTP hashing (F-09, Phase 1: field only, unused).
     # Will HMAC-hash MFA challenge OTPs once the Phase 2 MFA endpoints exist.
     # Not read by any code yet, so empty is safe during Phase 1.

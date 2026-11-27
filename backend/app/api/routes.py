@@ -36,7 +36,7 @@ from app.services.mfa_challenge import (
 from app.api.dependencies import (
     get_current_user, require_mfa_if_enabled, require_verified_mfa_user, mfa_security_error,
 )
-from app.services.app_check_monitor import log_app_check_status
+from app.services.app_check_monitor import check_app_check
 from app.api.scheduler_auth import verify_scheduler_oidc
 from app.api.admin_auth import verify_admin_user
 from app.services.otp_rate_limiter import check_otp_send_allowed, check_rate_limit, reserve_failure_slot, release_failure_slot
@@ -106,20 +106,33 @@ async def sync_user(user: UserRecord, current_user: dict = Depends(require_mfa_i
         raise HTTPException(status_code=403, detail=detail)
     return {"status": "success", "message": "User synchronized"}
 
-async def _authorize_otp_request(invite_code: str | None, authorization: str | None) -> dict | None:
+async def _authorize_otp_request(invite_code: str | None, authorization: str | None,
+                                 request: Request | None = None) -> dict | None:
     """Authorizes an OTP request via either a valid invite code (signup flow)
     or a valid Firebase ID token (login/resend flow). Raises 403 otherwise.
 
     Returns the verified token claims for the token path, so the caller can
     bind the OTP target to the signed-in account's email, and None for the
     invite path (no account exists yet to bind to).
+
+    The invite path shares /validate-invite's brute-force guard: one per-IP budget
+    of INVITE_FAILED_VALIDATIONS_PER_IP failed invite checks per window, reserved
+    before the check and refunded only when the code is valid (fail-closed).
     """
     # Path 1: signup flow — caller proves they have a valid invite.
     if invite_code:
+        if request is None:  # the guard needs the client IP; never check an invite unguarded
+            raise HTTPException(status_code=403, detail="Invalid or expired invite code")
+        allowed, retry_after, slot = await reserve_failure_slot(
+            "invite_fail", request, limit=INVITE_FAILED_VALIDATIONS_PER_IP)
+        if not allowed:
+            raise HTTPException(status_code=429, detail="Too many attempts. Please wait a few minutes.",
+                                headers={"Retry-After": str(max(retry_after, 1))})
         normalized = invite_code.strip().upper()
         if normalized and not normalized.startswith("EPIC-"):
             normalized = f"EPIC-{normalized}"
         if normalized and await validate_invite_code(normalized):
+            await release_failure_slot(slot)
             return
         # Invite code provided but invalid → reject without falling through to token check
         raise HTTPException(status_code=403, detail="Invalid or expired invite code")
@@ -158,13 +171,13 @@ async def send_otp(
     A signed-in caller can only request a code for the email address of the
     account in their own token, never for an arbitrary address.
     """
-    log_app_check_status(request, "send-otp")  # Monitor-only, see Finding #4
+    check_app_check(request, "send-otp")  # Finding #4: APP_CHECK_MODE (default monitor)
 
     identifier = norm_email(identifier or email)
     if not identifier:
         raise HTTPException(status_code=422, detail="identifier or email is required")
 
-    claims = await _authorize_otp_request(invite_code, authorization)
+    claims = await _authorize_otp_request(invite_code, authorization, request)
     if claims is not None and norm_email(claims.get("email")) != identifier:
         raise HTTPException(
             status_code=403,
@@ -214,7 +227,7 @@ async def verify_otp_route(request: Request, identifier: str = Form(None), email
     builds, off by default) does this route still mark the Firebase account
     that owns the email.
     """
-    log_app_check_status(request, "verify-otp")  # Monitor-only, see Finding #4
+    check_app_check(request, "verify-otp")  # Finding #4: APP_CHECK_MODE (default monitor)
 
     identifier = norm_email(identifier or email)
     if not identifier:
